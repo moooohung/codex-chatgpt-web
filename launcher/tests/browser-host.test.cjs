@@ -3884,4 +3884,3 @@ test("recordAccountAuthFailure and recordAccountAuthSuccess deduplicate identica
   fixture.recordAccountAuthSuccess("gamma");
   assert.equal(publishCount, 2);
 });
-

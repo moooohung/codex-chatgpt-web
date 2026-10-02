@@ -406,4 +406,3 @@ test("packaged runtime uses fast cache on subsequent calls and repairs critical 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
-
