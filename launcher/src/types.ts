@@ -4,7 +4,26 @@ import type { LimitsSnapshot } from "./limits-types";
 export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "limits" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "activity" | "limits" | "settings" | "accounts";
+
+export interface AccountItem {
+  name: string;
+  email: string;
+  tunnelId: string;
+  cooling: boolean;
+  authenticated: boolean;
+  activeTabs: number;
+  enabled?: boolean;
+  pendingRemoval?: boolean;
+  partition?: string;
+}
+
+export interface AccountAddInput {
+  name: string;
+  email: string;
+  tunnelId: string;
+  runtimeKey: string;
+}
 
 export interface LauncherState {
   version: 1;
@@ -181,6 +200,11 @@ export interface LauncherApi {
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   installUpdate(): Promise<boolean>;
+  listAccounts(): Promise<{ accounts: AccountItem[] }>;
+  addAccount(input: AccountAddInput): Promise<{ ok: boolean; name: string }>;
+  removeAccount(name: string): Promise<{ ok: boolean; deferred?: boolean }>;
+  openAccountLogin(name: string): Promise<{ ok: boolean }>;
+  toggleAccount(input: { name: string; enabled: boolean }): Promise<{ ok: boolean; name: string; enabled: boolean }>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;

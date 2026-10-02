@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { expandUserPath } from "./config";
 import { processRunning } from "./process";
+import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 export const LAUNCHER_BROWSER_IDLE_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
@@ -114,7 +115,8 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   const expectedPartition = descriptor.profile === "development"
     ? "persist:codex-web-gpt-dev-chatgpt"
     : "persist:codex-web-gpt-chatgpt";
-  if (descriptor.partition !== expectedPartition) {
+  if (descriptor.partition !== expectedPartition && !(descriptor.profile === "production"
+    && typeof descriptor.partition === "string" && /^persist:codex-web-gpt-custom-[a-f0-9]{16}-chatgpt$/.test(descriptor.partition))) {
     throw new Error("Launcher browser descriptor identifies an unexpected browser partition");
   }
   if (descriptor.idleUrl !== LAUNCHER_BROWSER_IDLE_URL) {
@@ -207,6 +209,14 @@ export async function inspectLauncherBrowserHostLiveness(
   return descriptor;
 }
 
+function pageTargetId(page: Page): string | undefined {
+  const delegate = (page as unknown as { _delegate?: { _targetId?: string } })._delegate;
+  if (typeof delegate?._targetId === "string") {
+    return delegate._targetId;
+  }
+  return undefined;
+}
+
 export async function selectLauncherPage(
   browser: Browser,
   descriptor: LauncherBrowserHostDescriptor,
@@ -225,6 +235,13 @@ export async function selectLauncherPage(
       throw new DOMException("Launcher browser connection aborted", "AbortError");
     }
     const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
+    const directMatches = candidates.filter(candidate => pageTargetId(candidate.page) === targetId);
+    if (directMatches.length === 1) {
+      return { context: directMatches[0]!.context, page: directMatches[0]!.page };
+    }
+    if (directMatches.length > 1) {
+      throw new Error(`Launcher browser host exposed ${directMatches.length} surfaces with the same ownership id`);
+    }
     // Target metadata belongs to the browser process. Evaluating every page here makes an
     // unrelated busy/paused renderer block acquisition of an already-responsive owned page.
     const inspected = await Promise.all(candidates.map(async candidate => {
@@ -498,6 +515,8 @@ function isLauncherManualTurnLease(body: Record<string, unknown>): boolean {
 
 function throwManualControlError(response: Response, body: Record<string, unknown>): never {
   const message = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
+  if (body.code === "account_unavailable") throw new ChatGptWebAdapterError(message,
+    { status: 409, errorType: "invalid_request_error", code: "account_unavailable", retryable: false });
   if (body.code === "turn_cancelled") throw new LauncherBrowserTurnCancelledError(message);
   if (body.code === "manual_turn_timed_out") throw new LauncherManualTurnTimedOutError(message);
   throw new LauncherManualTurnFailedError(message);
@@ -654,6 +673,10 @@ export async function notifyLauncherTurn(
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (body.code === "account_unavailable") throw new ChatGptWebAdapterError(
+        typeof body.error === "string" ? body.error : "No ChatGPT account is available",
+        { status: 409, errorType: "invalid_request_error", code: "account_unavailable", retryable: false },
+      );
       if (response.status === 409 && body.code === "turn_cancelled") {
         throw new LauncherBrowserTurnCancelledError(
           typeof body.error === "string" ? body.error : `Browser turn ${activity.traceId} was cancelled by the user`,
@@ -702,7 +725,8 @@ export async function notifyLauncherTurn(
     if (signal?.aborted) throw new DOMException("Launcher browser acquisition cancelled", "AbortError");
     if (controller.signal.aborted) throw new Error(`Launcher browser control ${activity.phase} timed out after ${timeoutMs}ms`);
     if (error instanceof LauncherBrowserTurnCancelledError
-      || error instanceof LauncherRetainedConversationUnavailableError) throw error;
+      || error instanceof LauncherRetainedConversationUnavailableError
+      || error instanceof ChatGptWebAdapterError) throw error;
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);

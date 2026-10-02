@@ -640,3 +640,26 @@ test("browser control server rejects malformed retained-conversation contracts",
     await server.close();
   }
 });
+
+test("unavailable accounts return a typed conflict without starting or retrying a browser turn", async () => {
+  let calls = 0;
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {} }, getPreferences: () => ({}),
+    getBrowserHost: () => ({ browserInteractionMode: () => "automatic", beginTurn() {
+      calls++;
+      const error = new Error("All accounts disabled");
+      error.code = "account_unavailable";
+      throw error;
+    } }),
+  }).start();
+  const descriptor = server.descriptor();
+  try {
+    const response = await fetch(`${descriptor.endpoint}/v1/turn/start`, {
+      method: "POST", headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ traceId: "abcdef123456", helperPid: process.pid }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).code, "account_unavailable");
+    assert.equal(calls, 1);
+  } finally { await server.close(); }
+});

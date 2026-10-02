@@ -3,6 +3,7 @@ configureWindowsTrust();
 const languages = require("./languages.json");
 const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
@@ -19,6 +20,7 @@ const {
   shell,
   Tray,
 } = require("electron");
+const { createAccountApi } = require("./account-api.cjs");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { LimitsController } = require("./limits-controller.cjs");
@@ -325,6 +327,7 @@ function createTray(logger, language) {
     tray.setToolTip(LAUNCHER_PROFILE.displayName);
     updateTrayMenu(language);
     tray.on("click", () => showMainWindow());
+    tray.on("double-click", () => showMainWindow());
     return true;
   } catch (error) {
     tray = null;
@@ -343,7 +346,13 @@ function showMainWindow() {
   mainWindowShowRequested = false;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
-  mainWindow.focus();
+  if (process.platform === "win32") {
+    mainWindow.setAlwaysOnTop(true);
+    mainWindow.focus();
+    mainWindow.setAlwaysOnTop(false);
+  } else {
+    mainWindow.focus();
+  }
 }
 
 async function openWebUrl(url) {
@@ -457,7 +466,14 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     if (windowState.fullscreen) window.setFullScreen(true);
     if (mainWindow === window) mainWindowReadyToShow = true;
     if (mainWindowShowRequested) showMainWindow();
-    else if (!startHidden) window.show();
+    else if (!startHidden) {
+      window.show();
+      if (process.platform === "win32") {
+        window.setAlwaysOnTop(true);
+        window.focus();
+        window.setAlwaysOnTop(false);
+      }
+    }
   });
   trackWindowState(window, windowStatePath, (error) => {
     logger.warn("launcher.window_state_write_failed", {
@@ -988,6 +1004,15 @@ function registerIpc({ logger, stateStore }) {
     return stateStore.update({ [key]: value === true });
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
+
+  const accountApi = createAccountApi({ profile: LAUNCHER_PROFILE, getHost: () => browserHost,
+    getSupervisor: () => runtimeSupervisor, logger });
+  handle("launcher:accounts-list", () => accountApi.list());
+  handle("launcher:account-add", (_event, input) => accountApi.add(input));
+  handle("launcher:account-remove", (_event, input) => accountApi.remove(input));
+  handle("launcher:account-login", (_event, input) => accountApi.login(input));
+  handle("launcher:account-toggle", (_event, input) => accountApi.toggle(input));
+  void runtimeStartup.then(() => accountApi.resume()).catch(error => logger.warn("account.resume_failed", { error: String(error) }));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
   handle("launcher:export-logs", async () => {
     const date = new Date().toISOString().slice(0, 10);
@@ -1093,6 +1118,12 @@ async function start() {
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
   await app.whenReady();
+  if (app.userAgentFallback) {
+    app.userAgentFallback = app.userAgentFallback
+      .replace(/Electron\/[0-9\.]+\s?/g, "")
+      .replace(/Codex Web GPT\/[0-9\.]+\s?/g, "")
+      .trim();
+  }
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
   limitsController = new LimitsController(path.join(app.getPath("userData"), "limits.json"), {
@@ -1151,6 +1182,7 @@ async function start() {
     coreHome: CORE_HOME,
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
     launcherProfile: LAUNCHER_PROFILE.kind,
+    accountProfile: { coreHome: CORE_HOME, userData: LAUNCHER_PROFILE.userData, partition: LAUNCHER_PROFILE.browserPartition },
     publishOperation,
     onConfigRead: config => {
       // Setup may read an intermediate config before rollback. The setting IPC commits
@@ -1190,6 +1222,8 @@ async function start() {
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
+    coreHome: CORE_HOME,
+    userData: LAUNCHER_PROFILE.userData,
     publishState: (state) => send("launcher:browser-state", state),
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,

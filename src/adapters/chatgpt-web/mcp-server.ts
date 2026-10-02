@@ -8,6 +8,7 @@ import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
 import { observeMcpToolCalls } from "./mcp-observation";
+import { isChatGptTokenRejection } from "./prompt";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -97,6 +98,15 @@ function requestScopeSummary(extra: McpRequestExtra): string {
   });
 }
 
+export function createGracefulTokenNoticeResult(errorDetail: string) {
+  return {
+    status: "notice",
+    guidance: "Context compaction is in progress or the active turn token was renewed. All tool calls (including codex_tool_inventory) are deferred. Do not call any further tools. Conclude your turn by outputting the summary or checkpoint text. Tool execution will automatically resume on the next turn.",
+    action_required: "conclude_summary",
+    error_detail: errorDetail,
+  };
+}
+
 function result(value: Record<string, unknown>, isError = false) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -152,6 +162,49 @@ function browserToolDescription(tool: CodexTool): string {
     return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE} This rule is enforced for wait_agent calls made inside exec; recursive raw exec is unavailable.`;
   }
   return tool.description;
+}
+
+const DELEGATION_SEND_TOOL_NAMES = new Set([
+  "send_message_to_thread",
+  "collaboration__send_message_to_thread",
+  "codex_app__send_message_to_thread",
+  "send_message",
+]);
+
+function isDelegationSendMessageTool(name: string): boolean {
+  return DELEGATION_SEND_TOOL_NAMES.has(name)
+    || name.endsWith("__send_message_to_thread")
+    || name.endsWith("__send_message");
+}
+
+function resolveDelegationSendTool(
+  environment: ChatGptTurnEnvironment,
+  contract: ChatGptMcpContract,
+): CodexTool | undefined {
+  const visible = safeVisibleTools(environment, contract);
+  return visible.find(tool => wireName(tool) === "collaboration__send_message" || wireName(tool) === "send_message" || tool.name === "send_message")
+    ?? environment.tools.find(tool => wireName(tool) === "collaboration__send_message" || wireName(tool) === "send_message" || tool.name === "send_message");
+}
+
+function normalizeDelegationSendArguments(
+  tool: CodexTool,
+  args?: Record<string, unknown>,
+  input?: string,
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = { ...(args ?? {}) };
+  if (input !== undefined && typeof normalized.message !== "string") {
+    normalized.message = input;
+  }
+  if (typeof normalized.message !== "string") {
+    const fallback = normalized.content ?? normalized.text ?? normalized.summary ?? normalized.result ?? normalized.input;
+    if (typeof fallback === "string") {
+      normalized.message = fallback;
+    }
+  }
+  if (typeof normalized.message !== "string") {
+    normalized.message = Object.keys(normalized).length > 0 ? JSON.stringify(normalized) : "Task completed.";
+  }
+  return normalized;
 }
 
 function browserToolParameters(tool: CodexTool): Record<string, unknown> {
@@ -507,7 +560,17 @@ export async function runChatGptMcpServer(options: {
     extra: McpRequestExtra,
     action: (claimed: ClaimedTurn) => Promise<T> | T,
   ): Promise<T> => {
-    const claimed = await claimTurn(toolName, turnToken, extra);
+    let claimed: ClaimedTurn;
+    try {
+      claimed = await claimTurn(toolName, turnToken, extra);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isChatGptTokenRejection(message)) {
+        console.error(`[chatgpt-web-mcp] ${toolName} intercepted token rejection; returning graceful guidance: ${message}`);
+        return result(createGracefulTokenNoticeResult(message), true) as unknown as T;
+      }
+      throw error;
+    }
     try {
       return await action(claimed);
     } finally {
@@ -798,20 +861,53 @@ export async function runChatGptMcpServer(options: {
           tool.namespace ?? "",
           tool.description,
         ].join("\n").toLowerCase().includes(needle));
-        const directPage = directMatches.slice(offset, offset + limit).map(tool => ({
-          wire_name: wireName(tool),
-          name: tool.name,
-          namespace: tool.namespace ?? null,
-          description: browserToolDescription(tool),
-          kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
-          ...(include_schema ? { parameters: browserToolParameters(tool) } : {}),
-        }));
+        const hasDirectDelegation = directMatches.some(tool => (
+          wireName(tool) === "send_message_to_thread"
+          || wireName(tool) === "collaboration__send_message"
+          || wireName(tool) === "send_message"
+        ));
+        const delegationMatched = Boolean(needle && (
+          needle.includes("thread")
+          || needle.includes("send_message")
+          || needle.includes("delegat")
+          || "send_message_to_thread".includes(needle)
+        ));
+        const virtualDelegationTools: Array<Record<string, unknown>> = (!hasDirectDelegation && delegationMatched
+          && resolveDelegationSendTool(bound, contract)) ? [{
+          wire_name: "send_message_to_thread",
+          name: "send_message_to_thread",
+          namespace: null,
+          description: "Deliver a status report, completion result, or message back to the parent delegating thread or manager.",
+          kind: "function",
+          ...(include_schema ? {
+            parameters: {
+              type: "object",
+              properties: {
+                message: { type: "string", description: "The message, completion report, or status to send back to the parent thread" },
+                thread_id: { type: "string", description: "Target parent thread ID (optional if replying to delegator)" },
+              },
+              required: ["message"],
+            },
+          } : {}),
+        }] : [];
+        const combinedDirect = [
+          ...directMatches.map(tool => ({
+            wire_name: wireName(tool),
+            name: tool.name,
+            namespace: tool.namespace ?? null,
+            description: browserToolDescription(tool),
+            kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
+            ...(include_schema ? { parameters: browserToolParameters(tool) } : {}),
+          })),
+          ...virtualDelegationTools,
+        ];
+        const directPage = combinedDirect.slice(offset, offset + limit);
         let nestedTotal = 0;
         let nestedPage: Array<Record<string, unknown>> = [];
         const gateway = execGateway(bound);
         if (gateway) {
           const excludedGatewayNames = bound.tools.map(wireName);
-          const nestedOffset = Math.max(0, offset - directMatches.length);
+          const nestedOffset = Math.max(0, offset - combinedDirect.length);
           const nestedLimit = Math.max(0, limit - directPage.length);
           const response = await invoke(claimed.bindingId, bound, gateway, {
             input: gatewayToolCatalogProgram({
@@ -842,7 +938,7 @@ export async function runChatGptMcpServer(options: {
           }));
         }
         const page = [...directPage, ...nestedPage];
-        const total = directMatches.length + nestedTotal;
+        const total = combinedDirect.length + nestedTotal;
         // A filtered registry miss does not mean deferred tools are unavailable. Expose the
         // actual native discovery entry separately; it is not a query match or an automatic call.
         const discoveryTools = needle && total === 0
@@ -909,37 +1005,47 @@ export async function runChatGptMcpServer(options: {
       }
       return withClaimedTurn("codex_tool_call", requestId, extra, async claimed => {
         const bound = claimed.environment;
-        const tool = safeVisibleTools(bound, contract)
-          .find(candidate => wireName(candidate) === wire_name);
+        let effectiveWireName = wire_name;
+        let effectiveArgs = args;
+        let tool = safeVisibleTools(bound, contract)
+          .find(candidate => wireName(candidate) === effectiveWireName);
+        if (!tool && isDelegationSendMessageTool(effectiveWireName)) {
+          const delegationTool = resolveDelegationSendTool(bound, contract);
+          if (delegationTool) {
+            tool = delegationTool;
+            effectiveWireName = wireName(delegationTool);
+            effectiveArgs = normalizeDelegationSendArguments(delegationTool, args, input);
+          }
+        }
         if (!tool) {
           const gateway = execGateway(bound);
-          const hiddenOuterTool = bound.tools.some(candidate => wireName(candidate) === wire_name);
-          if (!gateway || hiddenOuterTool || !gatewayToolNameIsValid(wire_name)) {
-            throw new Error(`Codex tool is not available in this turn: ${wire_name}`);
+          const hiddenOuterTool = bound.tools.some(candidate => wireName(candidate) === effectiveWireName);
+          if (!gateway || hiddenOuterTool || !gatewayToolNameIsValid(effectiveWireName)) {
+            throw new Error(`Codex tool is not available in this turn: ${effectiveWireName}`);
           }
-          if (input !== undefined && args && Object.keys(args).length > 0) {
-            throw new Error(`Codex nested tool ${wire_name} accepts either arguments or freeform input, not both`);
+          if (input !== undefined && effectiveArgs && Object.keys(effectiveArgs).length > 0) {
+            throw new Error(`Codex nested tool ${effectiveWireName} accepts either arguments or freeform input, not both`);
           }
-          if (isGatewayAgentWaitTool(wire_name) && input !== undefined) {
+          if (isGatewayAgentWaitTool(effectiveWireName) && input !== undefined) {
             throw new Error(`ChatGPT Web wait_agent requires structured arguments and timeout_ms=${CHATGPT_WEB_AGENT_WAIT_POLL_MS}`);
           }
-          const invocationArguments = args ?? {};
-          assertGatewayToolArguments(wire_name, invocationArguments);
+          const invocationArguments = effectiveArgs ?? {};
+          assertGatewayToolArguments(effectiveWireName, invocationArguments);
           return invoke(claimed.bindingId, bound, gateway, {
-            input: execGatewayProgram(wire_name, input !== undefined, {
+            input: execGatewayProgram(effectiveWireName, input !== undefined, {
               ...(input !== undefined ? { input } : { arguments: invocationArguments }),
             }, bound.tools.map(wireName)),
           }, extra.signal);
         }
         if (tool.freeform) {
-          if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
-          if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
+          if (input === undefined) throw new Error(`Freeform Codex tool ${effectiveWireName} requires input`);
+          if (effectiveArgs && Object.keys(effectiveArgs).length > 0) throw new Error(`Freeform Codex tool ${effectiveWireName} does not accept arguments`);
           return invoke(claimed.bindingId, bound, tool, {
             input: tool === execGateway(bound) ? transportBoundRawExecProgram(input, wireName(tool)) : input,
           }, extra.signal);
         }
-        if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
-        const invocationArguments = args ?? {};
+        if (input !== undefined) throw new Error(`Function Codex tool ${effectiveWireName} does not accept freeform input`);
+        const invocationArguments = effectiveArgs ?? {};
         assertBrowserToolArguments(tool, invocationArguments);
         return invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
       });

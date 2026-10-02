@@ -13,6 +13,7 @@ import {
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { AccountsSurface } from "./AccountsSurface";
 import { LimitsSurface } from "./LimitsSurface";
 import { limitsCopyFor } from "./limits-copy";
 import { useLimits } from "./useLimits";
@@ -611,6 +612,12 @@ function LauncherShell({
                     navigateSurface("mcp");
                   }}
                 />
+                <SidebarItem
+                  active={surface === "accounts"}
+                  icon="user"
+                  label={copy.accounts}
+                  onClick={() => navigateSurface("accounts")}
+                />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
@@ -731,6 +738,13 @@ function LauncherShell({
                 setError={setError}
                 snapshot={snapshot}
                 updateState={updateState}
+              />
+            ) : null}
+            {surface === "accounts" ? (
+              <AccountsSurface
+                copy={copy}
+                setError={setError}
+                snapshot={snapshot}
               />
             ) : null}
           </motion.div>

@@ -1,8 +1,10 @@
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { accountNameForTab, accountPaths, readAccountConfig, selectAccount } = require("./account-policy.cjs");
 const {
   runBrowserHelperOperation,
   verifyConnectorWithBrowserHelper,
@@ -34,7 +36,7 @@ const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
 const MAX_CANCELLED_TURN_TRACES = 256;
 const MANUAL_SUBMIT_TIMEOUT_MS = 60_000;
-const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
+const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 600_000;
 const MAX_MANUAL_TERMINAL_SIGNALS = 256;
 const MAX_MANUAL_PROMPT_CHARS = 1_000_000;
 const INTERACTION_MODE_CHANGE_OPERATION = "browser interaction mode change";
@@ -314,6 +316,8 @@ class BrowserHost {
     loginWithPasskey,
     partition = "persist:codex-web-gpt-chatgpt",
     profile = "production",
+    coreHome,
+    userData,
     publishState,
     showWindow = () => {},
     clipboardApi = clipboard,
@@ -341,9 +345,13 @@ class BrowserHost {
     const expectedPartition = profile === "development"
       ? "persist:codex-web-gpt-dev-chatgpt"
       : "persist:codex-web-gpt-chatgpt";
-    if (partition !== expectedPartition) throw new Error("Browser host partition does not match its profile");
+    if (partition !== expectedPartition && !(profile === "production" && /^persist:codex-web-gpt-custom-[a-f0-9]{16}-chatgpt$/.test(partition))) throw new Error("Browser host partition does not match its profile");
     this.partition = partition;
     this.profile = profile;
+    this.accountPaths = accountPaths({ coreHome, userData, partition });
+    this.accountConfigPresent = fs.existsSync(this.accountPaths.config);
+    this.pendingRemovalAccounts = new Set(Object.entries(readAccountConfig(this.accountPaths.config).accounts).filter(([, acc]) => acc.pendingRemoval).map(([name]) => name));
+    this.accountCleanup = new Map();
     this.publishState = publishState;
     this.showWindow = showWindow;
     this.clipboard = clipboardApi;
@@ -361,6 +369,11 @@ class BrowserHost {
     this.manualCompletionSignals = new Map();
     this.interactionModeOverride = null;
     this.selectedTabId = "home";
+    this.accountPool = this.loadAccountPool();
+    this.disabledAccounts = this.loadDisabledAccounts();
+    this.accountRoundRobinIndex = 0;
+    this.stickyConversations = this.loadStickyMap();
+    this.accountStatuses = new Map();
     this.manualOperation = null;
     this.loginOperation = null;
     this.sessionRefreshOperation = null;
@@ -443,6 +456,11 @@ class BrowserHost {
     try {
       await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
       if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
+      void this.auditAllAccountCookies().catch((error) => {
+        this.logger.warn("browser.account_cookie_audit_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
     } finally {
       this.syncViewVisibility();
     }
@@ -522,7 +540,7 @@ class BrowserHost {
     const snapshot = {
       id: tab.id,
       traceId: tab.traceId,
-      title: tab.label,
+      title: accountNameForTab(tab) ? `${accountNameForTab(tab)} - ${tab.label}` : tab.label,
       status: tab.status,
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
@@ -540,26 +558,87 @@ class BrowserHost {
     return snapshot;
   }
 
+  loadAccountPool() {
+    return Object.keys(readAccountConfig(this.accountPaths.config).accounts);
+  }
+
+  loadDisabledAccounts() {
+    return new Set(Object.entries(readAccountConfig(this.accountPaths.config).accounts)
+      .filter(([, account]) => account.enabled === false).map(([name]) => name));
+  }
+
+  loadStickyMap() {
+    const stickyPath = this.accountPaths.sticky;
+    if (!fs.existsSync(stickyPath)) return new Map();
+    try {
+      const raw = JSON.parse(fs.readFileSync(stickyPath, "utf8"));
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid conversation bindings");
+      return new Map(Object.entries(raw).filter(([, name]) => typeof name === "string"));
+    } catch (error) {
+      this.stickyLoadFailed = true;
+      this.logger?.warn?.("browser.sticky_config_invalid", { error: String(error) });
+      return new Map();
+    }
+  }
+
+  saveStickyMap() {
+    if (this.stickyLoadFailed) throw new Error("Conversation bindings are corrupt; original preserved");
+    writePrivateFileAtomic(this.accountPaths.sticky, JSON.stringify(Object.fromEntries(this.stickyConversations), null, 2));
+  }
+
+  resolveAccountForConversation(conversationKey) {
+    return selectAccount({ pool: this.accountPool, configured: this.accountConfigPresent,
+      disabled: this.disabledAccounts, pending: this.pendingRemovalAccounts, statuses: this.accountStatuses,
+      tabs: [...(this.turnTabs?.values() || [])], bound: this.stickyConversations?.get(conversationKey),
+      roundRobin: this.accountRoundRobinIndex || 0 });
+  }
+
+  commitAccountBinding(conversationKey, name) {
+    if (!name) return;
+    this.accountRoundRobinIndex = (this.accountRoundRobinIndex || 0) + 1;
+    if (conversationKey && this.stickyConversations.get(conversationKey) !== name) {
+      this.stickyConversations.set(conversationKey, name);
+      this.saveStickyMap();
+    }
+  }
+
+  allocateTabOrdinal() {
+    if (this.turnTabs.size >= MAX_BROWSER_TABS && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
+      const error = new Error(`ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`);
+      error.code = "browser_tab_limit";
+      throw error;
+    }
+    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_, index) => index + 1)
+      .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
+    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
+    return ordinal;
+  }
+
+  isAccountBusy(name) {
+    return [...this.turnTabs.values()].some(tab => accountNameForTab(tab) === name && tab.status === "running")
+      || [...(this.accountCleanup?.values() || [])].some(tab => accountNameForTab(tab) === name);
+  }
+
   selectedTurnTab() {
     return this.turnTabs.get(this.selectedTabId) || null;
   }
 
   async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal) {
     signal?.throwIfAborted();
-    if (this.turnTabs.size >= MAX_BROWSER_TABS
-      && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
-      throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
-      );
-    }
+    const assignedAccount = BrowserHost.prototype.resolveAccountForConversation.call(this, conversationKey);
+    const ordinal = BrowserHost.prototype.allocateTabOrdinal.call(this);
     const id = randomBytes(12).toString("base64url");
     const surfaceId = randomBytes(24).toString("base64url");
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
-      .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
-    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
+    const assignedPartition = assignedAccount
+      ? this.accountPaths.partition(assignedAccount)
+      : this.partition;
+    try {
+      const partSession = session.fromPartition(assignedPartition);
+      this.configureLocalePreferences(partSession);
+    } catch {}
     const view = new WebContentsView({
       webPreferences: {
-        partition: this.partition,
+        partition: assignedPartition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -572,6 +651,7 @@ class BrowserHost {
       surfaceId,
       traceId,
       conversationKey,
+      accountName: assignedAccount,
       connectorIdentity,
       connectorBound: false,
       helperPid,
@@ -600,6 +680,8 @@ class BrowserHost {
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
     await this.initializeTurnTab(tab, signal);
+    try { this.commitAccountBinding(conversationKey, tab.accountName); }
+    catch (error) { this.removeTurnTab(tab, false); throw error; }
     return tab;
   }
 
@@ -635,19 +717,19 @@ class BrowserHost {
   }
 
   createManualTurnTab(traceId, helperPid, conversationKey, prompt, manualSubmitTimeoutMs) {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS
-      && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
-      throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
-      );
-    }
+    const assignedAccount = BrowserHost.prototype.resolveAccountForConversation.call(this, conversationKey);
+    const ordinal = BrowserHost.prototype.allocateTabOrdinal.call(this);
     const id = randomBytes(12).toString("base64url");
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
-      .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
-    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
+    const assignedPartition = assignedAccount
+      ? this.accountPaths.partition(assignedAccount)
+      : this.partition;
+    try {
+      const partSession = session.fromPartition(assignedPartition);
+      this.configureLocalePreferences(partSession);
+    } catch {}
     const view = new WebContentsView({
       webPreferences: {
-        partition: this.partition,
+        partition: assignedPartition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -660,6 +742,7 @@ class BrowserHost {
       surfaceId: null,
       traceId,
       conversationKey,
+      accountName: assignedAccount,
       connectorIdentity: null,
       connectorBound: false,
       helperPid,
@@ -693,6 +776,8 @@ class BrowserHost {
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindManualTurnContents(tab);
+    try { this.commitAccountBinding(conversationKey, tab.accountName); }
+    catch (error) { this.removeTurnTab(tab, false); throw error; }
     void this.initializeManualTurnTab(tab);
     return tab;
   }
@@ -738,7 +823,7 @@ class BrowserHost {
 
   evictOldestRetainedTurnTab() {
     const retained = [...this.turnTabs.values()]
-      .filter(tab => tab.status === "ready")
+      .filter(tab => tab.status === "ready" && !tab.isSignInTab)
       .sort((left, right) => (left.lastHeartbeatAt ?? 0) - (right.lastHeartbeatAt ?? 0))[0];
     if (!retained) return false;
     this.removeTurnTab(retained, false);
@@ -795,6 +880,10 @@ class BrowserHost {
     const contents = tab.view.webContents;
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
+        if (tab.isSignInTab) {
+          void contents.loadURL(url).catch(() => {});
+          return { action: "deny" };
+        }
         this.markTurnAuthenticationRequired(tab);
         return { action: "deny" };
       }
@@ -805,6 +894,7 @@ class BrowserHost {
     });
     const blockAuthenticationNavigation = (event, url, _inPlace, mainFrame) => {
       if (mainFrame === false || !allowedAuthUrl(url)) return;
+      if (tab.isSignInTab) return;
       event.preventDefault();
       this.markTurnAuthenticationRequired(tab);
     };
@@ -893,15 +983,117 @@ class BrowserHost {
     });
   }
 
+  recordAccountAuthFailure(accountName) {
+    if (!accountName) return;
+    const now = Date.now();
+    if (!this.accountStatuses) this.accountStatuses = new Map();
+    const existing = this.accountStatuses.get(accountName);
+    if (existing && existing.authenticated === false && existing.cooldownUntil && existing.cooldownUntil > now) {
+      return;
+    }
+    this.accountStatuses.set(accountName, {
+      authenticated: false,
+      cooldownUntil: now + 30 * 60 * 1000,
+    });
+    const pool = this.accountPool && this.accountPool.length > 0 ? this.accountPool : [accountName];
+    const anyAvailable = pool.some(acc => {
+      if (this.disabledAccounts?.has(acc) || this.pendingRemovalAccounts?.has(acc)) return false;
+      const s = this.accountStatuses.get(acc);
+      return s?.authenticated !== false && (!s?.cooldownUntil || s.cooldownUntil <= now);
+    });
+    if (anyAvailable && pool.length > 1) {
+      this.logger?.warn?.("browser.account_auth_failed_failover_active", { account: accountName });
+      this.setState?.({
+        authenticated: true,
+        status: "ready",
+        message: `Account [${accountName}] sign-in required. Other accounts active.`,
+      });
+    } else {
+      this.reauthenticationRequired = true;
+      this.authenticationRevision = (this.authenticationRevision ?? 0) + 1;
+      this.setState?.({
+        authenticated: false,
+        status: "signed-out",
+        message: "Sign in to ChatGPT",
+      });
+    }
+    this.writeDescriptor?.();
+  }
+
+  recordAccountAuthSuccess(accountName) {
+    if (!accountName) return;
+    if (!this.accountStatuses) this.accountStatuses = new Map();
+    const existing = this.accountStatuses.get(accountName);
+    if (existing && existing.authenticated === true && (!existing.cooldownUntil || existing.cooldownUntil <= 0)) {
+      return;
+    }
+    this.accountStatuses.set(accountName, {
+      authenticated: true,
+      cooldownUntil: 0,
+    });
+    if (this.disabledAccounts?.has(accountName) || this.pendingRemovalAccounts?.has(accountName)) return;
+    this.reauthenticationRequired = false;
+    this.setState?.({
+      authenticated: true,
+      status: "ready",
+      message: `Account [${accountName}] signed in. ChatGPT is ready.`,
+    });
+    this.writeDescriptor?.();
+  }
+
+  async auditAccountCookie(accountName) {
+    if (!accountName) return false;
+    const now = Date.now();
+    try {
+      const sessionApi = this.session || session;
+      const partSession = sessionApi?.fromPartition?.(this.accountPaths.partition(accountName));
+      if (!partSession || !partSession.cookies) {
+        return false;
+      }
+      const cookies = await partSession.cookies.get({ url: CHATGPT_ORIGIN });
+      const sessionCookie = cookies?.find(c => c.name && c.name.includes("session-token"));
+      const hasValidSession = Boolean(
+        sessionCookie &&
+        sessionCookie.value &&
+        sessionCookie.value.length > 10 &&
+        (sessionCookie.expirationDate === undefined
+          || (Number.isFinite(sessionCookie.expirationDate) && sessionCookie.expirationDate * 1000 > now))
+      );
+
+      if (hasValidSession) {
+        this.recordAccountAuthSuccess(accountName);
+        return true;
+      } else {
+        this.recordAccountAuthFailure(accountName);
+        return false;
+      }
+    } catch (err) {
+      this.logger?.warn?.("browser.audit_account_cookie_error", { account: accountName, error: String(err) });
+      return false;
+    }
+  }
+
+  async auditAllAccountCookies() {
+    for (const account of this.accountPool || []) {
+      if (!this.disabledAccounts?.has(account) && !this.pendingRemovalAccounts?.has(account)) await this.auditAccountCookie(account);
+    }
+  }
+
   markTurnAuthenticationRequired(tab) {
+    tab.accountName = accountNameForTab(tab);
     tab.authenticationRequired = true;
     tab.loading = false;
-    tab.message = "ChatGPT requested sign-in. Open sign in in the launcher, then retry.";
-    this.reauthenticationRequired = true;
-    // Invalidate any session read that started before this explicit redirect.
-    this.authenticationRevision = (this.authenticationRevision ?? 0) + 1;
-    this.setState({ authenticated: false, status: "signed-out", message: tab.message });
-    this.logger.warn("browser.turn_authentication_blocked", { tabId: tab.id, traceId: tab.traceId });
+    tab.message = tab.accountName
+      ? `ChatGPT sign-in required for [${tab.accountName}]. Open sign in in the launcher, then retry.`
+      : "ChatGPT requested sign-in. Open sign in in the launcher, then retry.";
+    if (tab.accountName) {
+      this.recordAccountAuthFailure(tab.accountName);
+    } else {
+      this.reauthenticationRequired = true;
+      this.authenticationRevision = (this.authenticationRevision ?? 0) + 1;
+      this.setState({ authenticated: false, status: "signed-out", message: tab.message });
+    }
+    this.logger.warn("browser.turn_authentication_blocked", { account: tab.accountName, tabId: tab.id, traceId: tab.traceId });
   }
 
   async markTurnTabSurface(tab) {
@@ -1266,9 +1458,31 @@ class BrowserHost {
           await this.probeAuthentication();
           continue;
         }
+        if (this.accountPool && this.accountPool.length > 0) {
+          let anyAuthed = false;
+          for (const acc of this.accountPool) {
+            try {
+              if (this.disabledAccounts?.has(acc) || this.pendingRemovalAccounts?.has(acc)) continue;
+              const partSession = session.fromPartition(this.accountPaths.partition(acc));
+              const res = await readChatGptAuthSession(partSession.fetch.bind(partSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+              if (res.sessionAuthenticated) {
+                anyAuthed = true;
+                this.recordAccountAuthSuccess(acc);
+              }
+            } catch {}
+          }
+          if (this.destroyed || browserInteractionModeFor(this) !== "automatic") return;
+          if (revision !== this.authenticationRevision) continue;
+          if (this.reauthenticationRequired) return;
+          const availability = this.activeTraceId || this.manualOperation ? {} : anyAuthed
+            ? { status: "ready", message: "ChatGPT is ready" }
+            : { status: "signed-out", message: "Sign in to ChatGPT" };
+          this.setState({ ...availability, authenticated: anyAuthed });
+          continue;
+        }
         // The idle host has no ChatGPT document; use its shared browser session.
-        const session = contents.session;
-        const result = await readChatGptAuthSession(session.fetch.bind(session), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+        const defaultSession = contents.session;
+        const result = await readChatGptAuthSession(defaultSession.fetch.bind(defaultSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
         if (this.destroyed || browserInteractionModeFor(this) !== "automatic") return;
         if (revision !== this.authenticationRevision) continue;
         if (this.reauthenticationRequired) return;
@@ -2173,6 +2387,10 @@ class BrowserHost {
       throw new Error(`Manual ChatGPT conversation ${conversationKey} owns multiple browser tabs`);
     }
     let tab = retained[0];
+    if (tab && this.resolveAccountForConversation(conversationKey) !== accountNameForTab(tab)) {
+      this.removeTurnTab(tab, false);
+      tab = undefined;
+    }
     if (tab) {
       if (typeof resumePrompt !== "string" || !resumePrompt) {
         throw new Error("A retained Zero Risk conversation requires an incremental resume prompt");
@@ -2216,11 +2434,11 @@ class BrowserHost {
     this.logger.info("browser.manual_turn_started", {
       tabId: tab.id,
       traceId,
-      reused: retained.length === 1,
+      reused: Boolean(tab.manualConversationReused),
     });
     return {
       tabId: tab.id,
-      reused: retained.length === 1,
+      reused: Boolean(tab.manualConversationReused),
       deadlineAt: new Date(tab.manualDeadlineAt).toISOString(),
       state: tab.manualState,
     };
@@ -2433,8 +2651,12 @@ class BrowserHost {
     if (retainedMatches.length > 1) {
       throw new Error(`ChatGPT retained conversation ${conversationKey} owns multiple browser tabs`);
     }
-    const exactRetained = retainedMatches[0];
-    if (sameTrace?.status === "ready" && sameTrace !== exactRetained) {
+    let exactRetained = retainedMatches[0];
+    if (exactRetained && this.resolveAccountForConversation(conversationKey) !== accountNameForTab(exactRetained)) {
+      this.removeTurnTab(exactRetained, false);
+      exactRetained = undefined;
+    }
+    if (sameTrace?.status === "ready" && this.turnTabs.has(sameTrace.id) && sameTrace !== exactRetained) {
       throw new Error(`ChatGPT browser turn ${traceId} is retained under different conversation metadata`);
     }
     const existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
@@ -2465,9 +2687,15 @@ class BrowserHost {
       if (!existing.view.webContents.isDestroyed()) {
         existing.view.webContents.setBackgroundThrottling(false);
       }
-      this.selectedTabId = existing.id;
-      if (reveal) this.show();
-      else this.syncViewVisibility();
+      if (reveal) {
+        this.selectedTabId = existing.id;
+        this.show();
+      } else if (this.selectedTabId === "home" || !this.turnTabs.has(this.selectedTabId)) {
+        this.selectedTabId = existing.id;
+        this.syncViewVisibility();
+      } else {
+        this.presentTurnView(existing, false);
+      }
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
@@ -2484,9 +2712,15 @@ class BrowserHost {
       throw error;
     }
     const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal);
-    this.selectedTabId = tab.id;
-    if (reveal) this.show();
-    else this.syncViewVisibility();
+    if (reveal) {
+      this.selectedTabId = tab.id;
+      this.show();
+    } else if (this.selectedTabId === "home" || !this.turnTabs.has(this.selectedTabId)) {
+      this.selectedTabId = tab.id;
+      this.syncViewVisibility();
+    } else {
+      this.presentTurnView(tab, false);
+    }
     this.publishState?.(this.snapshot());
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
     this.writeDescriptor();
@@ -2558,6 +2792,143 @@ class BrowserHost {
       status: this.state.authenticated ? "ready" : "signed-out",
       message: this.state.authenticated ? "No active task" : "Sign in to ChatGPT",
     });
+  }
+
+  openAccountLoginTab(targetAccount) {
+    const pool = this.accountPool || [];
+    const account = targetAccount || pool[0];
+    if (!account || !pool.includes(account) || this.pendingRemovalAccounts?.has(account)) {
+      const error = new Error("Account is unavailable for sign-in");
+      error.code = "account_unavailable";
+      throw error;
+    }
+
+    for (const [id, tab] of this.turnTabs.entries()) {
+      if (accountNameForTab(tab) === account && (tab.isSignInTab || tab.authenticationRequired) && tab.status !== "running") {
+        this.selectTab(id);
+        this.show();
+        return tab;
+      }
+    }
+
+    const id = randomBytes(12).toString("base64url");
+    const ordinal = this.allocateTabOrdinal();
+    const assignedPartition = this.accountPaths.partition(account);
+    try {
+      const partSession = session.fromPartition(assignedPartition);
+      this.configureLocalePreferences(partSession);
+    } catch {}
+
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: assignedPartition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: true,
+        backgroundThrottling: false,
+      },
+    });
+
+    const tab = {
+      id,
+      surfaceId: null,
+      traceId: `login-${account}-${Date.now().toString(36)}`,
+      conversationKey: `login-${account}`,
+      connectorIdentity: null,
+      connectorBound: false,
+      helperPid: process.pid,
+      view,
+      accountName: account,
+      status: "ready",
+      ordinal,
+      label: "ChatGPT",
+      pageTitle: "ChatGPT",
+      url: "https://chatgpt.com/?temporary-chat=true",
+      loading: true,
+      message: `Sign in to ChatGPT for [${account}]`,
+      interactionMode: "manual",
+      bootstrapReady: false,
+      rendererReady: false,
+      lastHeartbeatAt: Date.now(),
+      closable: true,
+      isSignInTab: true,
+    };
+
+    this.turnTabs.set(id, tab);
+    this.window.contentView.addChildView(view);
+    view.webContents.setZoomFactor(this.state.zoomFactor);
+    this.bindShellZoomShortcuts(view.webContents);
+    this.bindTurnContents(tab);
+
+    void view.webContents.loadURL("https://chatgpt.com/?temporary-chat=true").catch(() => {});
+    this.selectedTabId = id;
+    if (this.window && !this.window.isDestroyed()) {
+      if (this.window.isMinimized()) this.window.restore();
+      this.window.show();
+      this.window.setAlwaysOnTop(true);
+      this.window.focus();
+      this.window.setAlwaysOnTop(false);
+    }
+    this.show();
+    this.syncViewVisibility();
+    this.publishState?.(this.snapshot());
+    this.writeDescriptor();
+    return tab;
+  }
+
+  addAccountToPool(accountName) {
+    this.accountConfigPresent = true;
+    if (!this.accountPool) this.accountPool = [];
+    if (!this.accountPool.includes(accountName)) {
+      this.accountPool.push(accountName);
+    }
+    void this.refreshAuthenticationFromSession();
+  }
+
+  setAccountEnabled(accountName, enabled) {
+    if (!accountName) return;
+    if (!this.disabledAccounts) this.disabledAccounts = new Set();
+    if (enabled) {
+      this.disabledAccounts.delete(accountName);
+    } else {
+      this.disabledAccounts.add(accountName);
+    }
+    this.publishState?.(this.snapshot());
+    this.writeDescriptor?.();
+  }
+
+  async removeAccountFromPool(accountName) {
+    if (this.isAccountBusy(accountName)) return false;
+    for (const tab of [...this.turnTabs.values()]) {
+      if (accountNameForTab(tab) !== accountName) continue;
+      const contents = tab.view.webContents;
+      if (!contents.isDestroyed()) {
+        this.accountCleanup ??= new Map();
+        this.accountCleanup.set(tab.id, tab);
+        contents.once("destroyed", () => this.accountCleanup.delete(tab.id));
+      }
+      this.removeTurnTab(tab, false);
+      if (contents.isDestroyed()) this.accountCleanup?.delete(tab.id);
+    }
+    if (this.isAccountBusy(accountName)) return false;
+    this.accountPool = (this.accountPool || []).filter(name => name !== accountName);
+    this.accountStatuses?.delete(accountName);
+    this.disabledAccounts?.delete(accountName);
+    for (const [key, name] of this.stickyConversations || []) {
+      if (name === accountName) this.stickyConversations.delete(key);
+    }
+    this.saveStickyMap();
+    await this.refreshAuthenticationFromSession();
+    return true;
+  }
+
+  async clearAccountSession(name) {
+    if (this.isAccountBusy(name)) throw new Error("Account browser cleanup is still pending");
+    const accountSession = (this.session || session).fromPartition(this.accountPaths.partition(name));
+    await accountSession.clearStorageData();
+    accountSession.flushStorageData();
+    await accountSession.cookies.flushStore();
   }
 
   openLogin() {
@@ -3081,11 +3452,32 @@ class BrowserHost {
   }
 
   async persistSession() {
+    const sessionsToFlush = new Set();
     const contents = this.view?.webContents;
-    if (!contents || contents.isDestroyed()) return;
-    const browserSession = contents.session;
-    browserSession.flushStorageData();
-    await browserSession.cookies.flushStore();
+    if (contents && !contents.isDestroyed()) {
+      sessionsToFlush.add(contents.session);
+    }
+    if (this.turnTabs) {
+      for (const tab of this.turnTabs.values()) {
+        const tabContents = tab.view?.webContents;
+        if (tabContents && !tabContents.isDestroyed()) {
+          sessionsToFlush.add(tabContents.session);
+        }
+      }
+    }
+    const pool = this.accountPool || [];
+    for (const acc of pool) {
+      try {
+        const s = session.fromPartition(this.accountPaths.partition(acc));
+        if (s) sessionsToFlush.add(s);
+      } catch {}
+    }
+    for (const s of sessionsToFlush) {
+      try {
+        s.flushStorageData();
+        await s.cookies.flushStore();
+      } catch {}
+    }
   }
 
   destroy() {

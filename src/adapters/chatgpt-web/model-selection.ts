@@ -13,9 +13,9 @@ function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWeb
 
 function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
   return menu.menu.getByRole("menuitemradio", {
-    name: family === "5.6" ? /^GPT[-\s]?5\.6\s+Sol(?:\s+Pro)?$/i
+    name: family === "5.6" ? /^GPT[-\s]?5\.6(?:\s+Sol)?(?:\s*(?:\(Web\)|\(웹\)))?(?:\s+Pro)?$/i
       // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
-      : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i,
+      : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?)(?:\s*(?:\(Web\)|\(웹\)))?(?:\s+Pro)?$/i,
     exact: true,
     includeHidden: true,
   });
@@ -102,7 +102,10 @@ export async function assertChatGptModelFamily(
       (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
         .map(id => element.ownerDocument.getElementById(id)?.textContent ?? "")
     ));
-    if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
+    const targetValue = Math.min(state?.max ?? ((state?.min ?? 0) + effortIndex), (state?.min ?? 0) + effortIndex);
+    const effortMatches = Boolean(state && (state.value === state.min + effortIndex || state.value === targetValue));
+    const modelFamilyDescriptions = descriptions.filter(text => /^(?:GPT[-\s]?)?\d+(?:\.\d+)?/i.test(text.replace(/\s+/g, " ").trim()));
+    if (checked && state && effortMatches && (modelFamilyDescriptions.length === 0 || chatGptModelFamilyMatches(modelFamilyDescriptions, family, effort))) return;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   } while (true);

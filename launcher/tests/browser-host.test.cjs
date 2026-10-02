@@ -25,9 +25,9 @@ const {
   navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
 
-test("manual prompt handoff keeps ordinary turns at one minute and compaction at two minutes", () => {
+test("manual prompt handoff keeps ordinary turns at one minute and compaction extended to ten minutes", () => {
   assert.equal(MANUAL_SUBMIT_TIMEOUT_MS, 60_000);
-  assert.equal(MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS, 120_000);
+  assert.equal(MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS, 600_000);
 });
 
 test("Electron and Bun agree on the exact launcher idle surface", () => {
@@ -3018,6 +3018,7 @@ function manualTurnFixture() {
     clipboard: { writeText: value => clipboardWrites.push(value) },
     logger: { info() {}, warn() {}, error() {} },
     publishState() {},
+    saveStickyMap() {},
     snapshot() {
       return {
         tabs: [...this.turnTabs.values()].map(tab => BrowserHost.prototype.tabSnapshot.call(this, tab)),
@@ -3086,7 +3087,7 @@ test("manual confirmation deadlines end at Sent so slow model startup can still 
   const ordinaryTab = fixture.turnTabs.get(ordinary.tabId);
   const compactionTab = fixture.turnTabs.get(compaction.tabId);
   assert.equal(ordinaryTab.manualSubmitTimeoutMs, 60_000);
-  assert.equal(compactionTab.manualSubmitTimeoutMs, 120_000);
+  assert.equal(compactionTab.manualSubmitTimeoutMs, 600_000);
   t.mock.timers.tick(31_000);
   assert.equal(ordinaryTab.manualState, "awaiting-user");
   t.mock.timers.tick(29_000);
@@ -3700,3 +3701,187 @@ test("off-on-off fresh conversation changes retire completed history before it c
     assert.equal(fixture.turnTabs.get(manual.id), savedChats ? undefined : manual);
   }
 });
+
+test("account pool round-robin, sticky binding, and cooling failover", () => {
+  const { fixture } = manualTurnFixture();
+  assert.equal(fixture.resolveAccountForConversation("conv-1"), null);
+
+  fixture.accountPool = ["alpha", "beta"];
+  fixture.stickyConversations = new Map();
+  fixture.accountRoundRobinIndex = 0;
+
+  // Selection is pure; allocation commits the account binding afterward.
+  const first = fixture.resolveAccountForConversation("conv-key-1");
+  assert.equal(first, "alpha");
+  assert.equal(fixture.stickyConversations.size, 0);
+  fixture.commitAccountBinding("conv-key-1", first);
+  assert.equal(fixture.stickyConversations.get("conv-key-1"), "alpha");
+
+  // Subsequent turn on same conversation reuses alpha (sticky)
+  const second = fixture.resolveAccountForConversation("conv-key-1");
+  assert.equal(second, "alpha");
+
+  // New conversation round-robins to beta
+  const third = fixture.resolveAccountForConversation("conv-key-2");
+  assert.equal(third, "beta");
+  fixture.commitAccountBinding("conv-key-2", third);
+  assert.equal(fixture.stickyConversations.get("conv-key-2"), "beta");
+
+  // If alpha is marked unauthenticated, conv-key-1 fails over to beta
+  fixture.accountStatuses = new Map();
+  fixture.accountStatuses.set("alpha", { authenticated: false });
+  const failedOver = fixture.resolveAccountForConversation("conv-key-1");
+  assert.equal(failedOver, "beta");
+
+  // If alpha has active cooldown, it also fails over to beta without destroying alpha's sticky assignment
+  fixture.accountStatuses.set("alpha", { cooldownUntil: Date.now() + 60_000 });
+  const coolingFailover = fixture.resolveAccountForConversation("conv-key-1");
+  assert.equal(coolingFailover, "beta");
+  assert.equal(fixture.stickyConversations.get("conv-key-1"), "alpha");
+
+  // When alpha cooldown expires, conv-key-1 returns to alpha
+  fixture.accountStatuses.set("alpha", { cooldownUntil: 0 });
+  const restored = fixture.resolveAccountForConversation("conv-key-1");
+  assert.equal(restored, "alpha");
+
+  // Least-loaded prioritization: if alpha is running a tab, new conversation goes to idle beta
+  fixture.turnTabs = new Map();
+  fixture.turnTabs.set("tab-alpha", { assignedAccount: "alpha", status: "running" });
+  const leastLoadedChosen = fixture.resolveAccountForConversation("conv-key-3");
+  assert.equal(leastLoadedChosen, "beta");
+});
+
+test("account cookie audit, status recording, and unauthenticated account failover without allocation", async () => {
+  const { fixture } = manualTurnFixture();
+  const openedTabs = [];
+  fixture.openAccountLoginTab = (acc) => {
+    openedTabs.push(acc);
+    return { id: `tab-${acc}` };
+  };
+  fixture.accountPool = ["alpha", "beta"];
+  fixture.accountStatuses = new Map();
+
+  // 1. Success and failure recording
+  fixture.recordAccountAuthFailure("alpha");
+  assert.equal(fixture.accountStatuses.get("alpha").authenticated, false);
+  assert.equal(fixture.accountStatuses.get("alpha").cooldownUntil > Date.now(), true);
+
+  fixture.recordAccountAuthSuccess("alpha");
+  assert.equal(fixture.accountStatuses.get("alpha").authenticated, true);
+  assert.equal(fixture.accountStatuses.get("alpha").cooldownUntil, 0);
+
+  fixture.accountPaths = require("../electron/account-policy.cjs").accountPaths();
+  // 2. Cookie audit simulation with mock session
+  const mockCookies = {
+    alpha: [{ name: "__Secure-next-auth.session-token", value: "valid-session-token-length-greater-than-twenty", expirationDate: Math.floor(Date.now() / 1000) + 3600 }],
+    beta: [{ name: "__Secure-next-auth.session-token", value: "expired-token", expirationDate: Math.floor(Date.now() / 1000) - 100 }],
+  };
+
+  fixture.session = {
+    fromPartition: (part) => {
+      const match = part.match(/persist:codex-web-gpt-chatgpt-(.+)$/);
+      const acc = match ? match[1] : null;
+      return {
+        cookies: {
+          get: async () => mockCookies[acc] || [],
+        },
+      };
+    },
+  };
+
+  const alphaAuthed = await fixture.auditAccountCookie("alpha");
+  assert.equal(alphaAuthed, true);
+  assert.equal(fixture.accountStatuses.get("alpha").authenticated, true);
+
+  const betaAuthed = await fixture.auditAccountCookie("beta");
+  assert.equal(betaAuthed, false);
+  assert.equal(fixture.accountStatuses.get("beta").authenticated, false);
+
+  // Auditing records authentication without allocating login tabs.
+  openedTabs.length = 0;
+  await fixture.auditAllAccountCookies();
+  assert.deepEqual(openedTabs, []);
+
+  // Pure selection fails over without opening any login tab.
+  openedTabs.length = 0;
+  fixture.stickyConversations = new Map([["conv-sticky-beta", "beta"]]);
+  const chosen = fixture.resolveAccountForConversation("conv-sticky-beta");
+  assert.equal(chosen, "alpha"); // Failed over to alpha
+  assert.deepEqual(openedTabs, []);
+});
+
+test("account enable/disable toggle, disabled exclusion, and all-disabled rejection", () => {
+  const { fixture } = manualTurnFixture();
+  let publishCount = 0;
+  fixture.publishState = () => { publishCount += 1; };
+  fixture.writeDescriptor = () => {};
+  fixture.snapshot = () => ({});
+  fixture.accountPool = ["acc1", "acc2", "acc3"];
+  fixture.disabledAccounts = new Set();
+  fixture.accountStatuses = new Map([
+    ["acc1", { authenticated: true, cooldownUntil: 0 }],
+    ["acc2", { authenticated: true, cooldownUntil: 0 }],
+    ["acc3", { authenticated: true, cooldownUntil: 0 }],
+  ]);
+
+  // 1. Initial resolution includes all accounts
+  const chosen1 = fixture.resolveAccountForConversation("conv-1");
+  assert.ok(["acc1", "acc2", "acc3"].includes(chosen1));
+
+  // 2. Disable acc1
+  fixture.setAccountEnabled("acc1", false);
+  assert.equal(fixture.disabledAccounts.has("acc1"), true);
+  assert.equal(publishCount, 1);
+
+  // Resolution now only picks from acc2 or acc3
+  for (let i = 0; i < 10; i++) {
+    const acc = fixture.resolveAccountForConversation(`conv-${i}`);
+    assert.notEqual(acc, "acc1");
+    assert.ok(["acc2", "acc3"].includes(acc));
+  }
+
+  // 3. Disable all accounts
+  fixture.setAccountEnabled("acc2", false);
+  fixture.setAccountEnabled("acc3", false);
+  assert.equal(fixture.disabledAccounts.size, 3);
+
+  // All accounts disabled fails explicitly, without a default-session bypass.
+  assert.throws(() => fixture.resolveAccountForConversation("conv-fallback"), error => error.code === "account_unavailable");
+
+  // 4. Re-enable acc2
+  fixture.setAccountEnabled("acc2", true);
+  assert.equal(fixture.disabledAccounts.has("acc2"), false);
+  const restored = fixture.resolveAccountForConversation("conv-restored");
+  assert.equal(restored, "acc2");
+});
+
+test("recordAccountAuthFailure and recordAccountAuthSuccess deduplicate identical states", () => {
+  const { fixture } = manualTurnFixture();
+  let publishCount = 0;
+  fixture.publishState = () => { publishCount += 1; };
+  fixture.writeDescriptor = () => {};
+  fixture.snapshot = () => ({});
+  fixture.accountPool = ["gamma"];
+  fixture.accountStatuses = new Map();
+
+  // First failure should publish
+  fixture.recordAccountAuthFailure("gamma");
+  assert.equal(publishCount, 1);
+  assert.equal(fixture.accountStatuses.get("gamma").authenticated, false);
+
+  // Consecutive identical failure calls should be deduplicated (publishCount remains 1)
+  fixture.recordAccountAuthFailure("gamma");
+  fixture.recordAccountAuthFailure("gamma");
+  assert.equal(publishCount, 1);
+
+  // Success transitions state and publishes
+  fixture.recordAccountAuthSuccess("gamma");
+  assert.equal(publishCount, 2);
+  assert.equal(fixture.accountStatuses.get("gamma").authenticated, true);
+
+  // Consecutive identical success calls should be deduplicated (publishCount remains 2)
+  fixture.recordAccountAuthSuccess("gamma");
+  fixture.recordAccountAuthSuccess("gamma");
+  assert.equal(publishCount, 2);
+});
+

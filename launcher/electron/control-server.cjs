@@ -354,18 +354,20 @@ class BrowserControlServer {
       this.logger.warn("browser.control_rejected", { message });
       const cancelled = error?.code === "turn_cancelled";
       const retainedUnavailable = error?.code === "retained_conversation_unavailable";
+      const accountUnavailable = error?.code === "account_unavailable";
       const manualInspectionDisabled = error?.code === "manual_browser_inspection_disabled";
       const manualOwnerLost = error?.code === "manual_turn_owner_lost";
       const manualTimedOut = error?.code === "manual_turn_timed_out";
       writeJson(
         response,
-        cancelled || retainedUnavailable || manualInspectionDisabled || manualOwnerLost
+        cancelled || retainedUnavailable || accountUnavailable || manualInspectionDisabled || manualOwnerLost
           ? 409
           : manualTimedOut ? 408 : 400,
         {
         error: message,
         ...(cancelled ? { code: "turn_cancelled" } : {}),
         ...(retainedUnavailable ? { code: "retained_conversation_unavailable" } : {}),
+        ...(accountUnavailable ? { code: "account_unavailable" } : {}),
         ...(manualInspectionDisabled ? { code: "manual_browser_inspection_disabled" } : {}),
         ...(manualOwnerLost ? { code: "manual_turn_owner_lost" } : {}),
         ...(manualTimedOut ? { code: "manual_turn_timed_out" } : {}),

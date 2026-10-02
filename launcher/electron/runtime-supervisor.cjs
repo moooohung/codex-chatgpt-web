@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const { accountPaths, readAccountConfig } = require("./account-policy.cjs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
@@ -332,6 +333,7 @@ class RuntimeSupervisor {
     coreHome,
     browserDescriptorPath,
     launcherProfile = "production",
+    accountProfile,
     publishOperation,
     runtimeInvocationFactory = runtimeInvocation,
     onConfigRead,
@@ -347,6 +349,7 @@ class RuntimeSupervisor {
       throw new Error("Runtime supervisor launcher profile is invalid");
     }
     this.launcherProfile = launcherProfile;
+    this.accountProfile = accountProfile;
     this.publishOperation = publishOperation;
     this.runtimeInvocationFactory = runtimeInvocationFactory;
     this.onConfigRead = onConfigRead;
@@ -1024,6 +1027,7 @@ class RuntimeSupervisor {
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
       await this.waitForTunnelMcpTransport(config);
       this.startTunnelMonitor(config);
+      await this.startAllAccountTunnels(config);
     } catch (error) {
       let cleanupError;
       try {
@@ -1044,6 +1048,79 @@ class RuntimeSupervisor {
         throw new Error(appendFailure(errorMessage(error), "tunnel startup cleanup failed", cleanupError));
       }
       throw error;
+    }
+  }
+
+  accountPaths() {
+    return accountPaths(this.accountProfile || { coreHome: this.coreHome,
+      partition: this.launcherProfile === "development" ? "persist:codex-web-gpt-dev-chatgpt" : "persist:codex-web-gpt-chatgpt" });
+  }
+
+  async startAllAccountTunnels(config) {
+    if (!config?.tunnel || config.mode !== "full" || !config.brokerSocketPath) return;
+    const accounts = readAccountConfig(this.accountPaths().config).accounts;
+    for (const [name, account] of Object.entries(accounts)) {
+      if (account.pendingRemoval) continue;
+      if (account.tunnelId === config.tunnel.tunnelId && config.tunnel.alias === "codex-chatgpt-web") continue;
+      if (!await this.startAccountTunnel(name, account)) throw new Error(`Account ${name} tunnel failed to start`);
+    }
+  }
+
+  async stopAllAccountTunnels(config) {
+    if (!config?.tunnel) return;
+    const accounts = readAccountConfig(this.accountPaths().config).accounts;
+    for (const name of Object.keys(accounts)) {
+      if (!await this.stopAccountTunnel(name)) throw new Error(`Account ${name} tunnel failed to stop`);
+    }
+  }
+
+  async startAccountTunnel(accountName, acc) {
+    try {
+      const config = this.readConfig();
+      if (!config?.tunnel || config.mode !== "full" || !config.brokerSocketPath) return false;
+      if (!acc.tunnelId || !acc.keyFile || !fs.existsSync(acc.keyFile)) return false;
+      const contract = config.browserInteractionMode === "manual" ? "safe" : "native";
+      const invocation = this.runtimeCommand([
+        "mcp",
+        "--contract",
+        contract,
+        "--broker-socket",
+        config.brokerSocketPath,
+      ]);
+      const mcpCommand = managedTunnelMcpCommand(invocation);
+      const alias = this.accountPaths().tunnelAlias(accountName);
+      const profileName = alias;
+      const args = [
+        "runtimes", "connect",
+        "--alias", alias,
+        "--profile", profileName,
+        "--profile-dir", config.tunnel.profileDir,
+        "--tunnel-client-bin", config.tunnel.binaryPath,
+        "--tunnel-id", acc.tunnelId,
+        "--runtime-api-key", `file:${acc.keyFile}`,
+        "--mcp-command", mcpCommand,
+        "--json",
+      ];
+      this.logger.info("runtime.tunnel_connecting_account", { account: accountName, alias, tunnelId: acc.tunnelId });
+      const res = await this.runTunnelCommand(config, args, 15_000, `Account ${accountName} tunnel connect`);
+      return res.code === 0;
+    } catch (err) {
+      this.logger.warn("runtime.tunnel_account_connect_failed", { account: accountName, error: String(err) });
+      return false;
+    }
+  }
+
+  async stopAccountTunnel(accountName) {
+    try {
+      const config = this.readConfig();
+      if (!config) return false;
+      if (!config.tunnel && config.mode !== "full") return true;
+      if (!config.tunnel) return false;
+      const alias = this.accountPaths().tunnelAlias(accountName);
+      const result = await this.runTunnelCommand(config, ["runtimes", "stop", alias, "--json"], 5_000, `Stop tunnel ${alias}`);
+      return result.code === 0 || tunnelRuntimeAbsent(result.output);
+    } catch {
+      return false;
     }
   }
 
@@ -1566,6 +1643,7 @@ class RuntimeSupervisor {
       this.startTunnelMonitor(config);
       throw error;
     }
+    await this.stopAllAccountTunnels(config);
     this.tunnel = null;
   }
 

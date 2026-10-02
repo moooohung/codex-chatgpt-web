@@ -27,6 +27,8 @@ test("Bigger Context waits for startup and route recovery without invalidating h
     const context = vm.createContext({
       runtimeStartup, finishRuntimeStartup: () => { startupSettled = true; finishRuntimeStartup(); },
       startupAuthenticationRefresh, logger, stateStore, IS_DEV_PROFILE: false,
+      LAUNCHER_PROFILE: {}, browserHost: null,
+      createAccountApi: () => ({ resume() {} }),
       ipcMain: { on() {} }, registerLoggedIpc: (_ipc, _logger, channel, handler) => handlers.set(channel, handler),
       send() {}, publishOperation() {}, startCatalogVerificationMonitor() {},
       restoreCodexRouteAfterRuntimeFailure: async () => { calls.push("recovery"); return {}; },

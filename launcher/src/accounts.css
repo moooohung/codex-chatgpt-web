@@ -1,0 +1,362 @@
+.accounts-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.accounts-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.accounts-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.accounts-stat-card {
+  padding: 16px;
+  background: var(--color-background-control);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.accounts-stat-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.accounts-stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.accounts-stat-value.tone-success {
+  color: var(--color-text-success);
+}
+
+.accounts-stat-value.tone-warning {
+  color: var(--color-text-warning);
+}
+
+.accounts-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: var(--color-background-control);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+}
+
+.accounts-toolbar .button-primary,
+.accounts-form-actions .button-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 32px;
+  cursor: pointer;
+}
+
+.accounts-toolbar .button-primary svg,
+.accounts-form-actions .button-primary svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.accounts-toolbar-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.accounts-form-card {
+  background: var(--color-background-elevated);
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.accounts-form-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.accounts-form-header h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.accounts-form-header p {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.accounts-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.accounts-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.accounts-list-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.account-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  background: var(--color-background-control);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  transition: background var(--duration-micro) var(--ease-enter), border-color var(--duration-micro) var(--ease-enter);
+}
+
+.account-card:hover {
+  background: var(--color-background-control-hover);
+  border-color: var(--color-border-heavy);
+}
+
+.account-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  min-width: 0;
+}
+
+.account-card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-round);
+  background: rgb(255 255 255 / 6%);
+  border: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--color-text-secondary);
+}
+
+.account-card-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.account-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.account-card-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.account-card-name {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.account-card-email {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  background: rgb(255 255 255 / 4%);
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+}
+
+.account-card-details {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.account-tunnel-id {
+  font-family: var(--font-mono);
+  color: var(--color-text-accent);
+  background: rgb(51 156 255 / 8%);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+}
+
+.account-card-status-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.account-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-round);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1;
+}
+
+.account-status-pill i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+}
+
+.account-status-pill.status-ready {
+  background: var(--color-background-status-success);
+  color: var(--color-text-success);
+}
+
+.account-status-pill.status-ready i {
+  background: var(--color-text-success);
+}
+
+.account-status-pill.status-cooling {
+  background: var(--color-background-status-warning);
+  color: var(--color-text-warning);
+}
+
+.account-status-pill.status-cooling i {
+  background: var(--color-text-warning);
+}
+
+.account-status-pill.status-signed-out {
+  background: var(--color-background-status-error);
+  color: var(--color-text-error);
+}
+
+.account-status-pill.status-signed-out i {
+  background: var(--color-text-error);
+}
+
+.account-status-pill.status-disabled {
+  background: rgb(255 255 255 / 6%);
+  color: var(--color-text-tertiary);
+}
+
+.account-status-pill.status-disabled i {
+  background: var(--color-text-tertiary);
+}
+
+.account-card.is-disabled {
+  opacity: 0.65;
+  background: rgb(0 0 0 / 20%);
+  border-color: rgb(255 255 255 / 6%);
+}
+
+.accounts-warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  background: rgb(255 170 0 / 12%);
+  border: 1px solid rgb(255 170 0 / 25%);
+  color: var(--color-text-warning);
+  font-size: var(--text-sm);
+  margin-bottom: 12px;
+}
+
+.accounts-warning-banner svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.account-active-tabs {
+  font-size: var(--text-xs);
+  color: var(--color-text-accent);
+}
+
+.account-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.button-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgb(250 66 62 / 20%);
+  background: rgb(250 66 62 / 8%);
+  color: var(--color-text-error);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--duration-micro) var(--ease-enter);
+}
+
+.button-danger:hover:not(:disabled) {
+  background: rgb(250 66 62 / 16%);
+  border-color: rgb(250 66 62 / 40%);
+}
+
+.button-danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.accounts-empty {
+  padding: 48px 24px;
+  text-align: center;
+  background: var(--color-background-control);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-tertiary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
