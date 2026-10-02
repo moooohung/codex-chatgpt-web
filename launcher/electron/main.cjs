@@ -428,6 +428,13 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     },
   });
   window.setMenuBarVisibility(false);
+  window.webContents.on("render-process-gone", (_event, details) => {
+    logger.error("launcher.renderer_gone", { reason: details.reason, exitCode: details.exitCode });
+  });
+  window.webContents.on("did-fail-load", (_event, errorCode, _description, _url, mainFrame) => {
+    if (mainFrame) logger.error("launcher.renderer_load_failed", { errorCode });
+  });
+  window.webContents.on("unresponsive", () => logger.warn("launcher.renderer_unresponsive", {}));
   const guardRendererNavigation = (event, url) => {
     if (rendererNavigationAllowed(url)) return;
     event.preventDefault();
@@ -518,20 +525,22 @@ function smokePassedForCurrentVersion(state) {
   return state.browserSmokePassed === true && state.browserSmokeVersion === app.getVersion();
 }
 
-function syncFreshConversationPreference(stateStore, config) {
+function syncBrowserPreferences(stateStore, config) {
   const useSavedChats = config?.useSavedChats === true;
   const enabled = config?.experimentalFreshConversationPerTurn === true;
+  const autoApproveToolCalls = config?.autoApproveToolCalls === true;
   const current = stateStore.read();
   if (runtimeHost?.currentOperation()) return current;
-  if (current.experimentalFreshConversationPerTurn === enabled && current.useSavedChats === useSavedChats) return current;
+  const retentionChanged = current.experimentalFreshConversationPerTurn !== enabled || current.useSavedChats !== useSavedChats;
+  if (!retentionChanged && current.autoApproveToolCalls === autoApproveToolCalls) return current;
   // Runtime restarts leave browser views alive. Retire completed chats when their
   // persistence policy changes, including changes made by the CLI.
-  const retainedKeys = new Set([...browserHost.turnTabs.values()]
+  const retainedKeys = new Set((retentionChanged ? [...browserHost.turnTabs.values()] : [])
     .filter(tab => tab.status === "ready" && tab.conversationKey
       && (current.useSavedChats !== useSavedChats || tab.interactionMode === "automatic"))
     .map(tab => tab.conversationKey));
   for (const key of retainedKeys) releaseRetainedConversation(browserHost, key);
-  const state = stateStore.update({ experimentalFreshConversationPerTurn: enabled, useSavedChats });
+  const state = stateStore.update({ experimentalFreshConversationPerTurn: enabled, useSavedChats, autoApproveToolCalls });
   send("launcher:state-changed", state);
   return state;
 }
@@ -541,6 +550,7 @@ function registerIpc({ logger, stateStore }) {
     "launcher:setup-core", "launcher:setup-mcp", "launcher:uninstall-integration",
     "launcher:bigger-context", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
     "launcher:use-saved-chats", "launcher:zero-risk-pro", "launcher:browser-interaction-mode",
+    "launcher:auto-approve-tool-calls",
     "launcher:connector-name", "launcher:mcp-verify", "launcher:doctor", "launcher:cancel-turns",
     "launcher:browser-passkey-login", "launcher:browser-logout", "launcher:browser-smoke",
     "launcher:limits-setup", "launcher:update-install", "launcher:complete-onboarding",
@@ -561,7 +571,7 @@ function registerIpc({ logger, stateStore }) {
       codexHome: LAUNCHER_PROFILE.codexHome,
       userData: launcherUserData,
     },
-    state: syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
+    state: syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config),
     browser: browserHost?.snapshot() ?? null,
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
@@ -790,6 +800,7 @@ function registerIpc({ logger, stateStore }) {
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,
       useSavedChats: false,
+      autoApproveToolCalls: false,
       zeroRiskProEnabled: false,
     });
     send("launcher:state-changed", state);
@@ -826,6 +837,7 @@ function registerIpc({ logger, stateStore }) {
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+      autoApproveToolCalls: runtimeHost.runtimeConfigSnapshot().config?.autoApproveToolCalls === true,
       ...(result.mode === "full" ? {
         mcpRuntimeInstalled: true,
         mcpSetupComplete: false,
@@ -869,6 +881,7 @@ function registerIpc({ logger, stateStore }) {
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+      autoApproveToolCalls: runtimeHost.runtimeConfigSnapshot().config?.autoApproveToolCalls === true,
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE,
       mcpRuntimeInstalled: true,
@@ -934,14 +947,21 @@ function registerIpc({ logger, stateStore }) {
       throw new Error("Finish or cancel active ChatGPT turns before changing browser conversation retention");
     }
     await runtimeHost.setFreshConversationPerTurn(enabled);
-    return syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config);
+    return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
   });
   handle("launcher:use-saved-chats", async (_event, enabled) => {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
       throw new Error("Finish or cancel active ChatGPT turns before changing saved chats");
     }
     await runtimeHost.setUseSavedChats(enabled);
-    return syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config);
+    return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
+  });
+  handle("launcher:auto-approve-tool-calls", async (_event, enabled) => {
+    if (browserHost.activeTraceId || browserHost.currentOperation()) {
+      throw new Error("Finish or cancel active ChatGPT turns before changing tool approvals");
+    }
+    await runtimeHost.setAutoApproveToolCalls(enabled);
+    return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
   });
   handle("launcher:zero-risk-pro", async (_event, enabled) => {
     const browserOperation = browserHost.currentOperation();
@@ -987,6 +1007,7 @@ function registerIpc({ logger, stateStore }) {
       browserInteractionMode: mode,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+      autoApproveToolCalls: runtimeHost.runtimeConfigSnapshot().config?.autoApproveToolCalls === true,
       ...(mode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
       ...(result.configured ? {
         codexCatalogVerified: IS_DEV_PROFILE,
@@ -1158,6 +1179,11 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  app.on("child-process-gone", (_event, details) => {
+    logger.warn("launcher.child_process_gone", {
+      type: details.type, reason: details.reason, exitCode: details.exitCode,
+    });
+  });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
@@ -1169,7 +1195,7 @@ async function start() {
   browserControl = await new BrowserControlServer({
     logger,
     getBrowserHost: () => browserHost,
-    getPreferences: () => syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
+    getPreferences: () => syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config),
     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
     limits: limitsController,
   }).start();
@@ -1187,7 +1213,7 @@ async function start() {
     onConfigRead: config => {
       // Setup may read an intermediate config before rollback. The setting IPC commits
       // its change only after the existing setup transaction has succeeded.
-      if (browserHost && !runtimeHost?.currentOperation()) syncFreshConversationPreference(stateStore, config);
+      if (browserHost && !runtimeHost?.currentOperation()) syncBrowserPreferences(stateStore, config);
     },
   });
   runtimeHost = new RuntimeHost({
@@ -1315,6 +1341,7 @@ async function start() {
       experimentalSkillAttachments: config?.experimentalSkillAttachments === true,
       experimentalFreshConversationPerTurn: config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: config?.useSavedChats === true,
+      autoApproveToolCalls: config?.autoApproveToolCalls === true,
       zeroRiskProEnabled: config?.zeroRiskProEnabled === true,
     });
     send("launcher:state-changed", state);
@@ -1344,6 +1371,7 @@ async function start() {
         experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
         experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
         useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+        autoApproveToolCalls: runtimeHost.runtimeConfigSnapshot().config?.autoApproveToolCalls === true,
         zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
         ...(upgrade.mode === "full" ? {
           mcpRuntimeInstalled: true,
@@ -1369,14 +1397,16 @@ async function start() {
       const experimentalSkillAttachments = configuredRuntime.config?.experimentalSkillAttachments === true;
       const experimentalFreshConversationPerTurn = configuredRuntime.config?.experimentalFreshConversationPerTurn === true;
       const useSavedChats = configuredRuntime.config?.useSavedChats === true;
+      const autoApproveToolCalls = configuredRuntime.config?.autoApproveToolCalls === true;
       const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
       if (saved.experimentalSkillAttachments !== experimentalSkillAttachments
         || saved.experimentalFreshConversationPerTurn !== experimentalFreshConversationPerTurn
         || saved.useSavedChats !== useSavedChats
+        || saved.autoApproveToolCalls !== autoApproveToolCalls
         || saved.experimentalBiggerContext !== enabled
         || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, zeroRiskProEnabled });
+        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, autoApproveToolCalls, zeroRiskProEnabled });
         send("launcher:state-changed", state);
       }
     }
@@ -1395,6 +1425,7 @@ async function start() {
         experimentalSkillAttachments: config.experimentalSkillAttachments === true,
         experimentalFreshConversationPerTurn: config.experimentalFreshConversationPerTurn === true,
         useSavedChats: config.useSavedChats === true,
+        autoApproveToolCalls: config.autoApproveToolCalls === true,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,
         ...(runtime.bridgeRouteChanged ? {
           codexCatalogVerified: false,

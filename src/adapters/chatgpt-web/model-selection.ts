@@ -1,4 +1,4 @@
-import { activateChatGptEffortMenu, parseChatGptEffortSliderState } from "../../chatgpt-session";
+import { activateChatGptEffortMenu, parseChatGptEffortSliderState, readChatGptModelAnnouncements } from "../../chatgpt-session";
 import type { ChatGptWebAdapterEffort, ChatGptWebModelFamily } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
@@ -98,14 +98,8 @@ export async function assertChatGptModelFamily(
       await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),
       await menu.slider.getAttribute("aria-valuenow"),
     );
-    const descriptions = await menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]").evaluate(element => (
-      (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
-        .map(id => element.ownerDocument.getElementById(id)?.textContent ?? "")
-    ));
-    const targetValue = Math.min(state?.max ?? ((state?.min ?? 0) + effortIndex), (state?.min ?? 0) + effortIndex);
-    const effortMatches = Boolean(state && (state.value === state.min + effortIndex || state.value === targetValue));
-    const modelFamilyDescriptions = descriptions.filter(text => /^(?:GPT[-\s]?)?\d+(?:\.\d+)?/i.test(text.replace(/\s+/g, " ").trim()));
-    if (checked && state && effortMatches && (modelFamilyDescriptions.length === 0 || chatGptModelFamilyMatches(modelFamilyDescriptions, family, effort))) return;
+    const descriptions = await readChatGptModelAnnouncements(menu.slider);
+    if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   } while (true);
