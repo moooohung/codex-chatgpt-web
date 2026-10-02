@@ -22,6 +22,8 @@ const {
 } = require("electron");
 const { createAccountApi } = require("./account-api.cjs");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+const { CHATGPT_BROWSER_LOCALE } = require("./chatgpt-locale.cjs");
+app.commandLine.appendSwitch("lang", CHATGPT_BROWSER_LOCALE);
 const { BrowserControlServer } = require("./control-server.cjs");
 const { LimitsController } = require("./limits-controller.cjs");
 const { SOURCE_URL: LIMITS_SOURCE_URL } = require("./limits-store.cjs");

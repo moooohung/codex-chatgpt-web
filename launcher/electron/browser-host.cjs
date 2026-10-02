@@ -4,6 +4,7 @@ const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
 const { clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { accountNameForTab, accountPaths, readAccountConfig, selectAccount } = require("./account-policy.cjs");
 const {
   runBrowserHelperOperation,
@@ -428,6 +429,7 @@ class BrowserHost {
       canGoForward: false,
       zoomFactor: 1,
     };
+    this.localeReady = this.configureLocalePreferences(session.fromPartition(this.partition));
     this.view = new WebContentsView({
       webPreferences: {
         partition: this.partition,
@@ -640,6 +642,12 @@ class BrowserHost {
     return this.turnTabs.get(this.selectedTabId) || null;
   }
 
+  configureLocalePreferences(browserSession) {
+    const ready = configureChatGptLocale(browserSession);
+    void ready.catch(error => this.logger.warn("browser.locale_preference_failed", { message: String(error) }));
+    return ready;
+  }
+
   async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal) {
     signal?.throwIfAborted();
     const assignedAccount = BrowserHost.prototype.resolveAccountForConversation.call(this, conversationKey);
@@ -651,7 +659,7 @@ class BrowserHost {
       : this.partition;
     try {
       const partSession = session.fromPartition(assignedPartition);
-      this.configureLocalePreferences(partSession);
+      await this.configureLocalePreferences(partSession);
     } catch {}
     const view = new WebContentsView({
       webPreferences: {
@@ -740,9 +748,10 @@ class BrowserHost {
     const assignedPartition = assignedAccount
       ? this.accountPaths.partition(assignedAccount)
       : this.partition;
+    let localeReady;
     try {
       const partSession = session.fromPartition(assignedPartition);
-      this.configureLocalePreferences(partSession);
+      localeReady = this.configureLocalePreferences(partSession);
     } catch {}
     const view = new WebContentsView({
       webPreferences: {
@@ -757,6 +766,7 @@ class BrowserHost {
     const tab = {
       id,
       surfaceId: null,
+      localeReady,
       traceId,
       conversationKey,
       accountName: assignedAccount,
@@ -803,6 +813,7 @@ class BrowserHost {
     const contents = tab.view.webContents;
     const chatUrl = tab.url;
     try {
+      await tab.localeReady;
       await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL);
     } catch (error) {
       if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
@@ -2213,6 +2224,7 @@ class BrowserHost {
   }
 
   async reveal(inspectSession = true) {
+    await this.localeReady;
     if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
     this.show();
     if (!this.selectedTurnTab() && this.view.webContents.getURL() === IDLE_BROWSER_URL) {
@@ -2858,9 +2870,10 @@ class BrowserHost {
     const id = randomBytes(12).toString("base64url");
     const ordinal = this.allocateTabOrdinal();
     const assignedPartition = this.accountPaths.partition(account);
+    let localeReady;
     try {
       const partSession = session.fromPartition(assignedPartition);
-      this.configureLocalePreferences(partSession);
+      localeReady = this.configureLocalePreferences(partSession);
     } catch {}
 
     const view = new WebContentsView({
@@ -2905,7 +2918,9 @@ class BrowserHost {
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
 
-    void view.webContents.loadURL("https://chatgpt.com/?temporary-chat=true").catch(() => {});
+    void Promise.resolve(localeReady).then(() => {
+      if (!view.webContents.isDestroyed()) return view.webContents.loadURL("https://chatgpt.com/?temporary-chat=true");
+    }).catch(() => {});
     this.selectedTabId = id;
     if (this.window && !this.window.isDestroyed()) {
       if (this.window.isMinimized()) this.window.restore();
