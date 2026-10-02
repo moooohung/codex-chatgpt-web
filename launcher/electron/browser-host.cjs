@@ -6,6 +6,7 @@ const { clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, she
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { accountNameForTab, accountPaths, readAccountConfig, selectAccount } = require("./account-policy.cjs");
+const { bindAccountBackendRecovery } = require("./account-backend-recovery.cjs");
 const {
   runBrowserHelperOperation,
   verifyConnectorWithBrowserHelper,
@@ -906,6 +907,7 @@ class BrowserHost {
 
   bindTurnContents(tab) {
     const contents = tab.view.webContents;
+    if (tab.accountName) bindAccountBackendRecovery(this, contents.session);
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
         if (tab.isSignInTab) {
@@ -953,7 +955,7 @@ class BrowserHost {
       tab.rendererReady = true;
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
       this.syncViewVisibility();
-      if (browserInteractionModeFor(this) !== "automatic") {
+      if (tab.isSignInTab || browserInteractionModeFor(this) !== "automatic") {
         this.publishState?.(this.snapshot());
         return;
       }
@@ -1020,6 +1022,7 @@ class BrowserHost {
       return;
     }
     this.accountStatuses.set(accountName, {
+      ...this.accountStatuses.get(accountName),
       authenticated: false,
       cooldownUntil: now + 30 * 60 * 1000,
     });
@@ -1027,7 +1030,7 @@ class BrowserHost {
     const anyAvailable = pool.some(acc => {
       if (this.disabledAccounts?.has(acc) || this.pendingRemovalAccounts?.has(acc)) return false;
       const s = this.accountStatuses.get(acc);
-      return s?.authenticated !== false && (!s?.cooldownUntil || s.cooldownUntil <= now);
+      return s?.authenticated !== false && !s?.securityCheckRequired && (!s?.cooldownUntil || s.cooldownUntil <= now);
     });
     if (anyAvailable && pool.length > 1) {
       this.logger?.warn?.("browser.account_auth_failed_failover_active", { account: accountName });
@@ -1056,9 +1059,11 @@ class BrowserHost {
       return;
     }
     this.accountStatuses.set(accountName, {
+      ...existing,
       authenticated: true,
       cooldownUntil: 0,
     });
+    if (existing?.securityCheckRequired) return;
     if (this.disabledAccounts?.has(accountName) || this.pendingRemovalAccounts?.has(accountName)) return;
     this.reauthenticationRequired = false;
     this.setState?.({
@@ -1155,6 +1160,7 @@ class BrowserHost {
 
   bindManualTurnContents(tab) {
     const contents = tab.view.webContents;
+    if (tab.accountName) bindAccountBackendRecovery(this, contents.session);
     const invalidateConversation = (url, inPlace) => {
       // History state updates and anchor scrolling keep the same document/context.
       if (inPlace && url.split("#", 1)[0] === tab.url?.split("#", 1)[0]) return;
@@ -1543,6 +1549,10 @@ class BrowserHost {
         ? this.handleChatGptBackendResponse(details)
         : undefined,
     );
+  }
+
+  loadAccountSignInSurface(contents, url) {
+    return loadCommittedBrowserSurface(contents, url, 20_000);
   }
 
   handleChatGptBackendResponse(details) {

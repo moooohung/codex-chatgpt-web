@@ -65,7 +65,8 @@ function selectAccount({ pool = [], configured = false, disabled = new Set(), pe
   const available = pool.filter(name => {
     const status = statuses.get(name);
     const reason = pending.has(name) ? "pending removal" : disabled.has(name) ? "disabled"
-      : status?.authenticated === false ? "signed out" : status?.cooldownUntil > now ? "cooling down" : null;
+      : status?.authenticated === false ? "signed out" : status?.securityCheckRequired ? "security check required"
+        : status?.cooldownUntil > now ? "cooling down" : null;
     if (reason) reasons.push(`${name}: ${reason}`);
     return !reason;
   });
