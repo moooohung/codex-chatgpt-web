@@ -53,7 +53,7 @@ test("model selection recognizes 5.6 and (Web) suffixes in Korean and English", 
 });
 
 
-test("assertChatGptModelFamily verifies 5.6 Sol when slider descriptions contain only generic accessibility text", async () => {
+test.each(["5.6 Sol Instant", "6 Pro", ""])("generic effort announcements require matching active model evidence: %s", async header => {
   const menu = {
     menu: {
       getByRole: (_role: string, options: { name: RegExp }) => ({
@@ -69,11 +69,11 @@ test("assertChatGptModelFamily verifies 5.6 Sol when slider descriptions contain
         if (attr === "aria-valuenow") return "0";
         return null;
       },
-      locator: () => ({
-        evaluate: async () => ["Instant, 1 of 3.", "Use Left and Right arrow keys to adjust power"],
-      }),
+      evaluate: async () => ["Instant, 1 of 3.", "Use Left and Right arrow keys to adjust power", header],
     },
   } as unknown as Parameters<typeof assertChatGptModelFamily>[0];
 
-  await expect(assertChatGptModelFamily(menu, "5.6", "low", 0)).resolves.toBeUndefined();
+  const confirmation = assertChatGptModelFamily(menu, "5.6", "low", 0);
+  if (header === "5.6 Sol Instant") await confirmation;
+  else await expect(confirmation).rejects.toThrow("could not be selected and verified");
 });

@@ -58,15 +58,16 @@ describe("Subagent delegation bridging (send_message_to_thread)", () => {
         total: number;
       };
       expect(parsed.total).toBeGreaterThanOrEqual(1);
-      const delegationTool = parsed.tools.find(t => t.wire_name === "send_message_to_thread" || t.wire_name === "collaboration__send_message");
+      const delegationTool = parsed.tools.find(t => t.wire_name === "collaboration__send_message");
       expect(delegationTool).toBeDefined();
+      expect(parsed.tools.some(t => t.wire_name === "send_message_to_thread")).toBe(false);
 
       // 2. Call send_message_to_thread - should route to collaboration__send_message
       const callPromise = call("codex_tool_call", {
         turn_token: token,
-        wire_name: "send_message_to_thread",
+        wire_name: delegationTool!.wire_name,
         arguments: {
-          thread_id: "thread_manager_123",
+          receiver_thread_id: "thread_manager_123",
           message: "Pytest passed successfully with 42 tests",
         },
       });
@@ -75,6 +76,7 @@ describe("Subagent delegation bridging (send_message_to_thread)", () => {
       expect(toolRequest).toBeDefined();
       expect(toolRequest?.wireName).toBe("collaboration__send_message");
       expect(toolRequest?.arguments).toMatchObject({
+        receiver_thread_id: "thread_manager_123",
         message: "Pytest passed successfully with 42 tests",
       });
 

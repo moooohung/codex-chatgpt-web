@@ -69,7 +69,8 @@ export function stripHistoricalTurnTokens(text: string): string {
   for (const pattern of HISTORICAL_TOKEN_BLOCK_PATTERNS) {
     cleaned = cleaned.replace(pattern, "");
   }
-  return cleaned.replace(/[ \t]*\n[ \t]*\n\s*\n+/g, "\n\n").trim();
+  // Removing capability blocks must not normalize the task's literal whitespace.
+  return cleaned;
 }
 
 export const TOKEN_REJECTION_PATTERNS: readonly RegExp[] = [

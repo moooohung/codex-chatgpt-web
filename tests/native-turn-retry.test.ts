@@ -11,9 +11,9 @@ import {responseRequest} from "../src/server";
 
 const roots: string[]=[];
 afterEach(()=> { for(const root of roots.splice(0)) rmSync(root,{recursive:true,force:true}); });
-const threadId="01a0f3e2-d19a-77b2-b33d-7989802d04af";
-const oldTurn="01a0f91b-9761-7cf2-a430-0360bc74d4b8";
-const turnId="01a0f91c-29b7-70f0-9e22-d89be6a1a148";
+const threadId="11111111-1111-7111-8111-111111111111";
+const oldTurn="22222222-2222-7222-8222-222222222222";
+const turnId="33333333-3333-7333-8333-333333333333";
 function fixture(error: unknown={codex_error_info:"server_overloaded"}) {
   const home=mkdtempSync(join(tmpdir(),"native-retry-")); roots.push(home);
   const directory=join(home,"sessions/2026/10/02"); mkdirSync(directory,{recursive:true});

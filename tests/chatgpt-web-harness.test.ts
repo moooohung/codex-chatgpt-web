@@ -1549,7 +1549,8 @@ describe("ChatGPT outer-native harness v4", () => {
       request.context.systemPrompt = ["Preserve the supplied text exactly."];
       request.context.messages = [{ role: "user", content, timestamp: 1 }];
       request._compactionRequest = compaction;
-      const compiled = compileChatGptWebPrompt(request, toolCapabilities, "turn_123456789012345678901234");
+      const compiled = compileChatGptWebPrompt(request, toolCapabilities,
+        compaction ? undefined : "turn_123456789012345678901234");
       const envelope = compiled.text.match(/^```text\n<codex_context_json>\n([^\n]+)\n<\/codex_context_json>\n```$/m);
       expect(envelope).not.toBeNull();
       const context = JSON.parse(envelope![1]!);

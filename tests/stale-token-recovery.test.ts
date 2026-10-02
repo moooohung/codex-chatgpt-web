@@ -9,6 +9,12 @@ import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
 describe("stale token scrubbing and compaction prompt hygiene", () => {
+  test("scrubbing preserves literal whitespace outside capability blocks", () => {
+    const literal = "  indented code\n\n\n\ntrailing whitespace  \n";
+    expect(stripHistoricalTurnTokens(literal)).toBe(literal);
+    const binding = '<codex_native_binding_json>{"turn_token":"old"}</codex_native_binding_json>';
+    expect(stripHistoricalTurnTokens(`\n${binding}${literal}`)).toBe(`\n${literal}`);
+  });
   test("stripHistoricalTurnTokens removes old native binding, zero risk, and compaction control blocks", () => {
     const dirty = [
       "Here is the previous turn result.",
