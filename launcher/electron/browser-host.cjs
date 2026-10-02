@@ -5,6 +5,7 @@ const { createHash, randomBytes } = require("node:crypto");
 const { clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
+const { injectDomStealth, applyStealthHeaders } = require("./stealth.cjs");
 const { accountNameForTab, accountPaths, readAccountConfig, selectAccount } = require("./account-policy.cjs");
 const { bindAccountBackendRecovery } = require("./account-backend-recovery.cjs");
 const {
@@ -79,6 +80,14 @@ const AUTH_PROVIDER_HOSTS = new Set([
   "appleid.apple.com",
   "idmsa.apple.com",
 ]);
+const isTestEnv = Boolean(
+  typeof process !== "undefined" && (
+    process.env.npm_lifecycle_event === "test"
+    || process.env.NODE_ENV === "test"
+    || (process.execArgv && process.execArgv.includes("--test"))
+  ),
+);
+const DEFAULT_ACCOUNT_STAGGER_MS = isTestEnv ? 0 : 1500;
 const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
 const CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS = 1_000;
 const COMPOSER_SELECTOR = [
@@ -644,6 +653,7 @@ class BrowserHost {
   }
 
   configureLocalePreferences(browserSession) {
+    applyStealthHeaders(browserSession);
     const ready = configureChatGptLocale(browserSession);
     void ready.catch(error => this.logger.warn("browser.locale_preference_failed", { message: String(error) }));
     return ready;
@@ -949,7 +959,9 @@ class BrowserHost {
       tab.url = contents.getURL();
       this.publishState?.(this.snapshot());
     });
+    contents.on("dom-ready", () => injectDomStealth(contents));
     contents.on("did-finish-load", () => {
+      injectDomStealth(contents);
       tab.url = contents.getURL();
       tab.loading = false;
       tab.rendererReady = true;
@@ -1108,7 +1120,11 @@ class BrowserHost {
 
   async auditAllAccountCookies() {
     for (const account of this.accountPool || []) {
-      if (!this.disabledAccounts?.has(account) && !this.pendingRemovalAccounts?.has(account)) await this.auditAccountCookie(account);
+      if (!this.disabledAccounts?.has(account) && !this.pendingRemovalAccounts?.has(account)) {
+        await this.auditAccountCookie(account);
+        const delay = this.accountStaggerDelayMs ?? DEFAULT_ACCOUNT_STAGGER_MS;
+        if (delay > 0) await sleep(delay);
+      }
     }
   }
 
@@ -1290,7 +1306,9 @@ class BrowserHost {
         ? { url, loading: true }
         : { status: "loading", message: "Opening ChatGPT", url, loading: true });
     });
+    contents.on("dom-ready", () => injectDomStealth(contents));
     contents.on("did-finish-load", () => {
+      injectDomStealth(contents);
       this.clearHomeNavigationTimeout();
       this.primaryRendererReady = true;
       this.syncViewVisibility();
@@ -1498,12 +1516,15 @@ class BrowserHost {
             try {
               if (this.disabledAccounts?.has(acc) || this.pendingRemovalAccounts?.has(acc)) continue;
               const partSession = session.fromPartition(this.accountPaths.partition(acc));
+              this.configureLocalePreferences(partSession);
               const res = await readChatGptAuthSession(partSession.fetch.bind(partSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
               if (res.sessionAuthenticated) {
                 anyAuthed = true;
                 this.recordAccountAuthSuccess(acc);
               }
             } catch {}
+            const delay = this.accountStaggerDelayMs ?? DEFAULT_ACCOUNT_STAGGER_MS;
+            if (delay > 0) await sleep(delay);
           }
           if (this.destroyed || browserInteractionModeFor(this) !== "automatic") return;
           if (revision !== this.authenticationRevision) continue;
@@ -2070,6 +2091,9 @@ class BrowserHost {
     authView.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(authView.webContents);
     const contents = authView.webContents;
+    applyStealthHeaders(contents.session);
+    contents.on("dom-ready", () => injectDomStealth(contents));
+    contents.on("did-finish-load", () => injectDomStealth(contents));
     const clearNavigationTimeout = () => {
       if (!authView.navigationTimeout) return;
       clearTimeout(authView.navigationTimeout);

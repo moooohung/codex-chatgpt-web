@@ -1,5 +1,15 @@
 const ORIGIN = "https://chatgpt.com";
 
+const isTestEnv = Boolean(
+  typeof process !== "undefined" && (
+    process.env.npm_lifecycle_event === "test"
+    || process.env.NODE_ENV === "test"
+    || (process.execArgv && process.execArgv.includes("--test"))
+  ),
+);
+
+const DEFAULT_CHALLENGE_GRACE_PERIOD_MS = isTestEnv ? 0 : 45_000;
+
 function headerIncludes(headers, name, value) {
   return Object.entries(headers || {}).some(([key, values]) => key.toLowerCase() === name
     && (Array.isArray(values) ? values : [values]).some(item => String(item).toLowerCase().split(/[;,]/).some(part => part.trim() === value)));
@@ -35,7 +45,19 @@ function handleAccountBackendResponse(host, details) {
   if (!tab.isSignInTab || busy || tab.challengeReloadAttempted) return true;
   tab.challengeReloadAttempted = true;
   tab.challengeRecovery = (async () => {
-    await new Promise(resolve => setTimeout(resolve, host.cloudflareChallengeRecoveryDelayMs ?? 500));
+    const graceMs = host.cloudflareChallengeRecoveryDelayMs ?? DEFAULT_CHALLENGE_GRACE_PERIOD_MS;
+    if (graceMs > 0) {
+      const start = Date.now();
+      while (Date.now() - start < graceMs) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000, graceMs - (Date.now() - start))));
+        if (!tab.securityCheckRequired) return;
+        if (host.turnTabs.get(tab.id) !== tab) return;
+        const currentBusy = [...host.turnTabs.values()].some(candidate => candidate.accountName === tab.accountName && candidate.status === "running");
+        if (currentBusy) return;
+      }
+    } else {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
     const contents = tab.view.webContents;
     if (host.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
     if ([...host.turnTabs.values()].some(candidate => candidate.accountName === tab.accountName && candidate.status === "running")) return;

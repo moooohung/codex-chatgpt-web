@@ -1,7 +1,10 @@
+const { applyStealthHeaders } = require("./stealth.cjs");
+
 const CHATGPT_BROWSER_LOCALE = "en-US";
 const CHATGPT_ACCEPT_LANGUAGES = "en-US,en";
 
 function configureChatGptLocale(browserSession) {
+  applyStealthHeaders(browserSession);
   // Chromium's language list and ChatGPT's explicit UI preference are separate.
   browserSession.setUserAgent(browserSession.getUserAgent(), CHATGPT_ACCEPT_LANGUAGES);
   return browserSession.cookies.set({

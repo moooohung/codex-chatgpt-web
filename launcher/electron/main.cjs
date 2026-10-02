@@ -24,6 +24,8 @@ const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { configureBrowserDebugging, waitForBrowserDebugging, ownedDebuggingTarget, smokeBrowserDebugging } = require("./browser-debugging.cjs");
 const { CHATGPT_BROWSER_LOCALE } = require("./chatgpt-locale.cjs");
 app.commandLine.appendSwitch("lang", CHATGPT_BROWSER_LOCALE);
+app.commandLine.appendSwitch("disable-blink-features", "AutomationControlled");
+const { sanitizeUserAgent } = require("./stealth.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { LimitsController } = require("./limits-controller.cjs");
 const { SOURCE_URL: LIMITS_SOURCE_URL } = require("./limits-store.cjs");
@@ -1132,10 +1134,7 @@ async function start() {
   await app.whenReady();
   cdpPort = await waitForBrowserDebugging(browserDebuggingStartup);
   if (app.userAgentFallback) {
-    app.userAgentFallback = app.userAgentFallback
-      .replace(/Electron\/[0-9\.]+\s?/g, "")
-      .replace(/Codex Web GPT\/[0-9\.]+\s?/g, "")
-      .trim();
+    app.userAgentFallback = sanitizeUserAgent(app.userAgentFallback);
   }
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
