@@ -10,9 +10,9 @@ const CHATGPT_STEALTH_URLS = [
 function sanitizeUserAgent(ua) {
   if (!ua || typeof ua !== "string") return ua;
   return ua
-    .replace(/Electron\/[0-9.]+\s?/g, "")
-    .replace(/Codex Web GPT\/[0-9.]+\s?/g, "")
-    .replace(/codex-chatgpt-web\/[0-9.]+\s?/g, "")
+    .replace(/Electron\/[0-9.]+\s?/gi, "")
+    .replace(/Codex\s?Web\s?GPT\/[0-9.]+\s?/gi, "")
+    .replace(/codex-chatgpt-web\/[0-9.]+\s?/gi, "")
     .trim();
 }
 
