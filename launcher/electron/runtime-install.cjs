@@ -147,7 +147,7 @@ function validateRuntimeFile(runtimeRoot, canonicalRoot, file) {
   }
 }
 
-function inspectRuntimeBundle(runtimeRoot, identity, allowFastCache = true) {
+function inspectRuntimeBundle(runtimeRoot, identity) {
   const manifest = readRuntimeManifest(runtimeRoot, identity);
   const paths = runtimeBundlePaths(runtimeRoot, identity.platform);
 
@@ -178,8 +178,6 @@ function inspectRuntimeBundle(runtimeRoot, identity, allowFastCache = true) {
   }
 
   const canonicalRoot = fs.realpathSync(runtimeRoot);
-  void allowFastCache; // Compatibility argument; caches never establish integrity.
-
   // Full verification path: compute SHA-256 for all files
   for (const file of manifest.files) validateRuntimeFile(runtimeRoot, canonicalRoot, file);
   if (identity.platform !== "win32" && (fs.statSync(paths.executable).mode & 0o111) === 0) {
@@ -189,8 +187,8 @@ function inspectRuntimeBundle(runtimeRoot, identity, allowFastCache = true) {
   return { manifest, runtimeRoot: paths.runtimeRoot };
 }
 
-function validateRuntimeBundle(runtimeRoot, identity, allowFastCache = true) {
-  return inspectRuntimeBundle(runtimeRoot, identity, allowFastCache).runtimeRoot;
+function validateRuntimeBundle(runtimeRoot, identity) {
+  return inspectRuntimeBundle(runtimeRoot, identity).runtimeRoot;
 }
 
 async function waitForPackagedRuntimeSource({

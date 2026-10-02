@@ -89,7 +89,7 @@ test("Responses authenticates the native retry before constructing its adapter",
   process.env.CODEX_HOME=f.home;
   let constructions=0;
   const send=()=>responseRequest(new Request("http://127.0.0.1/v1/responses", {
-    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(f.request()._rawBody),
+    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ ...f.request()._rawBody as object, store:false }),
   }),defaultConfig("browser-only"),()=> {
     constructions++;
     return {name:"native-retry-probe", async runTurn(parsed) {
