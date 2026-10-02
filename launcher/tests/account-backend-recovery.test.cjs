@@ -7,7 +7,7 @@ function fixture() {
   const calls = [];
   const tab = { id: "login", accountName: "first", isSignInTab: true, status: "ready",
     view: { webContents: { id: 42, isDestroyed: () => false, getURL: () => "https://chatgpt.com/?temporary-chat=true" } } };
-  const host = { turnTabs: new Map([[tab.id, tab]]), accountStatuses: new Map(), cloudflareChallengeRecoveryDelayMs: 0,
+  const host = { turnTabs: new Map([[tab.id, tab]]), accountStatuses: new Map(), accountChallengeRecoveryDelayMs: 0,
     logger: { warn: (event, detail) => calls.push({ event, detail }) }, snapshot: () => ({}),
     loadAccountSignInSurface: async (_contents, url) => calls.push({ reload: url }), publishState() {} };
   const challenge = { webContentsId: 42, url: "https://chatgpt.com/backend-api/models", statusCode: 403,
@@ -62,4 +62,19 @@ test("a failed sign-in refresh is reported without deleting the account or its b
   handleAccountBackendResponse(host, challenge); await tab.challengeRecovery;
   assert.equal(tab.status, "error"); assert.equal(tab.loading, false);
   assert.equal(host.turnTabs.get(tab.id), tab);
+});
+
+test("account verification ignores the primary reload delay and cancels recovery on success", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  const { host, tab, calls, challenge } = fixture();
+  host.cloudflareChallengeRecoveryDelayMs = 500;
+  host.accountChallengeRecoveryDelayMs = 45_000;
+  handleAccountBackendResponse(host, challenge);
+  t.mock.timers.tick(500); await Promise.resolve();
+  assert.equal(calls.filter(c => c.reload).length, 0);
+  handleAccountBackendResponse(host, { ...challenge, url: "https://chatgpt.com/api/auth/session", statusCode: 200,
+    responseHeaders: { "Content-Type": ["application/json; charset=utf-8"] } });
+  t.mock.timers.tick(500); await tab.challengeRecovery;
+  assert.equal(calls.filter(c => c.reload).length, 0);
+  assert.equal(tab.status, "ready");
 });

@@ -45,7 +45,9 @@ function handleAccountBackendResponse(host, details) {
   if (!tab.isSignInTab || busy || tab.challengeReloadAttempted) return true;
   tab.challengeReloadAttempted = true;
   tab.challengeRecovery = (async () => {
-    const graceMs = host.cloudflareChallengeRecoveryDelayMs ?? DEFAULT_CHALLENGE_GRACE_PERIOD_MS;
+    // The primary surface's 500 ms reload delay is a different lifecycle. It must
+    // not truncate this account page's browser-verification grace period.
+    const graceMs = host.accountChallengeRecoveryDelayMs ?? DEFAULT_CHALLENGE_GRACE_PERIOD_MS;
     if (graceMs > 0) {
       const start = Date.now();
       while (Date.now() - start < graceMs) {
