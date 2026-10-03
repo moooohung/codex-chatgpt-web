@@ -132,11 +132,21 @@ export async function prepareNativeCompactionContinuation(
   parsed: CodexParsedRequest,
   options: { codexHome?: string; sqliteHome?: string; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<boolean> {
+  return prepareNativeSnapshotRead(
+    () => admitNativeCompactionContinuation(parsed, options.codexHome, options.sqliteHome, true), options,
+  );
+}
+
+/** Shared bounded admission for native checkpoints and desktop task replay. */
+export async function prepareNativeSnapshotRead<T>(
+  read: () => T,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<T> {
   const deadline = Date.now() + Math.max(0, Math.min(1_000, options.timeoutMs ?? 1_000));
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (options.signal?.aborted) throw options.signal.reason;
     try {
-      return admitNativeCompactionContinuation(parsed, options.codexHome, options.sqliteHome, true);
+      return read();
     } catch (error) {
       if (!(error instanceof NativeSnapshotPendingError)) throw error;
       const remaining = deadline - Date.now();

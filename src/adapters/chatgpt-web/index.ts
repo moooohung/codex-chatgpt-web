@@ -24,7 +24,7 @@ import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { PreparedChatGptTurnStore } from "./prepared-turn";
 import { emitChatGptRoundEvent, isChatGptObserverAbort, chatGptRoundFailureEvidence } from "./round-observer";
-import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
+import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds, verifiedNativeRetrySourceTurnId } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, createChatGptWebPromptPreparation, isChatGptTokenRejection } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
@@ -1201,7 +1201,12 @@ export function createChatGptWebAdapter(
         const nativeIdentity = extractChatGptTurnIdentity(parsed);
         const nativeTurnId = nativeIdentity.turnId;
         if (!nativeTurnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser ownership");
-        const abortedTurnIds = manualRequest ? new Set(priorChatGptAbortedTurnIds(parsed)) : undefined;
+        const abortedTurnIds = new Set(manualRequest ? priorChatGptAbortedTurnIds(parsed) : []);
+        // Desktop Play changes the native owner even when the human instruction is unchanged.
+        // Retire only the locally authenticated old task; the registry waits for physical
+        // browser cleanup before starting the replacement with a fresh MCP capability.
+        const retrySourceTurnId = verifiedNativeRetrySourceTurnId(parsed);
+        if (retrySourceTurnId) abortedTurnIds.add(retrySourceTurnId);
         if (abortedTurnIds?.size) {
           chatGptTurnSessions.retireAbortedOwnerTurns(ownerKey, abortedTurnIds, executionKey);
         }

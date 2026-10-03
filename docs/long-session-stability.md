@@ -14,6 +14,18 @@ creation or SSE. Complete conflicting records retain their non-retryable validat
 Reading and validation time is additional to the waiting budget. Cancellation closes the
 watcher; a subsequent attempt authenticates the current journal again.
 
+Desktop Play after an app/switcher restart can open a new native turn while keeping the
+original human instruction. Admission authenticates the exact instruction id, content,
+old task boundary and environment, and the current open task/context in the native
+journal. An unfinished old task can hand off to the new turn without a synthetic
+"continue" message. Completed/cancelled tasks, unrelated failures, newer instructions,
+foreign owners and replaced checkpoints cannot supply this evidence. A prior Play
+rejected by this bridge's exact structured turn-revision validation error may be retried;
+other validation failures remain terminal. Partial appends use the same bounded 503
+admission as checkpoint recovery. This evidence is request-scoped and survives no body
+or instruction substitution. The authenticated old browser/capability is retired and
+physical cleanup completes before one replacement can start with the new native owner.
+
 The existing turn registry remains the browser execution owner. Reconnection replays its
 event journal and queued tool batch, and physical retirement gates replacement work.
 HTTP disconnect does not become user cancellation. A native stop or superseding instruction
