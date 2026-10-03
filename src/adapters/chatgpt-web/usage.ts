@@ -16,6 +16,7 @@ import {
   compileChatGptWebPrompt,
   createChatGptWebPromptPreparation,
   type ChatGptWebMultipartPartCount,
+  type ChatGptWebPromptPreparation,
   type CompiledChatGptWebPrompt,
   type CompileChatGptWebPromptOptions,
 } from "./prompt";
@@ -43,6 +44,7 @@ export function estimateChatGptWebInputTokens(
   capabilities: ChatGptWebCapabilities,
   options: CompileChatGptWebPromptOptions = {},
 ): number {
+  const preparation = options.preparation ?? createChatGptWebPromptPreparation(parsed);
   const manual = isChatGptWebZeroRiskBackendModel(parsed.modelId);
   const mode = manual
     ? { localTools: true }
@@ -54,13 +56,14 @@ export function estimateChatGptWebInputTokens(
     manual ? ESTIMATE_REQUEST_ID : mode.localTools && !parsed._compactionRequest ? ESTIMATE_TURN_TOKEN : undefined,
     {
       ...options,
+      preparation,
       ...(manual ? { manualControl: true as const } : {}),
       captureLunaCheckpoint: parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
         && !parsed._compactionRequest
         && Boolean(identity.threadId && identity.turnId),
     },
   );
-  return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
+  return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId, preparation.estimate);
 }
 
 /**
@@ -73,6 +76,7 @@ export function resolveBiggerContextMultipartParts(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
   experimentalSkillAttachments = false,
+  prepared?: ChatGptWebPromptPreparation,
 ): ChatGptWebMultipartPartCount | undefined {
   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
@@ -81,7 +85,8 @@ export function resolveBiggerContextMultipartParts(
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
   }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  const preparation = createChatGptWebPromptPreparation(parsed);
+  const preparation = prepared ?? createChatGptWebPromptPreparation(parsed);
+  if (preparation.request !== parsed) throw new Error("Prompt preparation belongs to another request");
   const estimate = preparation.estimate;
   const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
     CHATGPT_WEB_BACKEND_MODEL,
@@ -184,10 +189,12 @@ export function estimateChatGptWebUsage(
   experimentalBiggerContext = false,
   experimentalSkillAttachments = false,
 ): CodexUsage {
+  const preparation = createChatGptWebPromptPreparation(parsed);
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
+    preparation,
     experimentalSkillAttachments,
     experimentalMultipartParts: experimentalBiggerContext
-      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments)
+      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments, preparation)
       : undefined,
   });
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
