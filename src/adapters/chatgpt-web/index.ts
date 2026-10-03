@@ -26,7 +26,7 @@ import { PreparedChatGptTurnStore } from "./prepared-turn";
 import { emitChatGptRoundEvent, isChatGptObserverAbort, chatGptRoundFailureEvidence } from "./round-observer";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, isChatGptTokenRejection } from "./prompt";
+import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, createChatGptWebPromptPreparation, isChatGptTokenRejection } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
@@ -451,10 +451,12 @@ export function createChatGptWebAdapter(
       : undefined;
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};
+      const preparation = createChatGptWebPromptPreparation(input);
       const experimentalMultipartParts = experimentalBiggerContext
-        ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments)
+        ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments, preparation)
         : undefined;
       return {
+        preparation,
         captureLunaCheckpoint,
         experimentalSkillAttachments,
         ...(experimentalMultipartParts !== undefined

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { estimateChatGptWebInputTokens, resolveBiggerContextMultipartParts } from "../src/adapters/chatgpt-web/usage";
-import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
+import { estimateChatGptWebInputTokens, estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "../src/adapters/chatgpt-web/usage";
+import { compileChatGptWebPrompt, createChatGptWebPromptPreparation } from "../src/adapters/chatgpt-web/prompt";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
 import { estimateTokens } from "../src/lib/token-estimate";
@@ -16,6 +16,34 @@ function request(text: string): CodexParsedRequest {
     options: { reasoning: "high" },
   };
 }
+
+test("request preparation reuse preserves the complete multipart prompt and usage accounting", () => {
+  const parsed = request("");
+  parsed.context.messages = Array.from({ length: 12 }, (_, index) => ({
+    role: "user", timestamp: index + 1, content: `${index}: ${"한글 😀 word ".repeat(1_000)}`,
+  }));
+  for (const caps of [capabilities, { ...capabilities, proAvailable: false }]) {
+    const preparation = createChatGptWebPromptPreparation(parsed);
+    const parts = resolveBiggerContextMultipartParts(parsed, caps, false, preparation);
+    expect(parts).toBe(resolveBiggerContextMultipartParts(parsed, caps));
+    const shared = compileChatGptWebPrompt(parsed, caps, undefined, { experimentalMultipartParts: parts, preparation });
+    const independent = compileChatGptWebPrompt(parsed, caps, undefined, { experimentalMultipartParts: parts });
+    expect(shared).toEqual(independent);
+    const expected = estimateCompiledChatGptWebInputTokens(independent, parsed.modelId);
+    expect(estimateChatGptWebInputTokens(parsed, caps, { experimentalMultipartParts: parts, preparation })).toBe(expected);
+    const usage = estimateChatGptWebUsage(parsed, { answer: "done" }, caps, true);
+    expect(usage.inputTokens).toBe(expected);
+    expect(usage.totalTokens).toBe(expected + usage.outputTokens!);
+  }
+}, 15_000);
+
+test("another request cannot reuse a multipart preparation or its token counts", () => {
+  const first = request("original task");
+  const second = request("new task");
+  const preparation = createChatGptWebPromptPreparation(first);
+  expect(() => resolveBiggerContextMultipartParts(second, capabilities, false, preparation)).toThrow(/another request/);
+  expect(() => estimateChatGptWebInputTokens(second, capabilities, { preparation })).toThrow(/another request/);
+});
 
 test.each([
   ["highly compressible", "a".repeat(480_000)],

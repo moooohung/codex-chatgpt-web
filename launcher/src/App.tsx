@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
@@ -17,6 +18,7 @@ import { LimitsSurface } from "./LimitsSurface";
 import { limitsCopyFor } from "./limits-copy";
 import { useLimits } from "./useLimits";
 import { describeTurnActivity } from "./turn-activity";
+import { createLauncherLogStore, type LauncherLogStore } from "./log-store";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -42,7 +44,7 @@ export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
-  const [logs, setLogs] = useState<LogRecord[]>([]);
+  const [logStore] = useState(createLauncherLogStore);
   const [error, setError] = useState<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
 
@@ -57,7 +59,7 @@ export function App() {
       if (cancelled) return;
       setSnapshot(next);
       setBrowser(next.browser);
-      setLogs(next.logs);
+      logStore.seed(next.logs);
       setOperation(next.operation);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
         setError(next.operation.message);
@@ -92,7 +94,7 @@ export function App() {
         logTimer = undefined;
         const batch = pendingLogs;
         pendingLogs = [];
-        if (!cancelled) setLogs(current => [...current, ...batch].slice(-300));
+        if (!cancelled) logStore.append(batch);
       }, 100);
     });
     const unsubscribeUpdate = api.onUpdateState((update) => {
@@ -151,7 +153,7 @@ export function App() {
             copy={copy}
             key="launcher"
             language={language}
-            logs={logs}
+            logStore={logStore}
             operation={operation}
             setError={setError}
             snapshot={snapshot}
@@ -340,7 +342,7 @@ function LauncherShell({
   browser,
   copy,
   language,
-  logs,
+  logStore,
   operation,
   setError,
   snapshot,
@@ -349,7 +351,7 @@ function LauncherShell({
   browser: BrowserState | null;
   copy: Copy;
   language: Language;
-  logs: LogRecord[];
+  logStore: LauncherLogStore;
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -736,7 +738,7 @@ function LauncherShell({
               />
             ) : null}
             {surface === "activity" ? (
-              <ActivitySurface copy={copy} language={language} logs={logs} browser={browser} setError={setError}
+              <ActivitySurface copy={copy} language={language} logStore={logStore} browser={browser} setError={setError}
                 openTab={async id => {
                   await api!.selectBrowserTab(id);
                   navigateSurface("browser");
@@ -1596,26 +1598,36 @@ function McpSurface({
 function ActivitySurface({
   copy,
   language,
-  logs,
+  logStore,
   browser,
   openTab,
   setError,
 }: {
   copy: Copy;
   language: Language;
-  logs: LogRecord[];
+  logStore: LauncherLogStore;
   browser: BrowserState | null;
   openTab: (id: string) => Promise<void>;
   setError: (error: string | null) => void;
 }) {
+  const logs = useSyncExternalStore(logStore.subscribe, logStore.getSnapshot);
   const [now, setNow] = useState(Date.now);
   const logKeys = useRef(new WeakMap<LogRecord, number>());
   const nextLogKey = useRef(0);
-  const logKey = (record: LogRecord) => {
+  const rows = useMemo(() => [...logs].reverse().map((record) => {
     let key = logKeys.current.get(record);
     if (key === undefined) { key = ++nextLogKey.current; logKeys.current.set(record, key); }
-    return key;
-  };
+    return (
+      <div className="activity-row" key={key}>
+        <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
+        <div>
+          <strong>{humanEvent(record.event)}</strong>
+          <span>{logDetail(record.detail)}</span>
+        </div>
+        <time>{formatTime(record.at, language)}</time>
+      </div>
+    );
+  }), [logs, language]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(timer);
@@ -1673,16 +1685,7 @@ function ActivitySurface({
             <span>{copy.noLogs}</span>
           </div>
         ) : null}
-        {[...logs].reverse().map((record) => (
-          <div className="activity-row" key={logKey(record)}>
-            <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
-            <div>
-              <strong>{humanEvent(record.event)}</strong>
-              <span>{logDetail(record.detail)}</span>
-            </div>
-            <time>{formatTime(record.at, language)}</time>
-          </div>
-        ))}
+        {rows}
       </div>
     </ContentSurface>
   );
