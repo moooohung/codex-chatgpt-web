@@ -62,6 +62,14 @@ function isVerifiedNativeRetry(parsed: CodexParsedRequest, identity: ChatGptTurn
   return proof !== undefined && isDeepStrictEqual(proof.identity, identity) && isDeepStrictEqual(proof.source, source);
 }
 
+/** Exact superseded native owner from request-scoped local replay evidence. */
+export function verifiedNativeRetrySourceTurnId(parsed: CodexParsedRequest): string | undefined {
+  const identity = extractChatGptTurnIdentity(parsed);
+  const source = chatGptTurnUserRevisionHistory(parsed).at(-1);
+  return source?.turnId && source.turnId !== identity.turnId && isVerifiedNativeRetry(parsed, identity, source)
+    ? source.turnId : undefined;
+}
+
 export class MissingTrustedCodexEnvironmentError extends Error {
   constructor(field: string) {
     super(`ChatGPT web turn is missing ${field} in trusted Codex environment context`);

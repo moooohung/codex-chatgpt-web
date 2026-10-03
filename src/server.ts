@@ -19,7 +19,7 @@ import {
 } from "./adapters/chatgpt-web/environment";
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { prepareNativeCompactionContinuation } from "./adapters/chatgpt-web/native-compaction-admission";
-import { authenticateNativeFailedTurnRetry } from "./adapters/chatgpt-web/native-turn-retry";
+import { prepareNativeFailedTurnRetry } from "./adapters/chatgpt-web/native-turn-retry";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -618,7 +618,14 @@ export async function responseRequest(
     // trace tombstone; preserve the adapter's existing strict validation/error path below.
     const message = error instanceof Error ? error.message : String(error);
     if (message === CHATGPT_TURN_REVISION_CONFLICT_MESSAGE) {
-      if (!authenticateNativeFailedTurnRetry(parsed)) return formatErrorResponse(400, "invalid_request_error", message);
+      try {
+        if (!await prepareNativeFailedTurnRetry(parsed, { signal: req.signal })) return formatErrorResponse(400, "invalid_request_error", message);
+      } catch (retryError) {
+        if (!(retryError instanceof ChatGptWebAdapterError)) throw retryError;
+        return Response.json({ error: { type: retryError.errorType, code: retryError.code, message: retryError.message } }, {
+          status: retryError.status, headers: { "retry-after": "1" },
+        });
+      }
       traceId = chatGptWebTraceId(provider, parsed);
     } else if (!message.includes("requires native Codex turn_id metadata")
       && !message.includes("requires a current-turn user message")) throw error;

@@ -204,6 +204,12 @@ function firstRolloutRecord(fd: number, size: number): Record<string, unknown> {
 }
 
 function latestTurnContext(fd: number, size: number): Record<string, unknown> | undefined {
+  return latestRolloutPayload(fd, size, item => item.type === "turn_context");
+}
+
+function latestRolloutPayload(
+  fd: number, size: number, matches: (item: Record<string, unknown>) => boolean,
+): Record<string, unknown> | undefined {
   let position = size;
   let carry = Buffer.alloc(0);
   let firstSegmentAtEof = true;
@@ -232,7 +238,7 @@ function latestTurnContext(fd: number, size: number): Record<string, unknown> | 
         throw new Error("Codex rollout JSONL record exceeds the bounded record size");
       }
       const item = parseJsonLine(line);
-      if (item.type === "turn_context") return record(item.payload);
+      if (matches(item)) return record(item.payload);
     }
     carry = Buffer.from(data.subarray(0, lineEnd));
     if (carry.length > MAX_ROLLOUT_JSON_LINE_BYTES) {
@@ -241,7 +247,7 @@ function latestTurnContext(fd: number, size: number): Record<string, unknown> | 
   }
   if (carry.length === 0) return undefined;
   const item = parseJsonLine(carry);
-  return item.type === "turn_context" ? record(item.payload) : undefined;
+  return matches(item) ? record(item.payload) : undefined;
 }
 
 function verifyHistoricalEnvironmentMessages(
@@ -290,12 +296,21 @@ function verifyHistoricalEnvironmentMessages(
 }
 
 function verifyFailedInstructionRetry(
-  fd: number, size: number, source: ChatGptTurnUserRevision,
+  fd: number, size: number, turnId: string, source: ChatGptTurnUserRevision,
   instruction: (item: unknown) => ChatGptTurnUserRevision | undefined,
+  retryConflictMessage: string,
 ): boolean {
   let sourceSeen = false;
   let failed = false;
   let blocked = false;
+  let owner: string | undefined;
+  let open = false;
+  let contextOwner: string | undefined;
+  let sourceOwned = false;
+  let restarted = false;
+  let currentStarted = false;
+  let currentContext = false;
+  let rejectedRestart = false;
   let position = 0;
   let carry = Buffer.alloc(0);
   while (position < size) {
@@ -312,10 +327,22 @@ function verifyFailedInstructionRetry(
       if (line.length > MAX_ROLLOUT_JSON_LINE_BYTES) throw new Error("Codex rollout JSONL record exceeds the bounded record size");
       const item = parseJsonLine(line);
       const payload = record(item.payload);
+      if (item.type === "turn_context") {
+        contextOwner = open && payload?.turn_id === owner ? owner : undefined;
+        if (sourceSeen && payload?.turn_id !== owner) blocked = true;
+        if (currentStarted && contextOwner === turnId) currentContext = true;
+      }
       if (item.type === "response_item") {
         const revision = instruction(payload);
         if (revision) {
-          if (isDeepStrictEqual(revision, source)) { sourceSeen = true; failed = false; }
+          if (isDeepStrictEqual(revision, source)) {
+            // The old instruction must have belonged to an open native task. A new
+            // task_started supersedes that owner after desktop shutdown without adding
+            // another human message; a thread id alone cannot prove this handoff.
+            if (sourceSeen) blocked = true;
+            sourceSeen = true;
+            sourceOwned = open && owner === source.turnId && contextOwner === source.turnId;
+          }
           else if (sourceSeen) blocked = true;
         }
         if (sourceSeen && payload?.type === "message" && payload.role === "user") {
@@ -325,10 +352,36 @@ function verifyFailedInstructionRetry(
         }
         if (sourceSeen && ["compaction", "compaction_summary", "context_compaction"].includes(String(payload?.type))) blocked = true;
       }
-      if (!sourceSeen || item.type !== "event_msg") continue;
+      if (item.type !== "event_msg") continue;
+      if (payload?.type === "task_started") {
+        if (sourceSeen) {
+          restarted = (sourceOwned && open && owner === source.turnId) || (rejectedRestart && !open);
+          if (currentStarted || (!restarted && (!failed || payload.turn_id !== turnId))) blocked = true;
+          if (payload.turn_id === turnId) currentStarted = true;
+          rejectedRestart = false;
+        }
+        owner = typeof payload.turn_id === "string" ? payload.turn_id : undefined;
+        open = owner !== undefined;
+        contextOwner = undefined;
+      }
+      if (["task_complete", "turn_aborted", "task_aborted"].includes(String(payload?.type))
+        && payload?.turn_id === owner) open = false;
+      if (!sourceSeen) continue;
       if (["turn_aborted", "task_aborted"].includes(String(payload?.type))) blocked = true;
       if (payload?.type === "task_complete") {
         const error = record(payload.error);
+        if (payload.turn_id === owner && owner !== source.turnId && owner !== turnId && restarted && contextOwner === owner) {
+          // Older builds rejected Play at admission. Permit another explicit native Play
+          // only for that exact structured validation error, never an unrelated failure.
+          try {
+            const response = error?.codex_error_info === "other" && typeof error.message === "string"
+              ? record(JSON.parse(error.message)) : undefined;
+            const validation = record(response?.error);
+            rejectedRestart = validation?.type === "invalid_request_error" && validation.message === retryConflictMessage;
+          } catch { rejectedRestart = false; }
+          if (!rejectedRestart) blocked = true;
+          continue;
+        }
         if (!error) { blocked = true; continue; }
         if (payload.turn_id === source.turnId) failed = error.codex_error_info === "server_overloaded";
       }
@@ -336,13 +389,14 @@ function verifyFailedInstructionRetry(
     carry = Buffer.from(data.subarray(start));
     if (carry.length > MAX_ROLLOUT_JSON_LINE_BYTES) throw new Error("Codex rollout JSONL record exceeds the bounded record size");
   }
-  return sourceSeen && failed && !blocked;
+  return sourceSeen && (failed || restarted) && currentStarted && currentContext && open && owner === turnId && !blocked;
 }
 
-/** Authenticate a capacity-failed instruction against this exact current native task. */
+/** Authenticate a failed retry or desktop restart against this exact open native task. */
 export function verifyCurrentCodexFailedTurnRetry(options: {
   codexHome: string; sqliteHome?: string; lineage: RolloutIdentity; turnId: string;
   source: ChatGptTurnUserRevision; instruction: (item: unknown) => ChatGptTurnUserRevision | undefined;
+  retryConflictMessage: string;
 }): boolean {
   const { codexHome, lineage, turnId, source, instruction } = options;
   if (![lineage.threadId, turnId, source.turnId].every(value => typeof value === "string" && CODEX_ID.test(value))
@@ -353,12 +407,23 @@ export function verifyCurrentCodexFailedTurnRetry(options: {
   for (const candidate of candidates) {
     const fd = openSync(validateRolloutPath(codexHome, candidate, lineage.threadId), "r");
     try {
-      const size = fstatSync(fd).size;
+      const before = fstatSync(fd);
+      const size = before.size;
       validateSessionMeta(firstRolloutRecord(fd, size), lineage);
+      const tail = Buffer.alloc(1);
+      if (readSync(fd, tail, 0, 1, size - 1) !== 1 || tail[0] !== 0x0a) throw new NativeSnapshotPendingError(candidate);
       const latest = latestTurnContext(fd, size);
-      if (latest?.turn_id !== turnId) continue;
+      if (latest?.turn_id !== turnId) {
+        const boundary = latestRolloutPayload(fd, size, item => item.type === "turn_context" || (item.type === "event_msg"
+          && ["task_started", "task_complete", "task_aborted", "turn_aborted"].includes(String(record(item.payload)?.type))));
+        if (boundary?.type === "task_started" && boundary.turn_id === turnId) throw new NativeSnapshotPendingError(candidate);
+        continue;
+      }
       validateMetadataConsistency(lineage, environmentFromTurnContext(latest, turnId, []));
-      if (verifyFailedInstructionRetry(fd, size, source, instruction)) accepted += 1;
+      const verified = verifyFailedInstructionRetry(fd, size, turnId, source, instruction, options.retryConflictMessage);
+      const after = fstatSync(fd);
+      if (after.size !== size || after.mtimeMs !== before.mtimeMs) throw new NativeSnapshotPendingError(candidate);
+      if (verified) accepted += 1;
     } finally { closeSync(fd); }
   }
   return accepted === 1;
