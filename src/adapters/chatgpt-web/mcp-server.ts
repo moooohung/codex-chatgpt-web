@@ -49,6 +49,28 @@ const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly 
 // must settle first so an abandoned native tool call is returned as an MCP error instead of
 // letting the tunnel tear down and poison its long-lived stdio transport.
 export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 90_000;
+const NATIVE_POLL_MAX_MS = 30_000;
+const NATIVE_POLL_TRANSPORT_RULE = `ChatGPT Web transport rule: write_stdin and wait return after at most ${NATIVE_POLL_MAX_MS}ms per call. Longer yield_time_ms values are shortened before native dispatch; a returned session_id or running cell is still active. Poll the same session or cell again instead of restarting the command. Input characters, output limits and cancellation arguments are preserved.`;
+
+function boundedNativePollArguments(name: string, args: Record<string, unknown>): Record<string, unknown> {
+  if ((name === "write_stdin" || name === "wait")
+    && typeof args.yield_time_ms === "number" && Number.isFinite(args.yield_time_ms)
+    && args.yield_time_ms > NATIVE_POLL_MAX_MS) {
+    return { ...args, yield_time_ms: NATIVE_POLL_MAX_MS };
+  }
+  return args;
+}
+
+function nativePollGatewayPrelude(): string {
+  return [
+    "const normalizeNativePollArguments = (name, args) => {",
+    "  if ((name === \"write_stdin\" || name === \"wait\") && args && typeof args === \"object\" && !Array.isArray(args)",
+    "    && typeof args.yield_time_ms === \"number\" && Number.isFinite(args.yield_time_ms)",
+    `    && args.yield_time_ms > ${NATIVE_POLL_MAX_MS}) return { ...args, yield_time_ms: ${NATIVE_POLL_MAX_MS} };`,
+    "  return args;",
+    "};",
+  ].join("\n");
+}
 
 const ZERO_RISK_MCP_INSTRUCTIONS = [
   "For each pasted Codex Web GPT request, begin with codex_turn_start using the request_id in its request block.",
@@ -163,8 +185,9 @@ function isGatewayAgentWaitTool(name: string): boolean {
 
 function browserToolDescription(tool: CodexTool): string {
   if (isAgentWaitTool(tool)) return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
+  if (["write_stdin", "wait"].includes(wireName(tool))) return `${tool.description}\n\n${NATIVE_POLL_TRANSPORT_RULE}`;
   if (!tool.namespace && tool.name === "exec") {
-    return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE} This rule is enforced for wait_agent calls made inside exec; recursive raw exec is unavailable.`;
+    return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE} This rule is enforced for wait_agent calls made inside exec; recursive raw exec is unavailable.\n\n${NATIVE_POLL_TRANSPORT_RULE}`;
   }
   return tool.description;
 }
@@ -263,6 +286,7 @@ interface GatewayToolCatalogPage {
 }
 
 function gatewayToolDescription(tool: GatewayToolDescriptor): string {
+  if (["write_stdin", "wait"].includes(tool.name)) return `${tool.description}\n\n${NATIVE_POLL_TRANSPORT_RULE}`;
   if (!isGatewayAgentWaitTool(tool.name)) return tool.description;
   return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
 }
@@ -368,7 +392,7 @@ function execGatewayProgram(
   if (gatewayName !== nestedToolName) {
     throw new Error(`Codex nested tool name is invalid: ${nestedToolName}`);
   }
-  const nestedInput = freeform ? payload.input ?? "" : payload.arguments ?? {};
+  const nestedInput = freeform ? payload.input ?? "" : boundedNativePollArguments(nestedToolName, payload.arguments ?? {});
   return execGatewayResultProgram([
     "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native nested tool registry is unavailable\");",
     `const nestedToolName = ${JSON.stringify(gatewayName)};`,
@@ -382,7 +406,7 @@ function execGatewayProgram(
 }
 
 /**
- * Preserve the native freeform exec surface while applying the same wait_agent deadline contract
+ * Preserve the native freeform exec surface while applying the same native polling and wait_agent contracts
  * as direct calls. The model still owns its JavaScript; only the tool registry it receives is a
  * transparent proxy whose native wait functions validate their transport-bound argument before dispatch.
  */
@@ -392,6 +416,7 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string): s
     input,
     "})((() => {",
     "  const source = tools;",
+    nativePollGatewayPrelude(),
     `  const waitNames = new Set(${JSON.stringify([...GATEWAY_AGENT_WAIT_TOOL_NAMES])});`,
     `  const blockedExecName = ${JSON.stringify(blockedExecName)};`,
     `  const pollMs = ${CHATGPT_WEB_AGENT_WAIT_POLL_MS};`,
@@ -413,6 +438,8 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string): s
     "        }",
     "        return Reflect.apply(value, source, [args]);",
     "      };",
+    "    } else if (typeof value === \"function\" && (name === \"write_stdin\" || name === \"wait\")) {",
+    "      exposed = args => Reflect.apply(value, source, [normalizeNativePollArguments(name, args)]);",
     "    } else if (typeof value === \"function\") {",
     "      exposed = (...args) => Reflect.apply(value, source, args);",
     "    }",
@@ -583,7 +610,7 @@ export async function runChatGptMcpServer(options: {
         bindingId,
         wireName: wireName(tool),
         freeform: tool.freeform === true,
-        ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
+        ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: boundedNativePollArguments(wireName(tool), payload.arguments ?? {}) }),
       }, timeoutMs, signal);
       return asMcpResult(response);
     } catch (error) {
