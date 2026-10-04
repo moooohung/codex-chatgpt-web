@@ -58,3 +58,19 @@ allows ten minutes of silent reasoning or tool work. The transport watchdog rema
 including during preparation. Diagnostic events contain trace/stage/counts, never conversation
 text or tokens. `response_observer_detached`, `orphaned_browser_turn_cancelled` and
 `browser_progress_stalled` distinguish lost observers, cleanup and stalled execution.
+
+## Completed-turn memory
+
+The terminal session registry keeps exact final outcomes and round journals for reconnects.
+Once both the browser outcome and physical cleanup settle, all already-admitted observers finish,
+and capability retirement is attempted, the session releases its complete native input and
+execution/progress callbacks. A retained-conversation release callback carries only the launcher
+descriptor and conversation key. Final text, reasoning, tool call/result IDs and replay events stay
+available under the existing retention policy; active or physically unsettled turns keep their
+execution state.
+
+Response DOM tracking has one active observer per document. Moving to another assistant response
+disconnects the old observer and clears its cached element references. The conversation DOM and
+current response consistency checks remain intact. Heap retention fixtures measure references
+that become reclaimable, not an immediate reduction in operating-system working set; allocator
+capacity and ChatGPT's own page memory must be measured separately.

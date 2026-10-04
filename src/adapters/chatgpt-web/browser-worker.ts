@@ -4291,7 +4291,7 @@ export class ChatGptBrowserWorker {
         observer: MutationObserver;
         rendered: Map<HTMLElement, boolean>;
       };
-      type ObserverRegistry = { documentId: string; nextId: number; states: WeakMap<Element, ObserverState> };
+      type ObserverRegistry = { documentId: string; nextId: number; states: WeakMap<Element, ObserverState>; activeRoot?: Element };
       const scope = globalThis as typeof globalThis & {
         __CODEX_WEB_GPT_RESPONSE_OBSERVERS__?: ObserverRegistry;
       };
@@ -4300,6 +4300,15 @@ export class ChatGptBrowserWorker {
         nextId: 0,
         states: new WeakMap<Element, ObserverState>(),
       };
+      // Only the current response needs mutation/visibility tracking. Earlier responses stay
+      // in ChatGPT's conversation, but must not keep our observers and DOM caches per round.
+      if (registry.activeRoot && registry.activeRoot !== root) {
+        const previous = registry.states.get(registry.activeRoot);
+        previous?.observer.disconnect();
+        previous?.rendered.clear();
+        registry.states.delete(registry.activeRoot);
+      }
+      registry.activeRoot = root;
       let observerState = registry.states.get(root);
       if (!observerState) {
         observerState = {

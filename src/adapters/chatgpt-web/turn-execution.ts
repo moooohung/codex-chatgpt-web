@@ -57,7 +57,9 @@ export class ChatGptTraceFeed {
   private readonly queued: ChatGptTraceEvent[] = [];
   private readonly waiters = new Set<TraceWaiter>();
 
-  constructor(private readonly onContent?: () => void) {}
+  constructor(private onContent?: () => void) {}
+
+  releaseProgressCallback(): void { this.onContent = undefined; }
 
   push(event: ChatGptTraceEvent): void {
     const normalized = event.continuation ? event.text : event.text.trim();
@@ -106,7 +108,9 @@ export class ChatGptTextFeed {
   private readonly waiters = new Set<TextWaiter>();
   private text = "";
 
-  constructor(private readonly onContent?: () => void) {}
+  constructor(private onContent?: () => void) {}
+
+  releaseProgressCallback(): void { this.onContent = undefined; }
 
   push(delta: string): void {
     if (!delta) return;
@@ -476,15 +480,28 @@ export class ChatGptTurnSession {
   }
 
   private scheduleCapabilityRetirement(): void {
-    if (this.capabilityRetirementScheduled || !this.runtime.retireCapability) return;
+    if (this.capabilityRetirementScheduled) return;
     this.capabilityRetirementScheduled = true;
     // Register only after the first observer entered `runExclusive`. This ensures an immediately
     // completed mocked/real browser cannot revoke its token ahead of the browser-outcome branch.
     // At physical settlement, read the current tail so every tool-result/reconnect observer that
     // was already admitted finishes before the capability is retired.
-    void this.physicalSettlement
+    void Promise.all([this.physicalSettlement, this.browserOutcome])
       .then(() => this.tail)
-      .then(() => this.runtime.retireCapability!())
+      .then(async () => {
+        try {
+          await this.runtime.retireCapability?.();
+        } finally {
+          // Retain the exact outcome and round journal for reconnects, but not the complete
+          // native input or the closures that compiled it. The physical browser and the
+          // already-admitted response observer must both finish before these are released.
+          this.runtime.usageInput = undefined;
+          this.runtime.cancel = () => {};
+          this.runtime.retireCapability = undefined;
+          this.runtime.trace.releaseProgressCallback();
+          this.runtime.text.releaseProgressCallback();
+        }
+      })
       .catch(error => {
         console.error(
           `[chatgpt-web] failed to retire settled turn capability: ${error instanceof Error ? error.message : String(error)}`,

@@ -58,6 +58,12 @@ function brokerSocketPath(provider: CodexProviderConfig): string {
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
 }
 
+// Keep the retained-document release callback outside startRuntime's lexical scope. A
+// completed session keeps this callback for compaction/replacement, not its large request.
+function retainedConversationRelease(descriptor: string, conversationKey: string): () => Promise<void> {
+  return async () => { await releaseLauncherRetainedConversation(descriptor, conversationKey); };
+}
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
   let resolvePromise!: (value: T) => void;
   let rejectPromise!: (error: Error) => void;
@@ -452,9 +458,7 @@ export function createChatGptWebAdapter(
       : undefined;
     const retainConversation = conversationKey !== undefined;
     const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
-      ? async () => {
-        await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
-      }
+      ? retainedConversationRelease(retainedLauncherDescriptor, conversationKey)
       : undefined;
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};

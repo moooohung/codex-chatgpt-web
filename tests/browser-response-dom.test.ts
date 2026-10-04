@@ -6,6 +6,42 @@ import { ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptVisibleTraceTrac
 import { ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "../src/adapters/chatgpt-web/markdown";
 
 const smokeHtml = readFileSync(new URL("./fixtures/chatgpt-dil-smoke.html", import.meta.url), "utf8");
+test("switching responses disconnects the previous observer and releases its DOM references", async () => {
+  const root = (id: string) => ({ id, isConnected: true, getAttribute: () => null, hasAttribute: () => false,
+    querySelectorAll: () => [], contains: () => false, closest: () => null });
+  const roots = new Map(["first", "second"].map(id => [id, root(id)]));
+  let disconnected = 0;
+  const context = createContext({
+    document: { querySelectorAll: () => [] }, performance: { timeOrigin: 1 },
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+    MutationObserver: class { observe() {} disconnect() { disconnected++; } },
+  });
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+  const locator = (id: string) => ({
+    evaluate: async (callback: Function, options: unknown) => {
+      // The early cache return exercises the production observer lifecycle without requiring
+      // a fully rendered response; the document/root identity still comes from its callback.
+      const registry = runInContext("globalThis.__CODEX_WEB_GPT_RESPONSE_OBSERVERS__", context);
+      const root = roots.get(id);
+      const state = registry?.states.get(root);
+      const knownKey = state ? `${registry.documentId}:${state.id}:${state.revision}:unknown` : undefined;
+      return runInContext(`(${callback.toString()})`, context)(root, { ...(options as object), knownKey });
+    },
+    page: () => ({ isClosed: () => false }),
+  });
+  // Empty roots have no HTML/collection iteration; the response snapshot is still valid.
+  await worker.responseDomSnapshot(locator("first"), {});
+  const registry = runInContext("globalThis.__CODEX_WEB_GPT_RESPONSE_OBSERVERS__", context);
+  const first = roots.get("first"), previous = registry.states.get(first);
+  previous.rendered.set(first, true);
+  await worker.responseDomSnapshot(locator("first"), {});
+  expect(disconnected).toBe(0);
+  await worker.responseDomSnapshot(locator("second"), {});
+  expect(disconnected).toBe(1); expect(previous.rendered.size).toBe(0);
+  expect(registry.states.has(first)).toBeFalse(); expect(registry.activeRoot.id).toBe("second");
+  await worker.responseDomSnapshot(locator("first"), {});
+  expect(disconnected).toBe(2); expect(registry.states.get(first).id).not.toBe(previous.id);
+});
 test("React evidence is confined to the current assistant message and cannot bypass DOM completion", () => {
   const source = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const block = source.split("// CHATGPT_BOUND_FIBER_BEGIN")[1]!.split("// CHATGPT_BOUND_FIBER_END")[0]!;
