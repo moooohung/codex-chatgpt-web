@@ -120,6 +120,9 @@ export interface AppConfig {
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
+  /** Use the fewest context messages that fit the existing browser limits. False restores legacy planning. */
+  experimentalMinimalContextTransport?: boolean;
+  experimentalReuseVerifiedEffort?: boolean;
   useSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
@@ -252,6 +255,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     experimentalBiggerContext: false,
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
+    experimentalMinimalContextTransport: true,
+    experimentalReuseVerifiedEffort: true,
     useSavedChats: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
@@ -552,6 +557,15 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalFreshConversationPerTurn in ${path}`);
   }
   const experimentalFreshConversationPerTurn = parsed.experimentalFreshConversationPerTurn === true;
+  if (parsed.experimentalMinimalContextTransport !== undefined
+    && typeof parsed.experimentalMinimalContextTransport !== "boolean") {
+    throw new Error(`Invalid experimentalMinimalContextTransport in ${path}`);
+  }
+  const experimentalMinimalContextTransport = parsed.experimentalMinimalContextTransport !== false;
+  if (parsed.experimentalReuseVerifiedEffort !== undefined && typeof parsed.experimentalReuseVerifiedEffort !== "boolean") {
+    throw new Error(`Invalid experimentalReuseVerifiedEffort in ${path}`);
+  }
+  const experimentalReuseVerifiedEffort = parsed.experimentalReuseVerifiedEffort !== false;
   if (parsed.useSavedChats !== undefined && typeof parsed.useSavedChats !== "boolean") {
     throw new Error(`Invalid useSavedChats in ${path}`);
   }
@@ -582,6 +596,8 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalBiggerContext,
     experimentalSkillAttachments,
     experimentalFreshConversationPerTurn,
+    experimentalMinimalContextTransport,
+    experimentalReuseVerifiedEffort,
     useSavedChats,
     zeroRiskProEnabled,
   } as AppConfig;
@@ -640,6 +656,8 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,
+      experimentalMinimalContextTransport: config.experimentalMinimalContextTransport !== false,
+      experimentalReuseVerifiedEffort: config.experimentalReuseVerifiedEffort !== false,
       useSavedChats: config.useSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,

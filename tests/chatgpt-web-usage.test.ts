@@ -83,13 +83,38 @@ test("multipart selection accounts for whole-record and composer fit before subm
   ).effort).toBe("max");
 }, 60_000);
 
-test("Bigger Context compaction selects six parts before the legacy inline byte budget", () => {
+test("Bigger Context compaction chooses the fewest complete parts and supports legacy rollback", () => {
   const parsed = request("x".repeat(160_000));
   parsed._compactionRequest = true;
   const parts = resolveBiggerContextMultipartParts(parsed, capabilities);
-  expect(parts).toBe(6);
+  expect(parts).toBe(2);
+  expect(resolveBiggerContextMultipartParts(parsed, capabilities, false, undefined, false)).toBe(6);
   const compiled = compileChatGptWebPrompt(parsed, capabilities, undefined, { experimentalMultipartParts: parts });
   expect(compiled.trimmedCompactionMessages).toBeUndefined();
+  expect(compiled.multipart!.parts.flatMap(part => JSON.parse(part).records).map(record => record.message.content))
+    .toEqual([parsed.context.messages[0]!.content]);
+});
+
+test("small compaction uses one complete inline message without acknowledgements or trimming", () => {
+  const parsed = request("Keep every constraint and checkpoint");
+  parsed.context.messages.unshift({ role: "user", content: "Earlier Korean evidence 한글 😀", timestamp: 0 });
+  parsed._compactionRequest = true;
+  expect(resolveBiggerContextMultipartParts(parsed, capabilities)).toBeUndefined();
+  expect(resolveBiggerContextMultipartParts(parsed, capabilities, false, undefined, false)).toBe(6);
+  const compiled = compileChatGptWebPrompt(parsed, capabilities, undefined, { preserveCompactionHistory: true });
+  expect(compiled.multipart).toBeUndefined();
+  expect(compiled.trimmedCompactionMessages).toBeUndefined();
+  expect(compiled.text).toContain("Earlier Korean evidence 한글 😀");
+  expect(compiled.text).toContain("Keep every constraint and checkpoint");
+});
+
+test("inline compaction planning checks UTF-8 JSON bytes before choosing one message", () => {
+  const parsed = request("\u0800".repeat(37_000));
+  parsed._compactionRequest = true;
+  const caps = { ...capabilities, proAvailable: false };
+  const parts = resolveBiggerContextMultipartParts(parsed, caps);
+  expect(parts).toBeDefined();
+  const compiled = compileChatGptWebPrompt(parsed, caps, undefined, { experimentalMultipartParts: parts });
   expect(compiled.multipart!.parts.flatMap(part => JSON.parse(part).records).map(record => record.message.content))
     .toEqual([parsed.context.messages[0]!.content]);
 });

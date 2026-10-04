@@ -311,6 +311,10 @@ export interface CodexProviderConfig {
     experimentalSkillAttachments?: boolean;
     /** Explicitly rebuild each automatic turn in a fresh browser conversation. */
     experimentalFreshConversationPerTurn?: boolean;
+    /** False restores threshold-based multipart planning and six-part fresh compaction. */
+    experimentalMinimalContextTransport?: boolean;
+    /** Re-read a previously verified selection on the same page; every Send still checks the picker. */
+    experimentalReuseVerifiedEffort?: boolean;
     /** Use ordinary ChatGPT history for task conversations. Default: Temporary Chat. */
     useSavedChats?: boolean;
   };

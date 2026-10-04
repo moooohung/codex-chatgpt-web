@@ -14,6 +14,8 @@ import {
   CHATGPT_BIGGER_CONTEXT_PARTS,
   CHATGPT_MAX_MULTIPART_PARTS,
   compileChatGptWebPrompt,
+  chatGptPromptJsonBytes,
+  CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
   createChatGptWebPromptPreparation,
   type ChatGptWebMultipartPartCount,
   type ChatGptWebPromptPreparation,
@@ -67,16 +69,15 @@ export function estimateChatGptWebInputTokens(
 }
 
 /**
- * The compaction threshold chooses the initial part count. Whole records and composer limits
- * can require more parts even when the total token estimate is small. Plan before submission;
- * compaction starts at six parts without passing through the legacy inline byte budget.
- * More transport parts keep each message small; they never increase the total context ceiling.
+ * Choose the fewest physical messages that preserve all records and fit the measured limits.
+ * The legacy planner remains available for rollback. More parts never enlarge the total ceiling.
  */
 export function resolveBiggerContextMultipartParts(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
   experimentalSkillAttachments = false,
   prepared?: ChatGptWebPromptPreparation,
+  minimalTransport = true,
 ): ChatGptWebMultipartPartCount | undefined {
   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
@@ -95,7 +96,8 @@ export function resolveBiggerContextMultipartParts(
   );
   const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
     parsed, capabilities, mode.localTools && !parsed._compactionRequest ? ESTIMATE_TURN_TOKEN : undefined,
-    { experimentalMultipartParts: parts, experimentalSkillAttachments, preparation },
+    { experimentalMultipartParts: parts, experimentalSkillAttachments, preparation,
+      preserveCompactionHistory: minimalTransport },
   );
   const widestComposer = Math.max(...([mode.effort, capabilities.proAvailable ? "max" : "medium"] as const).map(effort =>
     resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities).browserComposerCharLimit ?? Infinity));
@@ -107,13 +109,15 @@ export function resolveBiggerContextMultipartParts(
     ? compile(CHATGPT_BIGGER_CONTEXT_PARTS) : undefined;
   const probeRequiresMoreParts = probe && preparation.records!.prepared.reduce((sum, record) => sum + record.text.length, 0)
     > widestComposer * CHATGPT_BIGGER_CONTEXT_PARTS;
-  // Compaction and histories proven too large for six composers bypass inline tokenization.
-  const inline = parsed._compactionRequest || probeRequiresMoreParts ? undefined : compile();
+  // Legacy compaction and histories proven too large for six composers bypass inline tokenization.
+  const inline = (parsed._compactionRequest && !minimalTransport) || probeRequiresMoreParts ? undefined : compile();
   const inputTokens = inline ? estimateCompiledChatGptWebInputTokens(inline, parsed.modelId, estimate) : 0;
   const initialParts = probeRequiresMoreParts ? CHATGPT_BIGGER_CONTEXT_PARTS
     : biggerContextPartCount(inputTokens, autoCompactTokenLimit, parsed._compactionRequest === true);
 
   const fits = (compiled: CompiledChatGptWebPrompt): boolean => {
+    if (parsed._compactionRequest && !compiled.multipart
+      && chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET) return false;
     const messages = compiledChatGptWebMessages(compiled);
     // Inert stages may use any explicitly available staging effort; execution keeps the chosen
     // effort. These are the widest stage modes used by the browser's existing selector.
@@ -137,8 +141,11 @@ export function resolveBiggerContextMultipartParts(
     return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId, estimate)
       < contextWindow * Math.min(messages.length, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
   };
-  if (initialParts === undefined && inline && fits(inline)) return undefined;
-  const firstParts = initialParts ?? 2;
+  if ((minimalTransport || initialParts === undefined) && inline && fits(inline)) return undefined;
+  const knownRecordChars = preparation.records?.prepared.reduce((total, record) => total + record.text.length, 0);
+  const firstParts = minimalTransport
+    ? Math.min(CHATGPT_MAX_MULTIPART_PARTS, Math.max(2, Math.ceil((knownRecordChars ?? 0) / widestComposer / 2) * 2)) as ChatGptWebMultipartPartCount
+    : initialParts ?? 2;
   const first = probe && firstParts === CHATGPT_BIGGER_CONTEXT_PARTS ? probe : compile(firstParts);
   if (fits(first)) return firstParts;
   // No partition can fit more record characters than its combined composer capacity. Skip
@@ -188,13 +195,15 @@ export function estimateChatGptWebUsage(
   capabilities: ChatGptWebCapabilities,
   experimentalBiggerContext = false,
   experimentalSkillAttachments = false,
+  minimalTransport = true,
 ): CodexUsage {
   const preparation = createChatGptWebPromptPreparation(parsed);
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
     preparation,
     experimentalSkillAttachments,
+    preserveCompactionHistory: experimentalBiggerContext && minimalTransport,
     experimentalMultipartParts: experimentalBiggerContext
-      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments, preparation)
+      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments, preparation, minimalTransport)
       : undefined,
   });
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);

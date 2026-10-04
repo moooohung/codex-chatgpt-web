@@ -38,6 +38,8 @@ export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
+  /** The transport planner must inspect every record instead of silently trimming a candidate. */
+  preserveCompactionHistory?: boolean;
   /**
    * Manual Zero Risk transport keeps ChatGPT model/effort selection and prompt submission under the
    * user's control. The browser bridge may open the owned tab and copy this prompt, but it never
@@ -791,7 +793,7 @@ export function compileChatGptWebPrompt(
   // as ordinary multipart turns in browser-worker. Applying the legacy byte cap here silently
   // discarded context that the staged transport can carry; preserve it and let browser preflight
   // fail explicitly if any atomic record is genuinely too large for one stage.
-  if (compiled.multipart) return compiled;
+  if (compiled.multipart || options?.preserveCompactionHistory) return compiled;
 
   const exceedsCompactionBudget = (): boolean => (
     chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET
