@@ -43,6 +43,45 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the $
     expect(result.selection.label).toBe("5.6 Sol Extra High");
     expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(2);
     expect(await page.locator('#prompt-textarea').innerText()).toBe("Draft");
+    const selected = await worker.selectModelAndEffort(page, "gpt-5.6-sol", "xhigh", {
+      localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+    }, undefined, false, "5.6");
+    expect(selected.selection).toEqual(result.selection);
+    expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(2);
+    // The preparation shortcut cannot authorize a Send. It still checks the actual picker.
+    await worker.assertSelectedEffort(page, selected);
+    expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(3);
+  } finally { await browser.close(); }
+}, 30_000);
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot hide a changed slider or newly locked option", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<form><div id="prompt-textarea" contenteditable="true">Draft</div>
+      <button type="button" data-tone="neutral" aria-haspopup="menu" aria-controls="picker" aria-expanded="false">5.6 Sol High</button></form>
+      <div id="picker" role="menu" hidden><div role="menuitemradio" aria-checked="true">GPT-5.6 Sol</div>
+      <span id="announcement">5.6 High, 3 of 4.</span><div role="menuitem" tabindex="0" aria-describedby="announcement">
+      <div data-model-picker-power-slider style="height:30px;width:250px"><span data-orientation="horizontal" aria-disabled="false">
+      ${Array(4).fill('<span data-selected="true"></span>').join('')}<span role="slider" aria-hidden="true" aria-valuemin="0" aria-valuemax="3" aria-valuenow="2"></span></span></div></div></div>
+      <script>window.pickerOpens=0;const control=document.querySelector('button'),menu=document.querySelector('#picker');control.onclick=()=>{window.pickerOpens++;menu.hidden=false;control.setAttribute('aria-expanded','true');document.querySelector('[role=slider]').setAttribute('aria-valuenow',String(window.selectedValue??2));document.querySelectorAll('[data-selected]')[2].setAttribute('data-locked',String(window.locked??false))};document.addEventListener('keydown',e=>{if(e.key==='Escape'){menu.hidden=true;control.setAttribute('aria-expanded','false');control.textContent='5.6 Sol High'}})</script>`);
+    const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+    const caps = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: false };
+    await worker.selectModelAndEffort(page, "gpt-5.6-sol", "high", caps, undefined, false, "5.6");
+    const reused = await worker.selectModelAndEffort(page, "gpt-5.6-sol", "high", caps, undefined, false, "5.6");
+    expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(2);
+    await page.evaluate(() => { (window as any).selectedValue = 1; });
+    let changed: any;
+    try { await worker.assertSelectedEffort(page, reused); } catch (error) { changed = error; }
+    expect(changed).toMatchObject({ code: "model_version_unavailable" });
+    await page.evaluate(() => { (window as any).selectedValue = 2; (window as any).locked = true; });
+    let locked: any;
+    try { await worker.assertSelectedEffort(page, reused); } catch (error) { locked = error; }
+    expect(locked).toMatchObject({ code: "chatgpt_effort_locked" });
+    await page.evaluate(() => { (window as any).locked = false; });
+    await page.locator('button').evaluate(el => { el.textContent = 'Instant'; });
+    await worker.selectModelAndEffort(page, "gpt-5.6-sol", "high", caps, undefined, false, "5.6");
+    expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(6);
   } finally { await browser.close(); }
 }, 30_000);
 
@@ -83,7 +122,11 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keep
         localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
       });
       if (scenario === "shrink") expect((await result).selection.label).toBe("Extra High");
-      else await expect(result).rejects.toMatchObject({ retryable: false });
+      else {
+        let failure: any;
+        try { await result; } catch (error) { failure = error; }
+        expect(failure).toMatchObject({ retryable: false });
+      }
     }
     expect(await page.locator('#prompt-textarea').innerText()).toBe("Draft");
     await page.close();

@@ -1418,6 +1418,7 @@ export interface ResolvedBrowserConfig {
   headed: boolean;
   autoApproveToolCalls: boolean;
   useSavedChats: boolean;
+  experimentalReuseVerifiedEffort?: boolean;
 }
 
 export function chatGptTurnIsComplete(state: {
@@ -2179,6 +2180,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     headed: configured.headed !== false,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
     useSavedChats: configured.useSavedChats === true,
+    experimentalReuseVerifiedEffort: configured.experimentalReuseVerifiedEffort !== false,
   };
 }
 
@@ -2293,6 +2295,10 @@ export class ChatGptBrowserWorker {
   private runQueue?: ChatGptBrowserRunQueue<string>;
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
+
+  // UI evidence only, scoped to the physical Page and document. Never a turn capability or
+  // account choice. Every actual Send still verifies the family, slider and availability.
+  private verifiedEffortSelections?: WeakMap<Page, { mode: SelectedChatGptWebModelMode; document: number }>;
 
   /**
    * Lexical/contenteditable may preserve runs of ASCII spaces by exposing some of them as NBSP
@@ -2595,6 +2601,24 @@ export class ChatGptBrowserWorker {
     } finally {
       effortWaitAbort.abort();
     }
+    const prior = this.verifiedEffortSelections?.get(page);
+    if (this.config?.experimentalReuseVerifiedEffort !== false && modelFamily && prior
+      && prior.mode.modelId === mode.modelId && prior.mode.effort === mode.effort
+      && prior.mode.modelFamily === modelFamily && (!trackUsage || prior.mode.usageModel)) {
+      const generation = await page.evaluate(() => performance.timeOrigin);
+      if (generation === prior.document) {
+        try {
+          await this.assertSelectedEffort(page, prior.mode, false);
+          await throwIfChatGptRateLimitDialog(page);
+          await throwIfChatGptSessionFailureAlert(page);
+          await captureDiagnostic?.("effort-selection-reused");
+          return { ...prior.mode, selection: { ...prior.mode.selection! } };
+        } catch {
+          // A changed URL/control/label gets the ordinary selector, never an inferred effort.
+        }
+      }
+    }
+    this.verifiedEffortSelections?.delete(page);
     await settleChatGptUi();
     await throwIfChatGptRateLimitDialog(page);
     await captureDiagnostic?.("effort-control-ready");
@@ -2714,6 +2738,10 @@ export class ChatGptBrowserWorker {
     await settleChatGptUi();
     await this.assertSelectedEffort(page, selectedMode, false);
     await captureDiagnostic?.("effort-selection-confirmed");
+    this.verifiedEffortSelections ??= new WeakMap();
+    this.verifiedEffortSelections.set(page, {
+      mode: selectedMode, document: await page.evaluate(() => performance.timeOrigin),
+    });
     return selectedMode;
   }
 
@@ -2801,6 +2829,12 @@ export class ChatGptBrowserWorker {
     if (verifyFamily && mode.modelFamily && mode.uiEffortIndex !== null) {
       const menu = await activateChatGptEffortMenu(page, control);
       try {
+        const state = await readChatGptEffortSnapshot(menu.sliderContainer);
+        if (!state.available[mode.uiEffortIndex]) {
+          throw new ChatGptWebAdapterError("ChatGPT locked the requested effort before submission", {
+            status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_locked", retryable: false,
+          });
+        }
         await assertChatGptModelFamily(menu, mode.modelFamily, mode.effort, mode.uiEffortIndex);
       } finally {
         await page.keyboard.press("Escape");
