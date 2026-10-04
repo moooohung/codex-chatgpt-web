@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { recordCosDevContext, recordCosEvent } from "../cos/dashboard";
 import type { ProviderAdapter } from "../adapters/base";
 import { closeChatGptBrowserWorkers } from "../adapters/chatgpt-web/browser-worker";
 import { createChatGptWebAdapter } from "../adapters/chatgpt-web";
@@ -604,6 +605,7 @@ export class DevChatDriver {
     const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, this.config);
     const autoCompactTokenLimit = limits.autoCompactTokenLimit;
     const contextWindow = limits.contextWindow;
+    recordCosDevContext(inputTokens, autoCompactTokenLimit, state.compactions);
     return {
       model: state.model,
       inputTokens,
@@ -628,6 +630,7 @@ export class DevChatDriver {
     }
     const compactTurnId = id("dev_compact_turn");
     emit({ type: "compaction_start", reason, inputItems: input.length });
+    recordCosEvent("dev_compaction_started");
     const response = await compactRequest(new Request("http://codex-web-gpt.dev/v1/responses/compact", {
       method: "POST",
       headers: {

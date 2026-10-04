@@ -3,6 +3,12 @@ import { goalLoopController } from "./goal-loop";
 
 const events: Array<{ at: string; event: string }> = [];
 const usage = { turns: 0, compactions: 0, inputTokens: 0, outputTokens: 0, lastInputTokens: 0 };
+let devContext: { inputTokens: number; tokenLimit: number; compactions: number } | undefined;
+/** DEV telemetry is read-only and never imports the user's external patcher. */
+export function recordCosDevContext(inputTokens: number, tokenLimit: number, compactions: number): void {
+  if (![inputTokens, tokenLimit, compactions].every(value => Number.isSafeInteger(value) && value >= 0) || tokenLimit === 0) return;
+  devContext = { inputTokens, tokenLimit, compactions };
+}
 export function recordCosUsage(response: Record<string, unknown>, compaction: boolean): void {
   if (response.status !== "completed") return;
   const value = response.usage as { input_tokens?: unknown; output_tokens?: unknown } | undefined;
@@ -12,7 +18,7 @@ export function recordCosUsage(response: Record<string, unknown>, compaction: bo
   usage.inputTokens += input; usage.outputTokens += output; usage.lastInputTokens = input;
   recordCosEvent(compaction ? "compaction_completed" : "turn_completed");
 }
-export function recordCosEvent(event: "turn_completed" | "compaction_completed" | "goal_stopped" | "goal_dispatched") {
+export function recordCosEvent(event: "turn_completed" | "compaction_completed" | "goal_stopped" | "goal_dispatched" | "dev_compaction_started") {
   events.push({ at: new Date().toISOString(), event });
   if (events.length > 100) events.splice(0, events.length - 100);
 }
@@ -21,7 +27,7 @@ export function recordCosEvent(event: "turn_completed" | "compaction_completed" 
 const html = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>CoS dashboard</title><style>body{font:16px system-ui;background:#141414;color:#eee;max-width:960px;margin:40px auto;padding:20px}section{padding:20px;border:1px solid #555;border-radius:12px;margin:16px 0}button{padding:8px}pre{white-space:pre-wrap}</style>
 <h1>CoS dashboard</h1><section><h2>Runtime</h2><pre id="runtime"></pre></section><section><h2>Usage</h2><pre id="usage"></pre></section><section><h2>Explicit goals</h2><div id="goals"></div></section><section><h2>Recent events</h2><pre id="events"></pre></section>
-<script>let stopped=false,running=false,timer; async function update(){if(running)return;running=true;clearTimeout(timer);try{const response=await fetch('/api/status');if(!response.ok)throw Error('Status unavailable');const s=await response.json();document.querySelector('#runtime').textContent=JSON.stringify(s.runtime,null,2);document.querySelector('#usage').textContent=JSON.stringify(s.usage,null,2);const box=document.querySelector('#goals');box.replaceChildren();for(const g of s.goals){const row=document.createElement('p');row.textContent=g.thread+': '+g.currentTurn+'/'+g.maxTurns+' '+(g.enabled?'active':'stopped');if(g.enabled){const b=document.createElement('button');b.textContent='Stop';b.onclick=async()=>{await fetch('/api/goal/stop',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread:g.thread})});await update()};row.append(b)}box.append(row)}document.querySelector('#events').textContent=s.events.map(e=>e.at+' '+e.event).join('\n')}catch{document.querySelector('#runtime').textContent='Runtime unavailable'}finally{running=false;if(!stopped)timer=setTimeout(update,3000)}}window.addEventListener('pagehide',()=>stopped=true);update()</script></html>`;
+<script>let stopped=false,running=false,timer; async function update(){if(running)return;running=true;clearTimeout(timer);try{const response=await fetch('/api/status');if(!response.ok)throw Error('Status unavailable');const s=await response.json();document.querySelector('#runtime').textContent=JSON.stringify(s.runtime,null,2);document.querySelector('#usage').textContent=JSON.stringify({...s.usage,devContext:s.devContext},null,2);const box=document.querySelector('#goals');box.replaceChildren();for(const g of s.goals){const row=document.createElement('p');row.textContent=g.thread+': '+g.currentTurn+'/'+g.maxTurns+' '+(g.enabled?'active':'stopped');if(g.enabled){const b=document.createElement('button');b.textContent='Stop';b.onclick=async()=>{await fetch('/api/goal/stop',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread:g.thread})});await update()};row.append(b)}box.append(row)}document.querySelector('#events').textContent=s.events.map(e=>e.at+' '+e.event).join('\n')}catch{document.querySelector('#runtime').textContent='Runtime unavailable'}finally{running=false;if(!stopped)timer=setTimeout(update,3000)}}window.addEventListener('pagehide',()=>stopped=true);update()</script></html>`;
 
 export function createCosDashboardHandler(runtimeStatus: () => Promise<unknown>, origin: string) {
   return async (request: Request): Promise<Response> => {
@@ -30,7 +36,7 @@ export function createCosDashboardHandler(runtimeStatus: () => Promise<unknown>,
     const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
     if (request.method === "GET" && url.pathname === "/") return new Response(html, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
     if (request.method === "GET" && url.pathname === "/api/status") return Response.json({
-      runtime: await runtimeStatus(), usage, goals: goalLoopController().statuses(), events,
+      runtime: await runtimeStatus(), usage, devContext, goals: goalLoopController().statuses(), events,
     }, { headers });
     if (request.method === "POST" && url.pathname === "/api/goal/stop") {
       if (request.headers.get("origin") !== origin || request.headers.get("content-type") !== "application/json") return new Response("Invalid origin", { status: 403 });

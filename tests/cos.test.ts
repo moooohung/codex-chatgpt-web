@@ -6,7 +6,7 @@ import { GoalLoopController, explicitGoalObjective } from "../src/cos/goal-loop"
 import { limitMcpTextContent, limitOutputText } from "../src/cos/output-limit";
 import { windowCaptureScript } from "../src/cos/window-capture";
 import { readCosConfig } from "../src/cos/config";
-import { createCosDashboardHandler } from "../src/cos/dashboard";
+import { createCosDashboardHandler, recordCosDevContext, recordCosEvent } from "../src/cos/dashboard";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -69,4 +69,19 @@ test("dashboard rejects forged host and cross-origin goal control", async () => 
   const origin = "http://127.0.0.1:17842", handler = createCosDashboardHandler(async () => ({}), origin);
   expect((await handler(new Request("http://evil.example/"))).status).toBe(403);
   expect((await handler(new Request(origin + "/api/goal/stop", { method: "POST", headers: { origin: "https://evil.example", "content-type": "application/json" }, body: '{}' }))).status).toBe(403);
+});
+
+test("DEV telemetry preserves numeric context without changing completed usage or goal state", async () => {
+  const origin = "http://127.0.0.1:17842", handler = createCosDashboardHandler(async () => ({}), origin);
+  const status = async () => (await handler(new Request(origin + "/api/status"))).json();
+  const before = await status();
+  recordCosDevContext(1234, 60000, 2);
+  for (const invalid of [NaN, Infinity, -1, 1.5]) recordCosDevContext(invalid, 60000, 2);
+  recordCosDevContext(2000, 0, 3);
+  recordCosEvent("dev_compaction_started");
+  const after = await status();
+  expect(after.devContext).toEqual({ inputTokens: 1234, tokenLimit: 60000, compactions: 2 });
+  expect(after.usage).toEqual(before.usage);
+  expect(after.goals).toEqual(before.goals);
+  expect(after.events.at(-1).event).toBe("dev_compaction_started");
 });

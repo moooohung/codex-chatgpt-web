@@ -27,3 +27,12 @@ Measure completed requests by pairing `browser.turn_started` and `browser.turn_e
 same trace. Classify fresh/reused from tab allocation and temporary-chat preparation. Measure
 acknowledgements and effort preparation from completed `stage=... durationMs=...` events. Keep
 offline fixture timing separate from live request timing, failed requests and truncated windows.
+
+When rebuilding a directly patched installation, compare both the CLI and browser-helper against
+the source build before replacement. DEV context/compaction telemetry now uses the bundled CoS
+dashboard instead of loading `patcher/lib/cos-runtime.js` from the user's home. This telemetry
+cannot start goals, mark a pending compaction complete, or change usage accounting.
+
+The source keeps response consistency, exact connector identity, owned-document URL checks,
+response-bound Fiber evidence, current-turn environment validation and requested-effort failure
+semantics. A live patch that bypasses these checks is not part of the performance optimizations.
