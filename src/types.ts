@@ -289,10 +289,10 @@ export interface CodexProviderConfig {
     /** Optional explicit safety ceiling. Browser turns have no absolute deadline by default. */
     turnTimeoutMs?: number;
     /**
-     * Seconds of adapter silence before the Responses bridge cancels a turn as a hung upstream.
-     * The adapter heartbeats every CHATGPT_WEB_ADAPTER_HEARTBEAT_MS for the whole of a turn, so a
-     * healthy turn never approaches this no matter how long it thinks; raise it only to tolerate a
-     * genuinely unresponsive upstream for longer. Defaults to DEFAULT_STALL_TIMEOUT_SEC.
+     * Seconds of transport silence, and separately of no new response or native tool progress
+     * after automatic browser submission. Heartbeats prove transport liveness only; neither a
+     * Stop button nor an unchanged active tool extends execution progress. Manual Zero Risk
+     * keeps its user-driven policy. Defaults to DEFAULT_STALL_TIMEOUT_SEC.
      */
     stallTimeoutSec?: number;
     /** Keep the single controlled browser visible. */

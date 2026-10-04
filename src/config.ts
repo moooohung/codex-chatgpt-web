@@ -126,7 +126,7 @@ export interface AppConfig {
   useSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
-  /** Optional adapter-silence budget for the Responses watchdog. */
+  /** Transport silence and automatic browser response/tool-progress budget, in seconds. */
   stallTimeoutSec?: number;
   autoApproveToolCalls: boolean;
   controlToken: string;

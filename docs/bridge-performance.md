@@ -36,3 +36,24 @@ cannot start goals, mark a pending compaction complete, or change usage accounti
 The source keeps response consistency, exact connector identity, owned-document URL checks,
 response-bound Fiber evidence, current-turn environment validation and requested-effort failure
 semantics. A live patch that bypasses these checks is not part of the performance optimizations.
+
+## Observer disconnect and execution progress
+
+An automatic browser turn allows five seconds for an exact Responses observer reconnect after
+the last observer disconnects. A reconnect reuses the same execution and journal. If none arrives,
+the bridge cancels that turn, revokes its MCP capability, and waits for physical helper cleanup and
+retained-conversation release before allowing a replacement. A terminal journal prevents a late
+reconnect from sending the task again. Normal completion of a tool-result round does not arm this
+disconnect timer; native tool execution continues between rounds. Explicit native interruption
+keeps its immediate cancellation contract. Manual Zero Risk keeps its existing cancellation policy.
+
+Automatic execution also has an independent `stallTimeoutSec` progress budget, starting when the
+browser accepts the final submission or proves current-turn tool activity. Only newly emitted
+answer/reasoning/commentary or a new native tool batch/result advances it. HTTP/helper heartbeats,
+Stop-button presence, repeated progress snapshots and capability-retirement revisions do not.
+At expiry the bridge cancels the browser with HTTP 504 `upstream_stall_timeout`, `retryable=false`;
+already-submitted work must not be automatically resent. With a configured value of 600 this
+allows ten minutes of silent reasoning or tool work. The transport watchdog remains separate,
+including during preparation. Diagnostic events contain trace/stage/counts, never conversation
+text or tokens. `response_observer_detached`, `orphaned_browser_turn_cancelled` and
+`browser_progress_stalled` distinguish lost observers, cleanup and stalled execution.

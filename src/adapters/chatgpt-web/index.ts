@@ -38,6 +38,7 @@ import {
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
 import { ChatGptExternalTurnProgress } from "./turn-progress";
+import { ChatGptResponseProgressTracker } from "./response-progress";
 import {
   canonicalizeCompactionHandoff,
   existingStructuredCompactionRun,
@@ -506,8 +507,22 @@ export function createChatGptWebAdapter(
       }
       throw error;
     });
-    const trace = new ChatGptTraceFeed();
-    const text = new ChatGptTextFeed();
+    const progressTracker = manualRequest ? undefined : new ChatGptResponseProgressTracker(provider.chatgptWeb?.stallTimeoutSec);
+    const trace = new ChatGptTraceFeed(() => progressTracker?.emittedContent());
+    const text = new ChatGptTextFeed(() => progressTracker?.emittedContent());
+    const guardProgress = <T extends ChatGptTurnRuntime>(runtime: T): T => {
+      if (!progressTracker) return runtime;
+      const timer = setInterval(() => {
+        const failure = progressTracker.check(runtime.mode === "tools" ? runtime.externalProgress.snapshot() : undefined);
+        if (!failure) return;
+        clearInterval(timer);
+        console.warn(`[chatgpt-web] browser_progress_stalled ${JSON.stringify({ traceId, stallMs: progressTracker.timeoutMs })}`);
+        runtime.cancel(failure);
+      }, Math.min(1000, progressTracker.timeoutMs));
+      timer.unref?.();
+      void runtime.physicalSettlement.then(() => clearInterval(timer), () => clearInterval(timer));
+      return runtime;
+    };
     const observedCapabilityTokens = new Set<string>();
     const observeCapabilityRetirement = (
       turnToken: string,
@@ -540,6 +555,7 @@ export function createChatGptWebAdapter(
         onSendActivated: () => { submission.phase = "send_activated" as const; },
       } : {}),
       onSubmitted: () => {
+        progressTracker?.accepted();
         if (!parsed._compactionRequest) submission.phase = "accepted";
         hooks.onCompactionProgress?.();
       },
@@ -740,7 +756,7 @@ export function createChatGptWebAdapter(
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
       })), browserAbort);
-      return {
+      return guardProgress({
         mode: "read-only",
         browser: browserTurn.browser,
         physicalSettlement: browserTurn.physicalSettlement,
@@ -749,7 +765,7 @@ export function createChatGptWebAdapter(
         usageInput: checkpointInput.parsed,
         submission,
         cancel: browserTurn.cancel,
-      };
+      });
     }
     if (!environment) throw new Error("Tool-capable ChatGPT web mode requires a trusted Codex environment");
     const token = deferred<string>();
@@ -816,7 +832,7 @@ export function createChatGptWebAdapter(
         token.reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
-    return {
+    return guardProgress({
       mode: "tools",
       token: token.promise,
       externalProgress,
@@ -839,7 +855,7 @@ export function createChatGptWebAdapter(
           });
         }
       },
-    };
+    });
   };
 
   const preparedEnvironments = new PreparedChatGptTurnStore();
@@ -1255,8 +1271,11 @@ export function createChatGptWebAdapter(
           emitRoundEvents(events);
         };
         const emitRoundEvent = (event: AdapterEvent): void => emitRoundEvents([event]);
+        const releaseObserver = chatGptTurnSessions.observe(executionKey, session, incoming.abortSignal);
+        let observerDisconnected = false;
         try {
-          await session.runExclusive(async () => {
+          await withAbort(session.runExclusive(async () => {
+            if (incoming.abortSignal?.aborted) throw abortError(incoming.abortSignal);
             const replay = session.roundEvents(roundKey);
             replayEvents(replay, emit);
             if (session.roundCompleted(roundKey)) {
@@ -1503,9 +1522,10 @@ export function createChatGptWebAdapter(
             } finally {
               toolWaitAbort.abort();
             }
-          });
+          }), incoming.abortSignal);
         } catch (error) {
           if (isChatGptObserverAbort(error, incoming.abortSignal)) {
+            observerDisconnected = true;
             if (session.runtime.manualControl) {
               // Zero Risk is user-driven and has no DOM observer that can distinguish continued
               // work from a stopped native turn. A closed Responses stream is therefore terminal:
@@ -1513,8 +1533,8 @@ export function createChatGptWebAdapter(
               // that Codex already shows as stopped waiting forever.
               chatGptTurnSessions.retire(executionKey, session);
             }
-            // Automatic browser turns keep their exact execution and journal for reconnect. Their
-            // owned DOM observer can continue proving the same accepted ChatGPT submission.
+            // Automatic turns permit an exact reconnect during the bounded observer grace period.
+            // The last lost observer otherwise retires the physical execution and retains its tombstone.
             console.info(`[chatgpt-web] response_observer_detached ${JSON.stringify({ traceId, stage: roundStage,
               submission: session.runtime.submission?.phase ?? "unknown", manual: Boolean(session.runtime.manualControl) })}`);
             throw abortError(incoming.abortSignal);
@@ -1561,6 +1581,8 @@ export function createChatGptWebAdapter(
           session.failRound(roundKey, turnError);
           chatGptWebTurnRetryPolicy.clear(retryKey);
           throw turnError;
+        } finally {
+          releaseObserver(observerDisconnected);
         }
       };
 

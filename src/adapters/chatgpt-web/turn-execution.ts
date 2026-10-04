@@ -57,9 +57,12 @@ export class ChatGptTraceFeed {
   private readonly queued: ChatGptTraceEvent[] = [];
   private readonly waiters = new Set<TraceWaiter>();
 
+  constructor(private readonly onContent?: () => void) {}
+
   push(event: ChatGptTraceEvent): void {
     const normalized = event.continuation ? event.text : event.text.trim();
     if (!normalized) return;
+    this.onContent?.();
     const normalizedEvent = { ...event, text: normalized };
     this.queued.push(normalizedEvent);
     const waiter = this.waiters.values().next().value as TraceWaiter | undefined;
@@ -103,8 +106,11 @@ export class ChatGptTextFeed {
   private readonly waiters = new Set<TextWaiter>();
   private text = "";
 
+  constructor(private readonly onContent?: () => void) {}
+
   push(delta: string): void {
     if (!delta) return;
+    this.onContent?.();
     this.text += delta;
     this.queued.push(delta);
     const waiter = this.waiters.values().next().value as TextWaiter | undefined;
@@ -508,11 +514,54 @@ export class ChatGptTurnSessions {
   private readonly retirements = new Map<string, Promise<void>>();
   private readonly ownerRetirements = new Map<string, Promise<void>>();
   private readonly conversationRetirements = new Map<string, Promise<void>>();
+  private readonly observers = new Map<ChatGptTurnSession, {
+    leases: Set<symbol>; generation: number; cancelTimer?: () => void;
+  }>();
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
     private readonly maxEntries = 256,
+    private readonly observerGraceMs = 5000,
+    private readonly scheduleObserverCleanup: (task: () => void, delayMs: number) => () => void = (task, delayMs) => {
+      const timer = setTimeout(task, delayMs);
+      timer.unref?.();
+      return () => clearTimeout(timer);
+    },
   ) {}
+
+  /** A complete tool-result round releases normally; only lost observers arm orphan cleanup. */
+  observe(key: string, session: ChatGptTurnSession, signal?: AbortSignal): (disconnected?: boolean) => void {
+    if (this.entries.get(key) !== session) throw new Error("Response observer lost its execution owner");
+    let state = this.observers.get(session);
+    if (!state) {
+      state = { leases: new Set(), generation: 0 };
+      this.observers.set(session, state);
+      const clear = () => { state!.cancelTimer?.(); this.observers.delete(session); };
+      void session.physicalSettlement.then(clear, clear);
+    }
+    state.generation++;
+    state.cancelTimer?.(); state.cancelTimer = undefined;
+    const lease = Symbol(); state.leases.add(lease);
+    const release = (disconnected = false) => {
+      signal?.removeEventListener("abort", onAbort);
+      if (!state!.leases.delete(lease)) return;
+      if (!disconnected || state!.leases.size || !session.isActive()) return;
+      const generation = ++state!.generation;
+      state!.cancelTimer = this.scheduleObserverCleanup(() => {
+        if (state!.generation !== generation || state!.leases.size || this.entries.get(key) !== session || !session.isActive()) return;
+        const reason = new ChatGptWebAdapterError("The Responses observer disconnected and did not reconnect; its browser turn was cancelled.",
+          { status: 499, errorType: "client_closed_request", code: "client_cancelled", retryable: false });
+        // Keep the exact execution/journal terminal so a late reconnect cannot resend its task.
+        this.forgetConversationHead(session);
+        void this.beginRetirement(key, session, reason, true).catch(() => {});
+        console.info(`[chatgpt-web] orphaned_browser_turn_cancelled ${JSON.stringify({ traceId: session.traceId, graceMs: this.observerGraceMs })}`);
+      }, this.observerGraceMs);
+    };
+    const onAbort = () => release(true);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    return release;
+  }
 
   getOrCreate(
     key: string,
@@ -833,16 +882,18 @@ export class ChatGptTurnSessions {
     }
   }
 
-  private beginRetirement(key: string, session: ChatGptTurnSession, reason?: Error): Promise<void> {
+  private beginRetirement(key: string, session: ChatGptTurnSession, reason?: Error, releaseConversation = false): Promise<void> {
     const existing = this.retirements.get(key);
     if (existing) return existing;
     const conversationKey = session.conversationKey();
     session.cancel(reason);
-    const retirement = session.physicalSettlement;
+    const retirement = releaseConversation
+      ? session.physicalSettlement.then(() => session.runtime.releaseRetainedConversation?.())
+      : session.physicalSettlement;
     this.retirements.set(key, retirement);
     void retirement.then(() => {
       if (this.retirements.get(key) === retirement) this.retirements.delete(key);
-    });
+    }, () => {});
     if (session.ownerKey) {
       const previous = this.ownerRetirements.get(session.ownerKey);
       const ownerRetirement = previous
@@ -853,7 +904,7 @@ export class ChatGptTurnSessions {
         if (this.ownerRetirements.get(session.ownerKey!) === ownerRetirement) {
           this.ownerRetirements.delete(session.ownerKey!);
         }
-      });
+      }, () => {});
     }
     if (conversationKey) {
       const previous = this.conversationRetirements.get(conversationKey);

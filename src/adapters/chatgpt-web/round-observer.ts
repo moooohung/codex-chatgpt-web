@@ -25,7 +25,7 @@ export function isChatGptObserverAbort(error: unknown, signal?: AbortSignal): bo
 
 const knownNames = new Set(["Error", "TypeError", "DOMException", "AbortError", "AggregateError", "ChatGptWebAdapterError", "ChatGptRoundObserverDetached"]);
 const knownCodes = new Set([
-  "client_cancelled", "codex_tool_timeout", "chatgpt_submitted_turn_failed",
+  "client_cancelled", "codex_tool_timeout", "upstream_stall_timeout", "chatgpt_submitted_turn_failed",
   "chatgpt_submission_failed", "chatgpt_submission_ambiguous", "chatgpt_stopped_thinking",
   "chatgpt_security_check_required", "chatgpt_sign_in_required", "compaction_source_unavailable",
   "native_snapshot_not_ready", "trusted_environment_unavailable", "turn_preflight_changed",
