@@ -51,8 +51,9 @@ Automatic execution also has an independent `stallTimeoutSec` progress budget, s
 browser accepts the final submission or proves current-turn tool activity. Only newly emitted
 answer/reasoning/commentary or a new native tool batch/result advances it. HTTP/helper heartbeats,
 Stop-button presence, repeated progress snapshots and capability-retirement revisions do not.
-At expiry the bridge cancels the browser with HTTP 504 `upstream_stall_timeout`, `retryable=false`;
-already-submitted work must not be automatically resent. With a configured value of 600 this
+At expiry the bridge cancels the browser with error status 504 `upstream_stall_timeout`,
+`retryable=false`. An already-open SSE response emits `response.failed`; its original HTTP status
+does not change. Already-submitted work must not be automatically resent. A configured value of 600
 allows ten minutes of silent reasoning or tool work. The transport watchdog remains separate,
 including during preparation. Diagnostic events contain trace/stage/counts, never conversation
 text or tokens. `response_observer_detached`, `orphaned_browser_turn_cancelled` and
