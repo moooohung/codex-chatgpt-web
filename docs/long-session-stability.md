@@ -128,6 +128,32 @@ preserved installation on failure. Active work leaves a prepared candidate pendi
 
 Offline fixture tests, builds and hashes are not evidence that a user's resumed Web task
 succeeded. That result must be observed separately after the user resumes it.
+
+## Native command polling and timeout causes
+
+The tunnel's command-response deadline and the Responses silence budget are separate.
+MCP invocations retain their 90-second transport deadline. A native `write_stdin` wait
+of 120 or 300 seconds cannot finish inside it, even while ChatGPT is generating and its
+browser heartbeat remains healthy. The 60-second response diagnostic does not terminate
+the turn; a `tool_timeout` retirement does. Browser descriptor updates also occur when
+a released tab is removed and are not evidence of a spontaneous surface replacement.
+
+Native `write_stdin` and exec-cell `wait` calls therefore shorten `yield_time_ms` above
+30 seconds before dispatch. This applies to dedicated MCP tools, exact inventory calls,
+nested gateway calls and the registry passed to raw native exec. The native session/cell,
+input characters, output limits and cancellation arguments remain unchanged. A poll
+returns its native running result; further polls use that same session or cell. No
+command is restarted or automatically replayed. Runtime inventory descriptions explain the bound;
+existing request shapes and shorter polling intervals stay supported. Vendor tools with
+similar names are not modified. Raw exec authors must return between polls rather than
+accumulating many sequential waits within one MCP invocation.
+The public MCP tools/list contract remains unchanged so cached connectors need no refresh.
+
+Actual missing results or cancellation still retire an abandoned capability. If its
+browser helper then reports a generic AbortError over IPC, the daemon preserves its
+authenticated `codex_tool_timeout` reason in the settled browser outcome and journal.
+It does not infer a cause from user text or replace unrelated browser errors.
+
 # Account security checks and submission failures
 
 Each account partition observes its own ChatGPT responses. A `403` with

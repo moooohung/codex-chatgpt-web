@@ -486,8 +486,18 @@ export function createChatGptWebAdapter(
     });
     const browserAbort = new AbortController();
     let browserOwnerSettled = false;
-    const trackBrowserOwner = (browser: Promise<string>): Promise<string> => browser.finally(() => {
+    const trackBrowserOwner = (browser: Promise<string>): Promise<string> => browser.then(answer => {
       browserOwnerSettled = true;
+      return answer;
+    }, error => {
+      browserOwnerSettled = true;
+      // The helper's AbortSignal crosses an IPC boundary and reports only AbortError. Preserve
+      // the daemon's authenticated retirement reason in the journal and reconnect outcome.
+      if (error instanceof DOMException && error.name === "AbortError"
+        && browserAbort.signal.reason instanceof ChatGptWebAdapterError) {
+        throw browserAbort.signal.reason;
+      }
+      throw error;
     });
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
