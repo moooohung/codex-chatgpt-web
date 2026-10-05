@@ -26,6 +26,21 @@ import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker
 
 const roots: string[] = [];
 
+test("launcher preserves pre-send document readiness as a retryable 503", async () => {
+  let calls = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+    calls++;
+    return Response.json({ code: "browser_surface_not_ready", error: "Local document not ready" }, { status: 503 });
+  } });
+  try {
+    const error = await notifyLauncherTurn(descriptorFile(`http://127.0.0.1:${server.port}`), {
+      phase: "start", traceId: "pending-surface", helperPid: process.pid,
+    }).catch(error => error);
+    expect(error).toMatchObject({ status: 503, code: "browser_surface_not_ready", retryable: true });
+    expect(calls).toBe(1); // The client must not silently resend a start or a task.
+  } finally { server.stop(true); }
+});
+
 test("launcher activity follows actual send callbacks and current-turn tool counts", async () => {
   const messages: Array<{ phase: string; progress?: { stage: string; activeToolCalls: number } }> = [];
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {

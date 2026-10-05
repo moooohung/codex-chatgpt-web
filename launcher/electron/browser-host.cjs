@@ -34,7 +34,7 @@ const {
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
-const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
+const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 60_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
 const MAX_CANCELLED_TURN_TRACES = 256;
@@ -265,6 +265,7 @@ function loadCommittedBrowserSurface(
   contents,
   url,
   timeoutMs = PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS,
+  signal,
 ) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error("Browser idle document timeout must be positive");
@@ -272,34 +273,49 @@ function loadCommittedBrowserSurface(
   if (!contents || contents.isDestroyed()) {
     return Promise.reject(new Error("Browser closed before idle document bootstrap"));
   }
+  if (signal?.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     let settled = false;
     const cleanup = () => {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      contents.off("dom-ready", onDomReady);
       contents.off("did-stop-loading", onReady);
       contents.off("did-finish-load", onReady);
       contents.off("did-fail-load", onFailed);
       contents.off("render-process-gone", onRendererGone);
       contents.off("destroyed", onDestroyed);
     };
-    const finish = (error) => {
+    const finish = (error, readyVia) => {
       if (settled) return;
       settled = true;
       cleanup();
       if (error) reject(error);
-      else resolve();
+      else resolve({ readyVia, elapsedMs: Date.now() - startedAt });
     };
     const onReady = () => {
       if (contents.isDestroyed()) {
         finish(new Error("Browser closed during idle document bootstrap"));
         return;
       }
-      if (contents.getURL() === url) finish();
+      if (contents.getURL() === url) finish(undefined, "load-complete");
+    };
+    // Our local, empty bootstrap needs a ready DOM, not completion of all load events.
+    // Remote login pages still require full loading; URL equality alone is not readiness.
+    const onDomReady = () => {
+      if (url === IDLE_BROWSER_URL && !contents.isDestroyed() && contents.getURL() === url) {
+        finish(undefined, "idle-dom-ready");
+      }
+    };
+    const onAbort = () => {
+      finish(signal.reason);
+      if (!contents.isDestroyed()) contents.stop();
     };
     const onFailed = (_event, errorCode, errorDescription, failedUrl, mainFrame) => {
       if (!mainFrame) return;
       finish(new Error(
-        `Browser idle document failed: ${errorDescription} (${errorCode}) at ${failedUrl}`,
+        `Browser idle document failed: ${errorDescription} (${errorCode}) at ${navigationOriginForLog(failedUrl)}`,
       ));
     };
     const onRendererGone = (_event, details) => {
@@ -307,10 +323,21 @@ function loadCommittedBrowserSurface(
     };
     const onDestroyed = () => finish(new Error("Browser closed during idle document bootstrap"));
     const timeout = setTimeout(() => {
-      finish(new Error(`Browser idle document did not commit within ${timeoutMs}ms`));
+      const error = new Error(`Browser idle document was not ready within ${timeoutMs}ms`);
+      error.code = "browser_surface_not_ready";
+      error.bootstrap = {
+        elapsedMs: Date.now() - startedAt,
+        timeoutMs,
+        expectedUrlCommitted: !contents.isDestroyed() && contents.getURL() === url,
+        loading: !contents.isDestroyed() && contents.isLoading?.() === true,
+        mainFrameLoading: !contents.isDestroyed() && contents.isLoadingMainFrame?.() === true,
+      };
+      finish(error);
       if (!contents.isDestroyed()) contents.stop();
     }, timeoutMs);
     timeout.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    contents.on("dom-ready", onDomReady);
     contents.on("did-stop-loading", onReady);
     contents.on("did-finish-load", onReady);
     contents.on("did-fail-load", onFailed);
@@ -730,9 +757,13 @@ class BrowserHost {
     try {
       signal?.throwIfAborted();
       await Promise.race([(async () => {
-        await loadCommittedBrowserSurface(tab.view.webContents, IDLE_BROWSER_URL);
+        const readiness = await loadCommittedBrowserSurface(
+          tab.view.webContents, IDLE_BROWSER_URL, PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS, signal,
+        );
         signal?.throwIfAborted();
         await this.markTurnTabSurface(tab);
+        signal?.throwIfAborted();
+        this.logger.info?.("browser.tab_initialized", { tabId: tab.id, traceId: tab.traceId, ...readiness });
       })(), aborted]);
       signal?.throwIfAborted();
       tab.initializingSurface = false;
@@ -742,6 +773,7 @@ class BrowserHost {
         tabId: tab.id,
         traceId: tab.traceId,
         message,
+        ...(error?.bootstrap ? { bootstrap: error.bootstrap } : {}),
       });
       // Destroy the exact pending document too: abandoning its promise alone leaves renderer
       // work running and lets a late ownership mark race a future browser turn.

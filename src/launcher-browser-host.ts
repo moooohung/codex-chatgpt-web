@@ -427,7 +427,8 @@ export type LauncherTurnActivity =
     };
 
 // Startup must outlast the launcher's ten-second idle bootstrap. This is not a model-turn budget.
-export const LAUNCHER_TURN_START_TIMEOUT_MS = 30_000;
+// Leave time for the launcher's 60s local-document bootstrap and ownership mark.
+export const LAUNCHER_TURN_START_TIMEOUT_MS = 90_000;
 export const LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS = 10_000;
 export const LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS = 5_000;
 export const LAUNCHER_TURN_END_TIMEOUT_MS = 15_000;
@@ -688,6 +689,10 @@ export async function notifyLauncherTurn(
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (response.status === 503 && body.code === "browser_surface_not_ready") throw new ChatGptWebAdapterError(
+        typeof body.error === "string" ? body.error : "Launcher browser surface is not ready",
+        { status: 503, errorType: "server_error", code: "browser_surface_not_ready", retryable: true },
+      );
       if (body.code === "account_unavailable") throw new ChatGptWebAdapterError(
         typeof body.error === "string" ? body.error : "No ChatGPT account is available",
         { status: 409, errorType: "invalid_request_error", code: "account_unavailable", retryable: false },

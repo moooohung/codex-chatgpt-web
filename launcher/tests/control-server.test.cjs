@@ -3,6 +3,23 @@ const assert = require("node:assert/strict");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
 
+test("pending document timeout is a temporary 503, not an invalid request", async () => {
+  const error = Object.assign(new Error("Browser idle document was not ready"), { code: "browser_surface_not_ready" });
+  const host = { browserInteractionMode: () => "automatic", beginTurn: async () => { throw error; } };
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} }, getBrowserHost: () => host, getPreferences: () => ({}),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  try {
+    const response = await fetch(`${endpoint}/v1/turn/start`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ traceId: "pending-start", helperPid: process.pid }),
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: error.message, code: error.code });
+  } finally { await server.close(); }
+});
+
 test("live task progress is owner-bound, preserves elapsed time, and clears on release", async () => {
   const tab = { id: "task-one", traceId: "trace-one", helperPid: process.pid, status: "running", interactionMode: "automatic" };
   const other = { ...tab, id: "task-two", traceId: "trace-two", helperPid: process.pid + 1 };

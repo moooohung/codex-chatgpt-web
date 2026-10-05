@@ -180,12 +180,79 @@ test("primary browser bootstrap fails closed on navigation, renderer, and timeou
     stalled.loadURL = () => new Promise(() => {});
     await assert.rejects(
       loadCommittedBrowserSurface(stalled, IDLE_BROWSER_URL, 5),
-      /idle document did not commit within 5ms/,
+      error => error.code === "browser_surface_not_ready"
+        && error.bootstrap.expectedUrlCommitted === false && error.bootstrap.timeoutMs === 5,
     );
     assert.deepEqual(calls, ["stop"]);
   } finally {
     clearTimeout(keepTestAlive);
   }
+});
+
+test("local idle DOM readiness does not wait for a stalled full-load promise", async () => {
+  const contents = new EventEmitter();
+  let url = "about:blank";
+  let stopped = 0;
+  let resolveLoad;
+  contents.isDestroyed = () => false;
+  contents.getURL = () => url;
+  contents.stop = () => { stopped++; };
+  contents.loadURL = target => {
+    setTimeout(() => { url = target; contents.emit("dom-ready"); }, 15);
+    return new Promise(resolve => { resolveLoad = resolve; });
+  };
+  const result = await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL, 100);
+  assert.equal(result.readyVia, "idle-dom-ready");
+  assert.equal(stopped, 0);
+  assert.equal(contents.eventNames().length, 0);
+  resolveLoad();
+  await Promise.resolve();
+  assert.equal(stopped, 0);
+});
+
+test("DOM readiness rejects other documents and does not shorten remote login loading", async () => {
+  const keepAlive = setTimeout(() => {}, 100);
+  try {
+    for (const [target, actual] of [
+      [IDLE_BROWSER_URL, "about:blank"],
+      [IDLE_BROWSER_URL, "https://chatgpt.com/?private-query=secret"],
+      ["https://auth.openai.com/", "https://auth.openai.com/"],
+    ]) {
+      const contents = Object.assign(new EventEmitter(), {
+        isDestroyed: () => false, getURL: () => actual, stop() {},
+        isLoading: () => true, isLoadingMainFrame: () => true,
+        loadURL() { queueMicrotask(() => this.emit("dom-ready")); return new Promise(() => {}); },
+      });
+      await assert.rejects(loadCommittedBrowserSurface(contents, target, 5), error => {
+        assert.equal(error.code, "browser_surface_not_ready");
+        assert.equal(error.bootstrap.loading, true);
+        assert.equal(error.bootstrap.expectedUrlCommitted, actual === target);
+        assert.ok(!JSON.stringify(error.bootstrap).includes("secret"));
+        return true;
+      });
+      assert.equal(contents.eventNames().length, 0);
+    }
+  } finally { clearTimeout(keepAlive); }
+});
+
+test("bootstrap abort stops only its pending load and removes readiness listeners", async () => {
+  const controller = new AbortController();
+  let resolveLoad;
+  let stopped = 0;
+  const contents = Object.assign(new EventEmitter(), {
+    isDestroyed: () => false, getURL: () => IDLE_BROWSER_URL,
+    stop: () => { stopped++; },
+    loadURL: () => new Promise(resolve => { resolveLoad = resolve; }),
+  });
+  const pending = loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL, 50, controller.signal);
+  controller.abort(new Error("owner disconnected"));
+  await assert.rejects(pending, /owner disconnected/);
+  assert.equal(stopped, 1);
+  assert.equal(contents.eventNames().length, 0);
+  resolveLoad();
+  contents.emit("dom-ready");
+  await Promise.resolve();
+  assert.equal(stopped, 1);
 });
 
 function manualTabNavigationFixture(remoteError, chatUrl = "https://chatgpt.com/?temporary-chat=true") {

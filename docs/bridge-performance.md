@@ -74,3 +74,19 @@ disconnects the old observer and clears its cached element references. The conve
 current response consistency checks remain intact. Heap retention fixtures measure references
 that become reclaimable, not an immediate reduction in operating-system working set; allocator
 capacity and ChatGPT's own page memory must be measured separately.
+
+## Local browser bootstrap
+
+Local idle documents have a 60-second readiness budget inside the existing 120-second pending-tab
+lease. The control client allows 90 seconds for allocation, readiness and ownership marking.
+An exact local idle URL with `dom-ready` can proceed without waiting for the full-load promise;
+remote login pages keep full-load validation. Other URLs never satisfy local readiness.
+An aborted acquisition stops its pending load, removes listeners and destroys only its owned tab.
+No replacement task is submitted by this readiness check.
+
+Before any task submission, an exhausted readiness budget returns HTTP 503
+`browser_surface_not_ready` with `retryable=true`, rather than HTTP 400. Existing cancellation,
+identity and renderer-failure contracts stay separate. Diagnostic timing and booleans distinguish
+an uncommitted URL from a committed document with delayed readiness; no document text, query,
+control token or credentials are recorded. `browser.tab_initialized` records the readiness signal
+and elapsed milliseconds. This budget does not extend a live ChatGPT turn's progress timeout.
