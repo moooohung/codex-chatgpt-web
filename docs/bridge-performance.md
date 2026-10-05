@@ -77,6 +77,11 @@ capacity and ChatGPT's own page memory must be measured separately.
 
 ## Local browser bootstrap
 
+Manifest verification resolves physical paths through `realpathSync.native` when available.
+It still enumerates the exact inventory and reads every file to calculate SHA-256 on each check.
+The fallback remains available for hosts without that function; size or timestamp caches never
+replace content verification. Native path resolution also applies to directory escape checks.
+
 The launcher tab allocator, browser FIFO and native execution registry share an eight-turn cap.
 An additional request waits for physical browser release or returns the existing capacity error;
 it cannot evict a running tab. The UI reads the cap from the launcher snapshot. Eight occupied

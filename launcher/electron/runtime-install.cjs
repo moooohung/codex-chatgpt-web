@@ -102,12 +102,12 @@ function readRuntimeManifest(runtimeRoot, { version, platform, arch, bundleId })
 
 function runtimeFilePaths(runtimeRoot) {
   const paths = [];
-  const canonicalRoot = fs.realpathSync(runtimeRoot);
+  const canonicalRoot = (fs.realpathSync.native ?? fs.realpathSync)(runtimeRoot);
   const visit = (directory) => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => comparePaths(left.name, right.name))) {
       const absolutePath = path.join(directory, entry.name);
       const relativePath = path.relative(runtimeRoot, absolutePath).split(path.sep).join("/");
-      const target = fs.realpathSync(absolutePath);
+      const target = (fs.realpathSync.native ?? fs.realpathSync)(absolutePath);
       if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${path.sep}`)) {
         throw new Error(`Runtime bundle symlink escapes the bundle: ${absolutePath}`);
       }
@@ -133,7 +133,7 @@ function validateRuntimeFile(runtimeRoot, canonicalRoot, file) {
   }
   if (!metadata.isFile()) throw new Error(`Runtime bundle entry is not a file: ${absolutePath}`);
   {
-    const target = fs.realpathSync(absolutePath);
+    const target = (fs.realpathSync.native ?? fs.realpathSync)(absolutePath);
     if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${path.sep}`)) {
       throw new Error(`Runtime bundle symlink escapes the bundle: ${absolutePath}`);
     }
@@ -177,7 +177,7 @@ function inspectRuntimeBundle(runtimeRoot, identity) {
     throw new Error(`Runtime bundle file count mismatch: expected ${expectedPaths.length}, received ${actualPaths.length}`);
   }
 
-  const canonicalRoot = fs.realpathSync(runtimeRoot);
+  const canonicalRoot = (fs.realpathSync.native ?? fs.realpathSync)(runtimeRoot);
   // Full verification path: compute SHA-256 for all files
   for (const file of manifest.files) validateRuntimeFile(runtimeRoot, canonicalRoot, file);
   if (identity.platform !== "win32" && (fs.statSync(paths.executable).mode & 0o111) === 0) {
