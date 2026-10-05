@@ -8,7 +8,7 @@ launcher-owned codex-chatgpt-web daemon
   ├─ official /models passthrough + fixed ChatGPT Web models
   ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
   ├─ authenticated native Search and Image Gen request forwarding
-  ├─ ChatGPT browser worker (up to five task-bound Electron tabs)
+  ├─ ChatGPT browser worker (up to eight task-bound Electron tabs)
   ├─ capability broker (full mode only)
   └─ stdio MCP server
             ▲
@@ -97,7 +97,7 @@ label does not itself replace a remote connector's cached schema; legacy connect
 
 ## Browser lifecycle
 
-The desktop launcher owns one persistent Electron partition and up to five task-bound browser
+The desktop launcher owns one persistent Electron partition and up to eight task-bound browser
 tabs. Each task/model/effort/compaction epoch owns one exact `WebContentsView` lease; sequential
 native messages reuse that surface, while each message receives a fresh turn-bound MCP token and
 keeps all of its MCP tool rounds inside one ChatGPT response. Compaction asks the same retained Web
@@ -105,7 +105,7 @@ agent for a one-shot structured checkpoint, waits for the response and physical 
 then closes the old surface. The next epoch gets a new browser chat. Model messages never copy
 state between tabs. Tabs share only the local login
 partition and keep independent documents and lifecycles. Closing a running tab destroys its page
-and terminates that browser turn. A sixth concurrent turn fails explicitly; the cap avoids excessive
+and terminates that browser turn. A ninth concurrent turn fails explicitly; the cap avoids excessive
 parallel traffic that could trigger account abuse controls.
 
 Browser submission and response binding use ChatGPT's logical `data-turn-id`, not the
@@ -282,7 +282,7 @@ launcher error.
 - Store browser state and tunnel credentials under the application home with mode `0600`.
 - Protect lifecycle control endpoints with a random application-owned bearer token.
 - Never place secret values in command-line arguments, logs, generated profiles, or Git.
-- Limit browser turns to five independent task-bound tabs and reject unsupported models explicitly.
+- Limit browser turns to eight independent task-bound tabs and reject unsupported models explicitly.
   The selected routed model fixes the adapter effort; a conflicting request effort cannot change it.
 - Do not retry or switch modes to evade product usage limits.
 

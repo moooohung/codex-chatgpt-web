@@ -1,5 +1,5 @@
 import {expect,test} from "bun:test";
-import {ChatGptBrowserRunQueue} from "../src/adapters/chatgpt-web/concurrency";
+import {ChatGptBrowserRunQueue,MAX_CHATGPT_BROWSER_TABS} from "../src/adapters/chatgpt-web/concurrency";
 import {ChatGptBrowserWorker,type BrowserTurn} from "../src/adapters/chatgpt-web/browser-worker";
 
 test("browser admission stays bounded and FIFO across successful and failed physical runs",async()=> {
@@ -57,7 +57,7 @@ test("worker shutdown rejects its queue and a later reopened worker can run agai
     }),
   }) as ChatGptBrowserWorker;
   const turn=(traceId:string)=>({traceId,modelId:"chatgpt-web/high",capabilities:{localToolsEnabled:false,solAvailable:true,extraHighAvailable:true,proAvailable:true},prepare:async()=>({text:traceId,images:[],release(){}}),onTextDelta(){}});
-  const active=Array.from({length:5},(_,i)=>worker.run(turn(`active_${i}`)));
+  const active=Array.from({length:MAX_CHATGPT_BROWSER_TABS},(_,i)=>worker.run(turn(`active_${i}`)));
   const pending=worker.run(turn("pending")).then(()=>null,error=>error);
   await Promise.resolve();
   const closing=worker.close();expect((await pending).message).toContain("closing");

@@ -77,6 +77,11 @@ capacity and ChatGPT's own page memory must be measured separately.
 
 ## Local browser bootstrap
 
+The launcher tab allocator, browser FIFO and native execution registry share an eight-turn cap.
+An additional request waits for physical browser release or returns the existing capacity error;
+it cannot evict a running tab. The UI reads the cap from the launcher snapshot. Eight occupied
+tabs do not imply eight simultaneous Sends or establish latency under eight live conversations.
+
 Local idle documents have a 60-second readiness budget inside the existing 120-second pending-tab
 lease. The control client allows 90 seconds for allocation, readiness and ownership marking.
 An exact local idle URL with `dom-ready` can proceed without waiting for the full-load promise;
