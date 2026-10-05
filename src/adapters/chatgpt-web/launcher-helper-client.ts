@@ -530,6 +530,7 @@ export class LauncherBrowserHelperClient {
               id: message.id,
               prepared: {
                 text: prepared.text,
+                ...(prepared.nativeBinding ? { nativeBinding: prepared.nativeBinding } : {}),
                 images: prepared.images,
                 ...(prepared.skillFiles ? { skillFiles: prepared.skillFiles } : {}),
                 ...(prepared.multipart ? { multipart: prepared.multipart } : {}),

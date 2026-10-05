@@ -25,6 +25,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       if (turn.modelFamily !== "5.6") throw new Error("Pinned model family lost in helper IPC");
       await turn.onPreparedSelected(false);
       const prepared = await turn.prepare();
+      if (prepared.nativeBinding?.turn_token !== "ipc_current_token" || prepared.nativeBinding?.token_chars !== 17) throw new Error("Current binding lost in helper IPC");
       if (prepared.skillFiles?.[0]?.text !== "<skill>\\n<name>ipc</name>\\n<path>/skills/ipc/SKILL.md</path>\\ncheck IPC\\n</skill>") throw new Error("Skill file lost in IPC");
       if (prepared.multipart.parts.length !== 6) throw new Error("Multipart context was lost");
       for (let index = 1; index < prepared.multipart.parts.length; index++) {
@@ -99,6 +100,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
       prepare: async () => ({
         text: "inspect", images: [],
+        nativeBinding: { turn_token: "ipc_current_token", token_chars: 17 },
         skillFiles: [selectedSkillFile({ role: "user", origin: "codex_skill", timestamp: 0,
           content: "<skill>\n<name>ipc</name>\n<path>/skills/ipc/SKILL.md</path>\ncheck IPC\n</skill>",
         })],

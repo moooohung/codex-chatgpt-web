@@ -82,6 +82,7 @@ import {
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
+import { decideTurnFollowUp, turnFollowUpPrompt, TURN_FOLLOW_UP_BACKOFF_MS } from "./turn-follow-up";
 import { assertChatGptModelFamily, selectChatGptModelFamily } from "./model-selection";
 import { ChatGptBrowserRunQueue, MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
@@ -5510,7 +5511,7 @@ export class ChatGptBrowserWorker {
         this.attachFiles(page, prepared)
       ));
       await diagnostics.capture(page, "file-attachment-complete");
-      const completionTracker = new ChatGptCompletionTracker();
+      let completionTracker = new ChatGptCompletionTracker();
       const recordFinalUsage = await usageSubmission();
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
@@ -5567,8 +5568,11 @@ export class ChatGptBrowserWorker {
       let loggedCompletionWait = false;
       let capturedResponse = false;
       const sentAt = Date.now();
-      const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = new ChatGptMarkdownBuffer();
+      let visibleTrace = new ChatGptVisibleTraceTracker();
+      let markdownBuffer = new ChatGptMarkdownBuffer();
+      let followUpCount = 0;
+      let toolVerificationSent = false;
+      let accumulatedText = "";
       const checkpointStream = turn.captureLunaCheckpoint
         ? new ChatGptLunaCheckpointStream()
         : undefined;
@@ -5590,7 +5594,7 @@ export class ChatGptBrowserWorker {
           retryable: false,
         });
       };
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let domHealthTracker = new ChatGptTurnDomHealthTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
@@ -5754,6 +5758,17 @@ export class ChatGptBrowserWorker {
           });
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
+            const followUp = decideTurnFollowUp(snapshot.visibleText, followUpCount, {
+              localTools: mode.localTools,
+              // Rolling checkpoints have a single captured answer hash; keep their existing
+              // one-response contract rather than silently capturing several private tails.
+              compaction: turn.compaction === true || turn.captureLunaCheckpoint === true,
+              aborted: turn.abortSignal?.aborted === true,
+              bindingPresent: prepared.nativeBinding !== undefined && turn.completionFence !== undefined,
+              toolBatchRevision: externalProgressSnapshot?.lastToolBatchRevision ?? 0,
+              toolVerificationSent,
+            });
+            const continueTurn = followUp === "incomplete_report" || followUp === "verify_tools";
             if (turn.completionFence) {
               if (completionFenceRevision === undefined) {
                 const revision = await turn.completionFence.begin();
@@ -5770,7 +5785,10 @@ export class ChatGptBrowserWorker {
                 await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
                 continue;
               }
-              if (!await turn.completionFence.commit(completionFenceRevision)) {
+              const fenceStable = continueTurn
+                ? await turn.completionFence.begin() === completionFenceRevision
+                : await turn.completionFence.commit(completionFenceRevision);
+              if (!fenceStable) {
                 completionFenceRevision = undefined;
                 responseDomCache.key = undefined;
                 responseDomCache.snapshot = undefined;
@@ -5792,6 +5810,55 @@ export class ChatGptBrowserWorker {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
             if (final.delta) emitMarkdownDelta(final.delta);
+            if (continueTurn) {
+              const followUpText = turnFollowUpPrompt(followUp, prepared.nativeBinding!);
+              followUpCount += 1;
+              toolVerificationSent ||= followUp === "verify_tools";
+              console.info(`[chatgpt-web] browser turn ${turn.traceId} follow_up=${followUp} count=${followUpCount}`);
+              await new Promise(resolveSleep => setTimeout(resolveSleep, TURN_FOLLOW_UP_BACKOFF_MS));
+              if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+              // Each response owns its DOM/completion projection. Reset before submission so
+              // acceptance and the first tool boundary cannot see the previous terminal state.
+              accumulatedText += `${final.markdown}\n\n`;
+              completionTracker = new ChatGptCompletionTracker();
+              visibleTrace = new ChatGptVisibleTraceTracker();
+              markdownBuffer = new ChatGptMarkdownBuffer();
+              domHealthTracker = new ChatGptTurnDomHealthTracker();
+              completionFenceRevision = undefined;
+              responseDomCache.key = undefined;
+              responseDomCache.snapshot = undefined;
+              capturedResponse = false;
+              sawRunning = false;
+              loggedCompletionWait = false;
+              submissionBaseline = await this.captureSubmissionBaseline(page, followUpText);
+              await this.runStage(turn.traceId, `follow_up_${followUpCount}_prompt_attachment`, browserStageTimeouts.promptAttachment,
+                stageSignal => this.attachPrompt(page, followUpText, mode.localTools,
+                  checkpoint => diagnostics.capture(page, `follow-up-${checkpoint}`),
+                  turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+                  false, undefined, mode.thinkEnabled), chatGptSuspensionClock, true);
+              await this.runStage(turn.traceId, `follow_up_${followUpCount}_send`, browserStageTimeouts.send,
+                stageSignal => this.sendAttachedPrompt(page, submissionBaseline,
+                  checkpoint => diagnostics.capture(page, `follow-up-${checkpoint}`),
+                  turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+                  turn.externalProgress, undefined, completionTracker,
+                  launcherObservationRecovery ? async (...args) => {
+                    const recovered = await recoverSubmissionObservation(...args);
+                    submissionBaseline = recovered.baseline;
+                    return recovered;
+                  } : undefined));
+              responseTurn = await this.waitForNewAssistantTurn(page, submissionBaseline, deadline,
+                turn.abortSignal, turn.externalProgress, CHATGPT_RESPONSE_DOM_GRACE_MS, completionTracker,
+                launcherObservationRecovery ? async (...args) => {
+                  const recovered = await recoverAssistantObservation(...args);
+                  submissionBaseline = recovered.baseline;
+                  return recovered;
+                } : undefined);
+              turn.onTextDelta("\n\n");
+              continue;
+            }
+            if (followUp === "exhausted") {
+              console.warn(`[chatgpt-web] browser turn ${turn.traceId} follow_up_exhausted count=${followUpCount}`);
+            }
             if (checkpointStream) {
               const completed = checkpointStream.finishOptional(snapshot.visibleText);
               if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
@@ -5799,7 +5866,7 @@ export class ChatGptBrowserWorker {
               else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
               finalText = completed.answer;
             } else {
-              finalText = final.markdown;
+              finalText = accumulatedText + final.markdown;
             }
             break;
           }

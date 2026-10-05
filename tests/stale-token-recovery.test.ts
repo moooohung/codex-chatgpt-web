@@ -142,15 +142,25 @@ describe("turn token rejection detection", () => {
     expect(isChatGptTokenRejection(sampleNormalError)).toBe(false);
   });
 
-  test("createGracefulTokenNoticeResult generates a non-fatal guidance payload advising summary completion", () => {
+  test("a rejected token is an unexecuted capability error, not a compaction instruction", () => {
     const errorDetail = "turn token is invalid, expired, or revoked";
     const notice = createGracefulTokenNoticeResult(errorDetail);
 
-    expect(notice.status).toBe("notice");
-    expect(notice.action_required).toBe("conclude_summary");
-    expect(notice.guidance).toContain("Context compaction is in progress or the active turn token was renewed");
-    expect(notice.guidance).toContain("Do not call any further tools");
-    expect(notice.guidance).toContain("Conclude your turn by outputting the summary");
+    expect(notice.status).toBe("error");
+    expect(notice.executed).toBeFalse();
+    expect(notice.code).toBe("turn_token_rejected");
+    expect(notice.action_required).toBe("verify_current_binding");
+    expect(notice.guidance).toContain("different runtime-issued turn_token");
+    expect(notice.guidance).toContain("stop dependent work");
+    expect(notice.guidance).not.toContain("Conclude your turn");
+    expect(notice.guidance).not.toContain("automatically resume");
     expect(notice.error_detail).toBe(errorDetail);
+  });
+
+  test("Zero Risk rejection does not request a native token or manufacture a request id", () => {
+    const notice = createGracefulTokenNoticeResult("request id is invalid, expired, or revoked", "safe");
+    expect(notice.action_required).toBe("report_error");
+    expect(notice.guidance).toContain("request_id");
+    expect(notice.guidance).not.toContain("codex_native_binding_json");
   });
 });

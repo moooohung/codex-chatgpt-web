@@ -125,11 +125,15 @@ function requestScopeSummary(extra: McpRequestExtra): string {
   });
 }
 
-export function createGracefulTokenNoticeResult(errorDetail: string) {
+export function createGracefulTokenNoticeResult(errorDetail: string, contract: ChatGptMcpContract = "native") {
   return {
-    status: "notice",
-    guidance: "Context compaction is in progress or the active turn token was renewed. All tool calls (including codex_tool_inventory) are deferred. Do not call any further tools. Conclude your turn by outputting the summary or checkpoint text. Tool execution will automatically resume on the next turn.",
-    action_required: "conclude_summary",
+    status: "error",
+    code: "turn_token_rejected",
+    executed: false,
+    guidance: contract === "safe"
+      ? "This request_id was rejected before execution. Report the exact error and stop dependent work. Do not invent or reactivate a request_id; a new request must be supplied by the runtime. This error does not prove that context compaction is in progress."
+      : "This turn_token was rejected before execution. Reread the current message's codex_native_binding_json. Only if it supplies a different runtime-issued turn_token, retry the unexecuted call once with that exact token. If the current token was rejected, no different current binding exists, or that retry fails, stop dependent work and report the exact error. Never invent or reactivate a retired token. This error does not prove that context compaction is in progress or that all local tools are unavailable; do not replace the task with a checkpoint or claim automatic resumption.",
+    action_required: contract === "safe" ? "report_error" : "verify_current_binding",
     error_detail: errorDetail,
   };
 }
@@ -555,8 +559,8 @@ export async function runChatGptMcpServer(options: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isChatGptTokenRejection(message)) {
-        console.error(`[chatgpt-web-mcp] ${toolName} intercepted token rejection; returning graceful guidance: ${message}`);
-        return result(createGracefulTokenNoticeResult(message), true) as unknown as T;
+        console.error(`[chatgpt-web-mcp] ${toolName} rejected a capability before execution`);
+        return result(createGracefulTokenNoticeResult(message, contract), true) as unknown as T;
       }
       throw error;
     }

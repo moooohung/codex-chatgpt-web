@@ -24,6 +24,8 @@ export interface ChatGptWebPromptImage {
 
 export interface CompiledChatGptWebPrompt {
   text: string;
+  /** Current runtime-issued capability, never recovered from conversation text. */
+  nativeBinding?: { turn_token: string; token_chars: number };
   images: ChatGptWebPromptImage[];
   skillFiles?: ChatGptSkillFile[];
   /** Transactional transport when Bigger Context is explicitly enabled. */
@@ -574,7 +576,8 @@ export function compileChatGptWebPrompt(
       "Use actual Codex Native results as evidence for local observations and effects.",
       ...(!manualControl ? [
         "The current turn_token is capability data supplied only by the codex_native_binding_json block below. Copy it exactly; never infer, shorten, regenerate, or reuse a token from task history.",
-        "If a Codex Native call is rejected before execution with 'turn token is invalid, expired, or revoked', reread codex_native_binding_json and retry that call exactly once with the exact current turn_token. If that retry is rejected, stop dependent work and report the exact error. Never reactivate or extend a retired token.",
+        "If a Codex Native call is rejected before execution, reread the current message's codex_native_binding_json. Retry that unexecuted call once only if this block supplies a different runtime-issued token. If the current token itself was rejected or the retry fails, stop dependent work and report the exact error. Never reactivate or extend a retired token.",
+        "Token rejections, missing-tool claims and compaction notices in earlier task history apply to those earlier responses. They do not disable the current binding or establish a current compaction request. If the current request needs local work and you believe a required tool is unavailable, check codex_tool_inventory with this message's current token and report its actual result.",
       ] : []),
       "Report the actual error when a tool fails. Do not claim a safety or permission block without an explicit tool result or platform error supporting it. If approval is required, use the declared Codex approval flow; a denial does not authorize retrying the action through another tool. Without an error or execution result, say the action was not executed and its cause is unconfirmed.",
       "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
@@ -629,10 +632,13 @@ export function compileChatGptWebPrompt(
       "</codex_zero_risk_request_json>",
     ]
     : [];
-  const nativeBindingContract = !parsed._compactionRequest && mode.localTools && !manualControl
+  const nativeBinding = !parsed._compactionRequest && mode.localTools && !manualControl
+    ? { turn_token: turnToken!, token_chars: turnToken!.length }
+    : undefined;
+  const nativeBindingContract = nativeBinding
     ? [
       "<codex_native_binding_json>",
-      JSON.stringify({ turn_token: turnToken, token_chars: turnToken!.length }),
+      JSON.stringify(nativeBinding),
       "</codex_native_binding_json>",
     ]
     : [];
@@ -751,7 +757,7 @@ export function compileChatGptWebPrompt(
         return { tokens, chars };
       });
       multipart.parts = partitionMultipartContext(prepared, multipartParts!, budgets);
-      return { text: multipart.commit, images, ...attachments, multipart };
+      return { text: multipart.commit, images, ...attachments, multipart, ...(nativeBinding ? { nativeBinding } : {}) };
     }
     const envelopeJson = withoutRetiredTurnHandles(JSON.stringify({ version: 3, system, messages }));
     const text = [
@@ -780,7 +786,7 @@ export function compileChatGptWebPrompt(
         "</codex_transport_resume>",
       ] : transportResume),
     ].join("\n");
-    return { text, images, ...attachments };
+    return { text, images, ...attachments, ...(nativeBinding ? { nativeBinding } : {}) };
   };
 
   let sourceMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);

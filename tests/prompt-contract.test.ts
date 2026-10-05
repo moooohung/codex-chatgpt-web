@@ -79,7 +79,8 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(transportOnly).toContain(`<codex_native_binding_json>\n${JSON.stringify({ turn_token: token, token_chars: token.length })}\n</codex_native_binding_json>`);
   expect(transportOnly.split(token)).toHaveLength(2);
   expect(transportOnly).toContain("Use only the exact turn_token from codex_native_binding_json for every Codex Native call in this response");
-  expect(transportOnly).toContain("retry that call exactly once with the exact current turn_token");
+  expect(transportOnly).toContain("Retry that unexecuted call once only if this block supplies a different runtime-issued token");
+  expect(transportOnly).toContain("If the current token itself was rejected or the retry fails, stop dependent work");
   expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
   expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex\.control\.turn_complete/);
   expect(transportOnly).toContain("Do not claim a safety or permission block without an explicit tool result or platform error supporting it.");
