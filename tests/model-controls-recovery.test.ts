@@ -25,6 +25,7 @@ test("selectModelAndEffortWithRecovery reloads page and retries on transient con
   let reloads = 0;
   let surfacesPrepared = 0;
   const diagnostics: string[] = [];
+  const selections: unknown[][] = [];
 
   const page = {
     reload: async () => {
@@ -36,7 +37,8 @@ test("selectModelAndEffortWithRecovery reloads page and retries on transient con
 
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { useSavedChats: true },
-    selectModelAndEffort: async () => {
+    selectModelAndEffort: async (...args: unknown[]) => {
+      selections.push(args);
       attempts += 1;
       if (attempts === 1) {
         throw new ChatGptWebAdapterError("ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.", {
@@ -73,6 +75,7 @@ test("selectModelAndEffortWithRecovery reloads page and retries on transient con
   expect(reloads).toBe(1);
   expect(surfacesPrepared).toBe(1);
   expect(result.effort).toBe("high");
+  expect(selections.every(args => args[1] === "chatgpt-5.6" && args[2] === "high" && args[6] === "5.6")).toBe(true);
   expect(diagnostics).toContain("model-controls-recovery-reload-attempted");
   expect(diagnostics).toContain("model-controls-recovery-reloaded");
 });
