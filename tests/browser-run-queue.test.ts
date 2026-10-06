@@ -1,6 +1,7 @@
 import {expect,test} from "bun:test";
-import {ChatGptBrowserRunQueue,MAX_CHATGPT_BROWSER_TABS} from "../src/adapters/chatgpt-web/concurrency";
+import {ChatGptBrowserRunQueue,MAX_CHATGPT_BROWSER_TABS,resolveMaxChatGptBrowserTabs} from "../src/adapters/chatgpt-web/concurrency";
 import {ChatGptBrowserWorker,type BrowserTurn} from "../src/adapters/chatgpt-web/browser-worker";
+import {ChatGptTurnSessions,ChatGptTraceFeed,ChatGptTextFeed} from "../src/adapters/chatgpt-web/turn-execution";
 
 test("browser admission stays bounded and FIFO across successful and failed physical runs",async()=> {
   const queue=new ChatGptBrowserRunQueue<number>(2), starts:number[]=[], finish=new Map<number,(fail?:boolean)=>void>();
@@ -13,6 +14,38 @@ test("browser admission stays bounded and FIFO across successful and failed phys
   finish.get(0)!(); await runs[0]; await Promise.resolve(); expect(starts).toEqual([0,1,2,3]);
   finish.get(2)!(); await runs[2]; await Promise.resolve(); expect(starts).toEqual([0,1,2,3,4]);
   finish.get(3)!();finish.get(4)!(); await Promise.all([runs[3],runs[4]]);
+});
+
+test("browser admission defaults to four slots and accepts only bounded overrides",()=> {
+  expect(resolveMaxChatGptBrowserTabs(undefined)).toBe(4);
+  expect(resolveMaxChatGptBrowserTabs("1")).toBe(1);
+  expect(resolveMaxChatGptBrowserTabs("8")).toBe(8);
+  expect(resolveMaxChatGptBrowserTabs("9")).toBe(4);
+  expect(resolveMaxChatGptBrowserTabs("nope")).toBe(4);
+});
+
+test("a fifth registered request queues before browser preparation and starts after physical settlement",async()=> {
+  const sessions=new ChatGptTurnSessions(), starts:string[]=[], releases=new Map<string,()=>void>();
+  const worker=Object.assign(Object.create(ChatGptBrowserWorker.prototype),{
+    config:{browserHost:"managed-chrome"},activeRuns:new Map(),
+    runExclusive:(turn:BrowserTurn)=>new Promise<string>(resolve=>{
+      starts.push(turn.traceId);releases.set(turn.traceId,()=>resolve(turn.traceId));
+    }),
+  }) as ChatGptBrowserWorker;
+  const runs=Array.from({length:5},(_,index)=>sessions.getOrCreate(`request_${index}`,()=>{
+    const browser=worker.run({traceId:`request_${index}`,modelId:"chatgpt-web/high",
+      capabilities:{localToolsEnabled:false,solAvailable:true,extraHighAvailable:true,proAvailable:true},
+      prepare:async()=>({text:"queued",images:[],release(){}}),onTextDelta(){}});
+    return {mode:"read-only" as const,browser,physicalSettlement:browser.then(()=>{}),
+      trace:new ChatGptTraceFeed(),text:new ChatGptTextFeed(),cancel(){}};
+  }));
+  await Promise.resolve();
+  expect(sessions.activeCount()).toBe(5);
+  expect(starts).toEqual(["request_0","request_1","request_2","request_3"]);
+  releases.get("request_0")!();await runs[0]!.runtime.browser;await Promise.resolve();
+  expect(starts).toEqual(["request_0","request_1","request_2","request_3","request_4"]);
+  for(const id of starts.slice(1))releases.get(id)!();
+  await Promise.all(runs.map(session=>session.runtime.browser));sessions.clear();
 });
 
 test("cancelled queued requests never prepare or start when a permit later becomes free",async()=> {

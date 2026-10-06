@@ -82,6 +82,7 @@ import {
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
+import { observeSubmissionDuringActivation } from "./submission-activation";
 import { assertChatGptModelFamily, selectChatGptModelFamily } from "./model-selection";
 import { ChatGptBrowserRunQueue, MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
@@ -3923,22 +3924,24 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
     await submissionLifecycle?.onSendActivated?.();
-    await sendButton.press("Enter", {
-      noWaitAfter: true,
-      signal: abortSignal,
-      // runStage owns the operation budget. A second Locator timeout would silently collapse the
-      // 180-second Bigger Context budget back to the ordinary 20 seconds after Enter has already
-      // submitted the message; semantic submission evidence below remains the authority.
-      timeout: 0,
-    });
-    const evidence = await this.waitForSubmissionAcceptedWithRecovery(
-      page,
-      baseline,
+    const evidence = await observeSubmissionDuringActivation(
+      signal => sendButton.press("Enter", {
+        noWaitAfter: true,
+        signal,
+        // runStage owns both ordinary and Bigger Context budgets. Keyboard acknowledgement
+        // may stall after keydown; only new DOM/current MCP evidence confirms acceptance.
+        timeout: 0,
+      }),
+      signal => this.waitForSubmissionAcceptedWithRecovery(
+        page,
+        baseline,
+        signal,
+        externalProgress,
+        initialToolBatchRevision,
+        completionTracker,
+        recoverObservation,
+      ),
       abortSignal,
-      externalProgress,
-      initialToolBatchRevision,
-      completionTracker,
-      recoverObservation,
     );
     await submissionLifecycle?.onSubmitted?.();
     return evidence;

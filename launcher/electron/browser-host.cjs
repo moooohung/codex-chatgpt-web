@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { app, clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { injectDomStealth, applyStealthHeaders } = require("./stealth.cjs");
@@ -17,6 +17,7 @@ const { processRunning } = require("./process-tree.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const { configureChatGptAnnouncementDismissal } = require("./browser-announcements.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
+const { resolveBrowserMemoryPolicy } = require("./browser-memory-policy.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
   shouldBlockSleepForTurns,
@@ -36,7 +37,6 @@ const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 60_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
-const MAX_BROWSER_TABS = 8;
 const MAX_CANCELLED_TURN_TRACES = 256;
 const MANUAL_SUBMIT_TIMEOUT_MS = 60_000;
 const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 600_000;
@@ -51,6 +51,7 @@ const TURN_HEARTBEAT_SWEEP_MS = 5_000;
 const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
+const TURN_MEMORY_PROBE_TIMEOUT_MS = 1_000;
 
 function recordTurnActivity(tab, now = Date.now()) {
   const state = tab.approvalPending ? "approval"
@@ -114,6 +115,20 @@ const CHATGPT_VIEWPORT_CSS = `
 `;
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitForBrowserMemoryTransition(transition, signal) {
+  signal?.throwIfAborted();
+  let onAbort;
+  try {
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    await Promise.race([transition, aborted]);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
 
 function javaScriptLiteral(value) {
   return JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
@@ -373,6 +388,8 @@ class BrowserHost {
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
     getUseSavedChats = () => false,
+    memoryPolicy = resolveBrowserMemoryPolicy(),
+    getAppMetrics = () => app?.getAppMetrics?.() ?? [],
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -407,6 +424,8 @@ class BrowserHost {
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.getUseSavedChats = getUseSavedChats;
+    this.memoryPolicy = memoryPolicy;
+    this.getAppMetrics = getAppMetrics;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -659,12 +678,13 @@ class BrowserHost {
   }
 
   allocateTabOrdinal() {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
-      const error = new Error(`ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`);
+    const maxTabs = this.memoryPolicy?.maxTabs ?? resolveBrowserMemoryPolicy().maxTabs;
+    if (this.turnTabs.size >= maxTabs && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
+      const error = new Error(`ChatGPT Web already has ${maxTabs} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`);
       error.code = "browser_tab_limit";
       throw error;
     }
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_, index) => index + 1)
+    const ordinal = Array.from({ length: maxTabs }, (_, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     return ordinal;
@@ -715,6 +735,7 @@ class BrowserHost {
       traceId,
       conversationKey,
       accountName: assignedAccount,
+      partition: assignedPartition,
       connectorIdentity,
       connectorBound: false,
       helperPid,
@@ -734,6 +755,10 @@ class BrowserHost {
       deviceEmulationDirty: true,
       bootstrapDeadlineAt: Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS,
       lastHeartbeatAt: Date.now(),
+      retainedTurnCount: 0,
+      memorySuspended: false,
+      recycleOnResume: false,
+      retainedUrl: null,
     };
     this.turnTabs.set(id, tab);
     this.syncPowerSaveBlocker();
@@ -781,6 +806,156 @@ class BrowserHost {
       throw error;
     } finally {
       signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  async turnRendererPrivateMb(tab) {
+    const contents = tab?.view?.webContents;
+    if (!contents || contents.isDestroyed()) return null;
+    try {
+      // Electron exposes per-renderer memory through main-process app metrics, keyed by
+      // OS PID. webContents has no getProcessMemoryInfo method in the shipped Electron.
+      const metric = this.getAppMetrics?.().find(item => item.pid === contents.getOSProcessId?.());
+      if (Number.isFinite(metric?.memory?.privateBytes)) {
+        return Math.round((metric.memory.privateBytes / 1024) * 10) / 10;
+      }
+    } catch {}
+    if (typeof contents.getProcessMemoryInfo !== "function") return null;
+    let timer;
+    try {
+      const info = await Promise.race([
+        contents.getProcessMemoryInfo(),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), TURN_MEMORY_PROBE_TIMEOUT_MS); }),
+      ]);
+      return Number.isFinite(info?.private) ? Math.round((info.private / 1024) * 10) / 10 : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  retainedConversationUrl(tab) {
+    const contents = tab?.view?.webContents;
+    const candidate = contents
+      && !contents.isDestroyed()
+      && typeof contents.getURL === "function"
+      ? contents.getURL()
+      : tab?.url;
+    try {
+      const parsed = new URL(candidate || "");
+      // A temporary conversation is only proven in its current document. Parking it would
+      // trade away continuation state without evidence that the server can reload it.
+      return parsed.origin === CHATGPT_ORIGIN && parsed.pathname.startsWith("/c/")
+        && parsed.searchParams.get("temporary-chat") !== "true" ? parsed.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async suspendRetainedTurnTab(tab) {
+    const policy = this.memoryPolicy ?? resolveBrowserMemoryPolicy();
+    const retainedUrl = BrowserHost.prototype.retainedConversationUrl.call(this, tab);
+    if (!retainedUrl) {
+      this.logger.info("browser.tab_memory_release_skipped", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+        reason: "conversation_url_unavailable",
+      });
+      return false;
+    }
+    tab.retainedTurnCount = (tab.retainedTurnCount ?? 0) + 1;
+    const privateMb = await BrowserHost.prototype.turnRendererPrivateMb.call(this, tab);
+    const recycleForTurns = policy.recycleAfterTurns > 0 && tab.retainedTurnCount >= policy.recycleAfterTurns;
+    const recycleForMemory = policy.recycleRendererMb > 0
+      && privateMb !== null
+      && privateMb >= policy.recycleRendererMb;
+    const recycleOnResume = recycleForTurns || recycleForMemory;
+    if (!policy.releaseIdleTabMemory && !recycleOnResume) return false;
+    const contents = tab.view.webContents;
+    if (contents.isDestroyed()) return false;
+    tab.retainedUrl = retainedUrl;
+    tab.recycleOnResume = recycleOnResume;
+    // Even an interrupted navigation needs the saved URL restored before the next turn.
+    tab.memorySuspended = true;
+    tab.initializingSurface = true;
+    try {
+      await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL, PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS);
+      tab.memorySuspended = true;
+      tab.loading = false;
+      tab.rendererReady = true;
+      tab.deviceEmulationDirty = true;
+      this.logger.info("browser.tab_memory_suspended", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+        retainedTurns: tab.retainedTurnCount,
+        privateMb,
+        recycleOnResume,
+        reason: recycleForMemory ? "renderer_memory" : recycleForTurns ? "turn_count" : "idle_release",
+      });
+      this.writeDescriptor();
+      return true;
+    } finally {
+      tab.initializingSurface = false;
+    }
+  }
+
+  createAutomaticTurnView(partition) {
+    return new WebContentsView({
+      webPreferences: {
+        partition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: true,
+        backgroundThrottling: false,
+      },
+    });
+  }
+
+  async restoreRetainedTurnTab(tab, signal) {
+    if (!tab.memorySuspended) return false;
+    const retainedUrl = tab.retainedUrl;
+    if (!retainedUrl) throw new Error("Retained ChatGPT tab has no conversation URL to restore");
+    signal?.throwIfAborted();
+    let recycled = false;
+    if (tab.recycleOnResume) {
+      const previousView = tab.view;
+      const replacement = BrowserHost.prototype.createAutomaticTurnView.call(this, tab.partition || this.partition);
+      tab.view = replacement;
+      tab.rendererReady = false;
+      tab.deviceEmulationViewport = null;
+      tab.deviceEmulationDirty = true;
+      this.window.contentView.addChildView(replacement);
+      this.presentTurnView(tab, false);
+      replacement.webContents.setZoomFactor(this.state.zoomFactor);
+      this.bindShellZoomShortcuts(replacement.webContents);
+      this.bindTurnContents(tab);
+      try { this.window.contentView.removeChildView(previousView); } catch {}
+      if (!previousView.webContents.isDestroyed()) previousView.webContents.close();
+      tab.retainedTurnCount = 0;
+      recycled = true;
+    }
+    const contents = tab.view.webContents;
+    tab.initializingSurface = true;
+    try {
+      await loadCommittedBrowserSurface(contents, retainedUrl, TURN_TAB_BOOTSTRAP_TIMEOUT_MS, signal);
+      signal?.throwIfAborted();
+      await this.markTurnTabSurface(tab);
+      tab.memorySuspended = false;
+      tab.recycleOnResume = false;
+      tab.retainedUrl = null;
+      tab.rendererReady = true;
+      tab.bootstrapReady = true;
+      tab.deviceEmulationDirty = true;
+      this.writeDescriptor();
+      this.logger.info(recycled ? "browser.tab_renderer_recycled" : "browser.tab_memory_restored", {
+        tabId: tab.id,
+        traceId: tab.traceId,
+      });
+      return true;
+    } finally {
+      tab.initializingSurface = false;
     }
   }
 
@@ -894,7 +1069,7 @@ class BrowserHost {
 
   evictOldestRetainedTurnTab() {
     const retained = [...this.turnTabs.values()]
-      .filter(tab => tab.status === "ready" && !tab.isSignInTab)
+      .filter(tab => tab.status === "ready" && !tab.isSignInTab && !tab.memoryTransition)
       .sort((left, right) => (left.lastHeartbeatAt ?? 0) - (right.lastHeartbeatAt ?? 0))[0];
     if (!retained) return false;
     this.removeTurnTab(retained, false);
@@ -1714,7 +1889,7 @@ class BrowserHost {
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
           ]
         : [homeTab],
-      maxTabs: MAX_BROWSER_TABS,
+      maxTabs: this.memoryPolicy?.maxTabs ?? resolveBrowserMemoryPolicy().maxTabs,
     };
   }
 
@@ -1815,6 +1990,7 @@ class BrowserHost {
       return;
     }
     for (const tab of [...this.turnTabs.values()]) {
+      if (tab.memoryTransition) continue;
       if (tab.interactionMode === "manual") {
         if (tab.status === "ready") {
           if (now - (tab.lastHeartbeatAt ?? 0) < RETAINED_TURN_TAB_TTL_MS) continue;
@@ -2754,6 +2930,13 @@ class BrowserHost {
     if (this.userCancelledTurnOwners.has(traceId)) {
       throw new BrowserTurnCancelledError(traceId);
     }
+    const transitioning = [...this.turnTabs.values()].find(tab => tab.memoryTransition
+      && (tab.traceId === traceId || (conversationKey && tab.conversationKey === conversationKey)));
+    if (transitioning) {
+      await waitForBrowserMemoryTransition(transitioning.memoryTransition, signal);
+      signal?.throwIfAborted();
+      if (this.userCancelledTurnOwners.has(traceId)) throw new BrowserTurnCancelledError(traceId);
+    }
     const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
     if (sameTrace && sameTrace.interactionMode !== "automatic") {
       throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
@@ -2795,9 +2978,23 @@ class BrowserHost {
           evidence: "previous helper exited",
         });
       }
+      // Reserve the lease before awaiting renderer restoration, so two requests cannot
+      // restore the same ready tab or transfer its ownership during navigation.
       existing.helperPid = helperPid;
       existing.traceId = traceId;
       existing.status = "running";
+      if (reused && existing.memorySuspended) {
+        try {
+          await BrowserHost.prototype.restoreRetainedTurnTab.call(this, existing, signal);
+        } catch (error) {
+          if (this.turnTabs.get(existing.id) === existing) this.removeTurnTab(existing, false);
+          const unavailable = new Error(
+            `The retained ChatGPT conversation could not be restored: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          unavailable.code = "retained_conversation_unavailable";
+          throw unavailable;
+        }
+      }
       existing.approvalPending = false;
       existing.turnProgress = undefined;
       existing.activity = undefined;
@@ -2895,6 +3092,18 @@ class BrowserHost {
       && (!tab.connectorIdentity || connectorBound)) {
       tab.connectorBound = connectorBound === true;
       tab.lastHeartbeatAt = Date.now();
+      const transition = BrowserHost.prototype.suspendRetainedTurnTab.call(this, tab)
+        .catch(error => {
+          // A memory optimization must not turn a completed answer into a submission retry.
+          this.logger.warn("browser.tab_memory_suspend_failed", { tabId: tab.id, traceId,
+            ...navigationErrorForLog(error) });
+        });
+      tab.memoryTransition = transition;
+      try {
+        await transition;
+      } finally {
+        if (tab.memoryTransition === transition) tab.memoryTransition = undefined;
+      }
       if (hideAfterTurn && !this.activeTraceId) this.hide();
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
       this.publishState?.(this.snapshot());

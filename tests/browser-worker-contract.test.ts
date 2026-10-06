@@ -339,8 +339,8 @@ test("response caching rechecks CSS visibility without requiring a DOM mutation"
   }
 });
 
-test("browser turns run concurrently up to the eight-tab limit", async () => {
-  expect(MAX_CHATGPT_BROWSER_TABS).toBe(8);
+test("browser turns run concurrently up to the configured default tab limit", async () => {
+  expect(MAX_CHATGPT_BROWSER_TABS).toBe(4);
   const releases = new Map<string, () => void>();
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { browserHost: "managed-chrome" },
@@ -357,22 +357,22 @@ test("browser turns run concurrently up to the eight-tab limit", async () => {
     onTextDelta() {},
   });
 
-  const active = Array.from({ length: 8 }, (_unused, index) => worker.run(browserTurn(`trace_${index + 1}`)));
+  const active = Array.from({ length: MAX_CHATGPT_BROWSER_TABS }, (_unused, index) => worker.run(browserTurn(`trace_${index + 1}`)));
   await Promise.resolve();
-  expect(releases.size).toBe(8);
-  const ninth = worker.run(browserTurn("trace_9"));
+  expect(releases.size).toBe(MAX_CHATGPT_BROWSER_TABS);
+  const queued = worker.run(browserTurn("trace_queued"));
   await Promise.resolve();
-  expect(releases.has("trace_9")).toBeFalse();
-  await expect(worker.run(browserTurn("trace_9"))).rejects.toThrow("Duplicate");
+  expect(releases.has("trace_queued")).toBeFalse();
+  await expect(worker.run(browserTurn("trace_queued"))).rejects.toThrow("Duplicate");
 
   releases.get("trace_1")?.();
   await active[0];
   await Promise.resolve();
-  expect(releases.has("trace_9")).toBeTrue();
-  for (const traceId of ["trace_2", "trace_3", "trace_4", "trace_5", "trace_6", "trace_7", "trace_8", "trace_9"]) {
+  expect(releases.has("trace_queued")).toBeTrue();
+  for (const traceId of ["trace_2", "trace_3", "trace_4", "trace_queued"]) {
     releases.get(traceId)?.();
   }
-  await Promise.all([...active.slice(1), ninth]);
+  await Promise.all([...active.slice(1), queued]);
 });
 
 test("browser turns have no absolute deadline unless one is explicitly configured", () => {

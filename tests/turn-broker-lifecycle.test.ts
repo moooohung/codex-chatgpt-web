@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { MAX_CHATGPT_REGISTERED_TURNS } from "../src/adapters/chatgpt-web/concurrency";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -166,7 +167,7 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
   sessions.clear();
 });
 
-test("eight active turns coexist and a ninth fails closed", () => {
+test("request ownership stays bounded while extra turns can wait for a browser slot", () => {
   const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
   const runtime = () => ({
@@ -178,19 +179,19 @@ test("eight active turns coexist and a ninth fails closed", () => {
     cancel: () => { cancelled += 1; },
   });
 
-  const active = Array.from({ length: 8 }, (_unused, index) => (
+  const active = Array.from({ length: MAX_CHATGPT_REGISTERED_TURNS }, (_unused, index) => (
     sessions.getOrCreate(`turn-${index + 1}`, runtime)
   ));
-  expect(sessions.activeCount()).toBe(8);
+  expect(sessions.activeCount()).toBe(MAX_CHATGPT_REGISTERED_TURNS);
   expect(cancelled).toBe(0);
-  expect(() => sessions.getOrCreate("turn-9", runtime)).toThrow("at most 8 simultaneous browser turns");
+  expect(() => sessions.getOrCreate("turn-over-cap", runtime)).toThrow(`at most ${MAX_CHATGPT_REGISTERED_TURNS} active requests`);
 
   expect(sessions.getOrCreate("turn-3", () => {
     throw new Error("an in-flight turn must be reused");
   })).toBe(active[2]);
   expect(cancelled).toBe(0);
   sessions.clear();
-  expect(cancelled).toBe(8);
+  expect(cancelled).toBe(MAX_CHATGPT_REGISTERED_TURNS);
 });
 
 test("settled replay sessions expire from their last use instead of their creation time", async () => {

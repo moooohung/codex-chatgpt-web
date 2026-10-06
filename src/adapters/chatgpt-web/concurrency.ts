@@ -1,9 +1,23 @@
+export const DEFAULT_MAX_CHATGPT_BROWSER_TABS = 4;
+// Keep bounded request/observer ownership while extra turns wait for a physical browser slot.
+export const MAX_CHATGPT_REGISTERED_TURNS = 8;
+
+export function resolveMaxChatGptBrowserTabs(
+  raw = process.env.CODEX_WEB_GPT_MAX_BROWSER_TABS,
+): number {
+  if (raw === undefined || raw === "") return DEFAULT_MAX_CHATGPT_BROWSER_TABS;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 8
+    ? parsed
+    : DEFAULT_MAX_CHATGPT_BROWSER_TABS;
+}
+
 /**
  * ChatGPT Web concurrency is deliberately bounded. Every active Codex turn owns a real
- * browser document in the signed-in account, so unbounded fan-out would create account-level
- * traffic that is indistinguishable from spam.
+ * browser document in the signed-in account. Extra turns remain in ChatGptBrowserRunQueue
+ * until a physical browser slot settles.
  */
-export const MAX_CHATGPT_BROWSER_TABS = 8;
+export const MAX_CHATGPT_BROWSER_TABS = resolveMaxChatGptBrowserTabs();
 
 interface PendingBrowserRun<T> {
   action: () => Promise<T>;

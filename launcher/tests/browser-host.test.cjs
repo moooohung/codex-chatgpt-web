@@ -2024,6 +2024,7 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
   let visibilitySyncs = 0;
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]),
+    memoryPolicy: { releaseIdleTabMemory: false, recycleAfterTurns: 0, recycleRendererMb: 0, maxTabs: 4 },
     closedTurnOwners: new Map(),
     syncViewVisibility: () => { visibilitySyncs += 1; },
     snapshot: () => ({ activeTabId: tab.id }),
@@ -2830,15 +2831,15 @@ test("a required retained conversation fails before creating a browser tab", asy
   assert.equal(created, false);
 });
 
-test("eight occupied browser tabs reject a ninth allocation", async () => {
-  const turnTabs = new Map(Array.from({ length: 8 }, (_unused, index) => [
+test("the default browser memory cap rejects a fifth occupied tab", async () => {
+  const turnTabs = new Map(Array.from({ length: 4 }, (_unused, index) => [
     `tab-${index + 1}`,
     { ordinal: index + 1 },
   ]));
 
   await assert.rejects(
-    BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_nine", 444),
-    /already has 8 browser tabs.*avoid excessive parallel traffic/,
+    BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_five", 444),
+    /already has 4 browser tabs.*avoid excessive parallel traffic/,
   );
 });
 
@@ -2973,6 +2974,65 @@ test("a completed keyed turn is retained for thirty minutes and preserves its ac
   const retainedAt = tab.lastHeartbeatAt;
   BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, retainedAt + (30 * 60 * 1000) - 1);
   assert.equal(fixture.turnTabs.has(tab.id), true);
+});
+
+test("a retained automatic tab releases its ChatGPT renderer onto the idle document", async () => {
+  const contents = new EventEmitter();
+  let url = "https://chatgpt.com/c/memory-test";
+  contents.isDestroyed = () => false;
+  contents.getURL = () => url;
+  contents.getProcessMemoryInfo = async () => ({ private: 600 * 1024, shared: 0 });
+  contents.loadURL = async next => { url = next; };
+  const events = [];
+  const tab = {
+    id: "tab-memory",
+    traceId: "trace-memory",
+    retainedTurnCount: 7,
+    view: { webContents: contents },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    memoryPolicy: { releaseIdleTabMemory: true, recycleAfterTurns: 8, recycleRendererMb: 512, maxTabs: 4 },
+    logger: { info: (event, detail) => events.push([event, detail]) },
+    writeDescriptor: () => events.push(["descriptor"]),
+  });
+
+  assert.equal(await BrowserHost.prototype.suspendRetainedTurnTab.call(fixture, tab), true);
+  assert.equal(url, IDLE_BROWSER_URL);
+  assert.equal(tab.retainedUrl, "https://chatgpt.com/c/memory-test");
+  assert.equal(tab.memorySuspended, true);
+  assert.equal(tab.recycleOnResume, true);
+  assert.equal(tab.retainedTurnCount, 8);
+  assert.equal(events[0][0], "browser.tab_memory_suspended");
+  assert.equal(events[0][1].privateMb, 600);
+});
+
+test("a lightweight retained tab reloads its exact conversation before reuse", async () => {
+  const contents = new EventEmitter();
+  let url = IDLE_BROWSER_URL;
+  contents.isDestroyed = () => false;
+  contents.getURL = () => url;
+  contents.loadURL = async next => { url = next; };
+  const tab = {
+    id: "tab-restore",
+    traceId: "trace-restore",
+    retainedUrl: "https://chatgpt.com/c/restore-test",
+    memorySuspended: true,
+    recycleOnResume: false,
+    view: { webContents: contents },
+  };
+  let marked = 0;
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    logger: { info() {} },
+    writeDescriptor() {},
+    markTurnTabSurface: async candidate => { assert.equal(candidate, tab); marked += 1; },
+  });
+
+  assert.equal(await BrowserHost.prototype.restoreRetainedTurnTab.call(fixture, tab), true);
+  assert.equal(url, "https://chatgpt.com/c/restore-test");
+  assert.equal(marked, 1);
+  assert.equal(tab.memorySuspended, false);
+  assert.equal(tab.recycleOnResume, false);
+  assert.equal(tab.retainedUrl, null);
 });
 
 test("a retained browser tab expires at thirty minutes", () => {
@@ -3966,9 +4026,9 @@ test("recordAccountAuthFailure and recordAccountAuthSuccess deduplicate identica
   assert.equal(publishCount, 2);
 });
 
-test("browser allocation fills all eight ordinals and reuses a released slot", () => {
-  const fixture = { turnTabs: new Map() };
-  for (let ordinal = 1; ordinal <= 8; ordinal++) {
+test("browser allocation fills the configured ordinals and reuses a released slot", () => {
+  const fixture = { turnTabs: new Map(), memoryPolicy: { maxTabs: 4 } };
+  for (let ordinal = 1; ordinal <= 4; ordinal++) {
     assert.equal(BrowserHost.prototype.allocateTabOrdinal.call(fixture), ordinal);
     fixture.turnTabs.set(`tab-${ordinal}`, { ordinal, status: "running" });
   }
