@@ -61,7 +61,7 @@ foreach ($file in $plan.files) {
     if ($file.originalSha256 -notmatch '^[a-f0-9]{64}$' -or $file.candidateSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid plan hash' }
     if ((FileHash $candidate) -ne $file.candidateSha256) { throw ('Candidate hash mismatch: ' + $candidate) }
     $current = FileHash $target
-    $state = if ($current -eq $file.originalSha256) { 'original' } elseif ($current -eq $file.candidateSha256) { 'candidate' } else { 'unknown' }
+    $state = if ($current -eq $file.originalSha256 -and $current -eq $file.candidateSha256) { 'unchanged' } elseif ($current -eq $file.originalSha256) { 'original' } elseif ($current -eq $file.candidateSha256) { 'candidate' } else { 'unknown' }
     $records += [pscustomobject]@{ target = $target; source = $candidate; backup = $backup; original = $file.originalSha256; candidate = $file.candidateSha256; state = $state }
 }
 if ($Action -eq 'Check') {
@@ -71,8 +71,8 @@ if ($Action -eq 'Check') {
 RequireIdle
 if (@($records | Where-Object { $_.state -eq 'unknown' }).Count -gt 0) { throw 'An installed file changed after review; do not overwrite newer work' }
 if ($Action -eq 'Install') {
-    if (@($records | Where-Object { $_.state -ne 'candidate' }).Count -eq 0) { Write-Output 'ALREADY_INSTALLED'; exit 0 }
-    if (@($records | Where-Object { $_.state -ne 'original' }).Count -gt 0) { throw 'Mixed runtime state requires verified Rollback before Install' }
+    if (@($records | Where-Object { $_.state -notin @('candidate', 'unchanged') }).Count -eq 0) { Write-Output 'ALREADY_INSTALLED'; exit 0 }
+    if (@($records | Where-Object { $_.state -notin @('original', 'unchanged') }).Count -gt 0) { throw 'Mixed runtime state requires verified Rollback before Install' }
     foreach ($record in $records) {
         if (Test-Path -LiteralPath $record.backup) {
             if ((FileHash $record.backup) -ne $record.original) { throw 'Existing rollback backup differs from the original' }
@@ -104,6 +104,7 @@ function ReplaceReviewedFile($Record, [string]$Source, [string]$ExpectedHash, [s
 $changed = @()
 try {
     foreach ($record in $records) {
+        if ($record.state -eq 'unchanged') { continue }
         if ($Action -eq 'Install') {
             $changed += $record
             ReplaceReviewedFile $record $record.source $record.candidate $record.original

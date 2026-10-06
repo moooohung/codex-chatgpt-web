@@ -83,6 +83,11 @@ import {
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { observeSubmissionDuringActivation } from "./submission-activation";
+import {
+  chatGptPageObservationTimeoutMs,
+  inheritChatGptPageObservationBudget,
+  recordChatGptPageObservationSize,
+} from "./page-observation-budget";
 import { ChatGptDeliveryRecovery, chatGptMessageDeliveryTimeoutVisible } from "./delivery-recovery";
 import { createChatGptSubmissionAudit, recoverChatGptSubmission } from "./submission-recovery";
 import { assertChatGptModelFamily, selectChatGptModelFamily } from "./model-selection";
@@ -1931,6 +1936,7 @@ class ChatGptBrowserDiagnostics {
       const sequence = String(++this.sequence).padStart(2, "0");
       const stem = `${sequence}-${browserDiagnosticCheckpoint(checkpoint)}`;
       const includeScreenshot = process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1";
+      const observationTimeoutMs = chatGptPageObservationTimeoutMs(page);
       const [screenshotResult, stateResult] = await Promise.allSettled([
         includeScreenshot
           ? page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" })
@@ -2093,8 +2099,9 @@ class ChatGptBrowserDiagnostics {
           stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR,
           completionActionSelector: CHATGPT_COMPLETION_ACTION_SELECTOR,
           appName: this.appName,
-        })),
+        }), observationTimeoutMs),
       ]);
+      if (stateResult.status === "fulfilled") recordChatGptPageObservationSize(page, stateResult.value.bodyTextChars);
       const capturedAt = new Date().toISOString();
       if (screenshotResult.status === "fulfilled" && screenshotResult.value) {
         atomicWriteFile(join(this.directory, `${stem}.png`), screenshotResult.value);
@@ -2116,6 +2123,7 @@ class ChatGptBrowserDiagnostics {
       atomicWriteFile(join(this.directory, `${stem}.json`), `${JSON.stringify({
         version: 2,
         capturedAt,
+        observationTimeoutMs,
         traceId: this.traceId,
         checkpoint,
         ...(error !== undefined ? {
@@ -2871,7 +2879,7 @@ export class ChatGptBrowserWorker {
       count = await withBrowserTurnAbort(
         withChatGptBrowserObservationTimeout(
           composers.count(),
-          Math.max(1, Math.min(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, deadline - Date.now())),
+          Math.max(1, Math.min(chatGptPageObservationTimeoutMs(page), deadline - Date.now())),
         ),
         abortSignal,
       );
@@ -3187,7 +3195,7 @@ export class ChatGptBrowserWorker {
       stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR,
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
-    }), signal));
+    }), signal), chatGptPageObservationTimeoutMs(page));
     const snapshot = observed.snapshot ?? cache?.snapshot;
     if (!snapshot) throw new Error("ChatGPT turn DOM revision cache has no baseline snapshot");
     if (observed.snapshot && cache) {
@@ -3240,6 +3248,7 @@ export class ChatGptBrowserWorker {
   }
 
   private async captureSubmissionBaseline(page: Page, submittedText?: string): Promise<ChatGptSubmissionBaseline> {
+    recordChatGptPageObservationSize(page, submittedText?.length ?? 0);
     const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
     const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
     const domCache: ChatGptSubmissionDomCache = {};
@@ -3383,6 +3392,7 @@ export class ChatGptBrowserWorker {
   ): Promise<ChatGptAssistantTurnBinding> {
     const boundCount = await withChatGptBrowserObservationTimeout(
       withBrowserTurnAbort(binding.locator.count(), signal),
+      chatGptPageObservationTimeoutMs(page),
     );
     if (boundCount === 1) return binding;
     if (boundCount > 1) {
@@ -3422,7 +3432,7 @@ export class ChatGptBrowserWorker {
           // The bubble also contains Show more and accessibility spacing. Only its
           // observed message-content target represents the submitted prompt.
           return contents.length === 1 && normalize(contents[0]!.innerText) === normalize(submitted);
-        }, baseline.submittedText!), signal));
+        }, baseline.submittedText!), signal), chatGptPageObservationTimeoutMs(page));
         // The accepted user identity (or exact submitted text) establishes ownership.
         // Activity can replace its temporary group while still generating; requiring
         // a completed answer here mistakes that same unfinished turn for a foreign one.
@@ -3946,7 +3956,7 @@ export class ChatGptBrowserWorker {
           prepare: async signal => {
             const pending = createChatGptSubmissionAudit(page, composer, identity);
             void pending.then(value => { if (disposed) value.dispose(); }, () => {});
-            audit = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(pending, signal));
+            audit = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(pending, signal), chatGptPageObservationTimeoutMs(page));
           },
           dispose: () => { disposed = true; audit?.dispose(); },
           activate: async signal => {
@@ -3965,14 +3975,14 @@ export class ChatGptBrowserWorker {
             const evidence = await this.currentSubmissionEvidence(page, baseline, signal);
             if (evidence) return { state: "accepted", evidence };
             const dialogs = page.locator('[role="dialog"], [data-testid="tool-approval-card"]').filter({ visible: true });
-            if (await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(dialogs.count(), signal)) > 0) {
+            if (await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(dialogs.count(), signal), chatGptPageObservationTimeoutMs(page)) > 0) {
               return { state: "approval_pending" };
             }
             const state = await this.submissionDomState(page, undefined, signal);
             const unchanged = state.turnIdentities.length === baseline.initialTurnIdentities.length
               && state.turnIdentities.every(value => baseline.initialTurnIdentities.includes(value))
               && state.visibleStopButtonCount === 0 && !baseline.acceptedUserIdentity;
-            const noInput = unchanged && await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(audit!.notDispatched(), signal));
+            const noInput = unchanged && await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(audit!.notDispatched(), signal), chatGptPageObservationTimeoutMs(page));
             signal.throwIfAborted();
             return { state: noInput ? "not_dispatched" : "ambiguous" };
           },
@@ -5268,6 +5278,7 @@ export class ChatGptBrowserWorker {
           },
         );
         turnConnection = connection.browser;
+        inheritChatGptPageObservationBudget(page, connection.page);
         page = connection.page;
         diagnosticPage = page;
         console.warn(
@@ -5688,7 +5699,7 @@ export class ChatGptBrowserWorker {
         }
         await throwIfChatGptSessionFailureAlert(page);
         let checkedDeliveryIdentity = responseTurn.identity;
-        let deliveryTimedOut = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(chatGptMessageDeliveryTimeoutVisible(responseTurn.locator), turn.abortSignal));
+        let deliveryTimedOut = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(chatGptMessageDeliveryTimeoutVisible(responseTurn.locator), turn.abortSignal), chatGptPageObservationTimeoutMs(page));
         if (!deliveryTimedOut) await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
@@ -5723,6 +5734,7 @@ export class ChatGptBrowserWorker {
                 responseTurn,
                 turn.abortSignal,
               ),
+              chatGptPageObservationTimeoutMs(page),
             );
             if (rebound.identity !== responseTurn.identity) {
               responseTurn = rebound;
@@ -5759,7 +5771,7 @@ export class ChatGptBrowserWorker {
         if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
         if (checkedDeliveryIdentity !== responseTurn.identity) {
           checkedDeliveryIdentity = responseTurn.identity;
-          deliveryTimedOut = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(chatGptMessageDeliveryTimeoutVisible(responseTurn.locator), turn.abortSignal));
+          deliveryTimedOut = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(chatGptMessageDeliveryTimeoutVisible(responseTurn.locator), turn.abortSignal), chatGptPageObservationTimeoutMs(page));
         }
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
         // The page was read successfully, so the fault budget is genuinely consecutive even when
@@ -5798,7 +5810,7 @@ export class ChatGptBrowserWorker {
               toolsInFlight: chatGptExternalToolCallsAreInFlight(turn.externalProgress?.snapshot()),
               approvalPending: await page.locator('[role="dialog"], [data-testid="tool-approval-card"]').filter({ visible: true }).count() > 0,
               deadlineReached: deadline !== undefined && Date.now() >= deadline,
-            }))(), turn.abortSignal)),
+            }))(), turn.abortSignal), chatGptPageObservationTimeoutMs(page)),
             continue: async (prompt, attempt) => {
               const continuationSignal = deadline === undefined ? turn.abortSignal : turn.abortSignal
                 ? AbortSignal.any([turn.abortSignal, AbortSignal.timeout(Math.max(1, deadline - Date.now()))])
