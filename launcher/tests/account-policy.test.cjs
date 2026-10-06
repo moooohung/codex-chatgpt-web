@@ -131,7 +131,7 @@ test("disable blocks new work while an existing automatic turn can reconnect", a
 });
 
 test("shared tab allocation keeps unique ordinals, refuses a ninth login and reuses free slots", () => {
-  const host = Object.assign(Object.create(BrowserHost.prototype), { turnTabs: new Map(), removeTurnTab(tab) { this.turnTabs.delete(tab.id); } });
+  const host = Object.assign(Object.create(BrowserHost.prototype), { memoryPolicy: { maxTabs: 8 }, turnTabs: new Map(), removeTurnTab(tab) { this.turnTabs.delete(tab.id); } });
   for (let i = 1; i <= 8; i++) {
     const ordinal = host.allocateTabOrdinal();
     host.turnTabs.set(String(i), { id: String(i), ordinal, isSignInTab: true, status: "ready" });

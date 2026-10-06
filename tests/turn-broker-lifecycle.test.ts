@@ -166,7 +166,7 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
   sessions.clear();
 });
 
-test("eight active turns coexist and a ninth fails closed", () => {
+test("logical sessions allow waiting turns above the physical tab cap and reject excess backlog", () => {
   const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
   const runtime = () => ({
@@ -178,19 +178,19 @@ test("eight active turns coexist and a ninth fails closed", () => {
     cancel: () => { cancelled += 1; },
   });
 
-  const active = Array.from({ length: 8 }, (_unused, index) => (
+  const active = Array.from({ length: 32 }, (_unused, index) => (
     sessions.getOrCreate(`turn-${index + 1}`, runtime)
   ));
-  expect(sessions.activeCount()).toBe(8);
+  expect(sessions.activeCount()).toBe(32);
   expect(cancelled).toBe(0);
-  expect(() => sessions.getOrCreate("turn-9", runtime)).toThrow("at most 8 simultaneous browser turns");
+  expect(() => sessions.getOrCreate("turn-33", runtime)).toThrow("at most 32 active or queued turns");
 
   expect(sessions.getOrCreate("turn-3", () => {
     throw new Error("an in-flight turn must be reused");
   })).toBe(active[2]);
   expect(cancelled).toBe(0);
   sessions.clear();
-  expect(cancelled).toBe(8);
+  expect(cancelled).toBe(32);
 });
 
 test("settled replay sessions expire from their last use instead of their creation time", async () => {
@@ -303,11 +303,18 @@ function unansweredBrokerEndpoint(name: string, onConnection: (socket: Socket) =
   const root = mkdtempSync(join(tmpdir(), name));
   const socketPath = defaultBrokerEndpoint(root);
   if (!isWindowsPipeEndpoint(socketPath)) mkdirSync(dirname(socketPath), { recursive: true });
-  const server = createServer(onConnection);
+  const peers = new Set<Socket>();
+  const server = createServer(socket => {
+    peers.add(socket);
+    socket.once("close", () => peers.delete(socket));
+    onConnection(socket);
+  });
   return {
     socketPath,
     listen: () => new Promise<void>(ready => server.listen(socketPath, ready)),
     close: async () => {
+      // A failed assertion must not leave fixture-owned named pipes alive during teardown.
+      for (const peer of peers) peer.destroy();
       await new Promise<void>(done => server.close(() => done()));
       rmSync(root, { recursive: true, force: true });
     },
@@ -349,7 +356,9 @@ test("bounded broker calls preserve server-owned closure before advancing the li
     await Bun.sleep(25);
     expect(settled).toBeFalse();
     peer.end();
-    await expect(call).resolves.toEqual({ ready: true });
+    // Bun's Windows promise matcher can stall while named-pipe closure is still pending.
+    // Await the actual I/O first; retain both the pre-close and final-result assertions.
+    expect(await call).toEqual({ ready: true });
   } finally {
     peer?.destroy();
     await broker.close();

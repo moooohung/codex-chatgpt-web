@@ -3977,6 +3977,34 @@ test("browser allocation fills all eight ordinals and reuses a released slot", (
   assert.equal(BrowserHost.prototype.allocateTabOrdinal.call(fixture), 3);
 });
 
+test("next-turn recycling handles continuous traffic while required compaction retains its exact source", async () => {
+  for (const threshold of [{retainedTurnCount:8}, {retainedTurnCount:1,rendererMemory:{privateMiB:600}}]) {
+    for (const required of [false,true]) {
+      const tab={id:"retained-threshold",surfaceId:"old-surface",traceId:"old",status:"ready",
+        interactionMode:"automatic",conversationKey:"same-context",connectorIdentity:"Codex Native2",connectorBound:true,
+        accountName:"same-account",helperPid:111,memoryIdleSince:Date.now(),...threshold,
+        view:{webContents:{isDestroyed:()=>false,setBackgroundThrottling(){}}}};
+      const removed=[],created=[];
+      const host=Object.assign(Object.create(BrowserHost.prototype),{
+        manualOperation:null,turnTabs:new Map([[tab.id,tab]]),userCancelledTurnOwners:new Map(),selectedTabId:"home",
+        resolveAccountForConversation:()=>"same-account",syncViewVisibility(){},snapshot:()=>({}),writeDescriptor(){},
+        logger:{info(){}},removeTurnTab:old=>{removed.push(old.id);host.turnTabs.delete(old.id);},
+        createTurnTab:async(traceId,helperPid,conversationKey,connectorIdentity)=>{
+          created.push({conversationKey,connectorIdentity,account:host.resolveAccountForConversation(conversationKey)});
+          const fresh={id:"fresh",surfaceId:"new-surface",traceId,helperPid,conversationKey,connectorIdentity,status:"running"};
+          host.turnTabs.set(fresh.id,fresh);return fresh;
+        },
+      });
+      const lease=await host.beginTurn("next",false,222,tab.conversationKey,tab.connectorIdentity,required);
+      assert.equal(lease.reused,required);
+      assert.equal(removed.length,required?0:1);
+      assert.equal(created.length,required?0:1);
+      if(!required)assert.deepEqual(created[0],{conversationKey:"same-context",connectorIdentity:"Codex Native2",account:"same-account"});
+      else assert.equal(tab.status,"running");
+    }
+  }
+});
+
 test("the default four-tab cap rejects another active tab while an explicit eight-tab cap remains available", () => {
   const turnTabs = new Map(Array.from({ length: 4 }, (_, i) => [String(i), { ordinal: i + 1, status: "running" }]));
   assert.throws(() => BrowserHost.prototype.allocateTabOrdinal.call({ turnTabs }), /already has 4 browser tabs/);

@@ -109,13 +109,18 @@ function rendererMemorySnapshot(contents, metrics) {
   } catch { return null; }
 }
 
-function retainedTabReleaseReason(tab, policy, now, visible = false) {
-  if (tab.interactionMode !== "automatic" || tab.status !== "ready" || visible
-    || !Number.isFinite(tab.memoryIdleSince) || now - tab.memoryIdleSince < policy.idleTabTimeoutMs) return null;
+function retainedTabRecycleReason(tab, policy) {
+  if (tab.interactionMode !== "automatic" || tab.status !== "ready") return null;
   const memoryMiB = tab.rendererMemory?.privateMiB ?? tab.rendererMemory?.workingSetMiB;
   if (policy.recycleRendererMb > 0 && Number.isFinite(memoryMiB) && memoryMiB >= policy.recycleRendererMb) return "renderer_memory";
   if (policy.recycleAfterTurns > 0 && (tab.retainedTurnCount ?? 0) >= policy.recycleAfterTurns) return "turn_count";
-  return policy.releaseIdleTabMemory ? "idle_release" : null;
+  return null;
+}
+
+function retainedTabReleaseReason(tab, policy, now, visible = false) {
+  if (tab.interactionMode !== "automatic" || tab.status !== "ready" || visible
+    || !Number.isFinite(tab.memoryIdleSince) || now - tab.memoryIdleSince < policy.idleTabTimeoutMs) return null;
+  return retainedTabRecycleReason(tab, policy) ?? (policy.releaseIdleTabMemory ? "idle_release" : null);
 }
 
 module.exports = {
@@ -124,4 +129,5 @@ module.exports = {
   resolveBrowserMemoryPolicy,
   rendererMemorySnapshot,
   retainedTabReleaseReason,
+  retainedTabRecycleReason,
 };

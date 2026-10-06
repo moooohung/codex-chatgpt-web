@@ -1,4 +1,7 @@
 export const DEFAULT_MAX_CHATGPT_BROWSER_TABS = 4;
+// Logical sessions include queued requests; they must not consume a physical-tab permit.
+// Keep retained input bounded independently while allowing excess jobs to reach the FIFO.
+export const MAX_CHATGPT_BROWSER_TURN_SESSIONS = 32;
 
 export function resolveMaxChatGptBrowserTabs(
   raw = process.env.CODEX_WEB_GPT_MAX_BROWSER_TABS,

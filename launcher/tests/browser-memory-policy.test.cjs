@@ -6,6 +6,7 @@ const {
   resolveBrowserMemoryPolicy,
   rendererMemorySnapshot,
   retainedTabReleaseReason,
+  retainedTabRecycleReason,
 } = require("../electron/browser-memory-policy.cjs");
 
 test("browser memory policy defaults favor idle release and a four-tab queue", () => {
@@ -106,6 +107,8 @@ test("turn-count and memory recycling work independently when ordinary idle rele
   assert.equal(retainedTabReleaseReason({ ...tab, rendererMemory: { privateMiB: null, workingSetMiB: 600 } }, policy, 60000), "renderer_memory");
   assert.equal(retainedTabReleaseReason({ ...tab, rendererMemory: null }, policy, 60000), null);
   assert.equal(retainedTabReleaseReason({ ...tab, rendererMemory: { privateMiB: NaN } }, policy, 60000), null);
+  assert.equal(retainedTabRecycleReason({...tab,retainedTurnCount:8},policy),"turn_count");
+  assert.equal(retainedTabRecycleReason({...tab,status:"running",retainedTurnCount:8},policy),null);
 });
 
 test("Chromium memory switches are applied only when their policy enables them", () => {

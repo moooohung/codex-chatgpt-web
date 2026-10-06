@@ -3,7 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
 const { app, clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
-const { resolveBrowserMemoryPolicy, rendererMemorySnapshot, retainedTabReleaseReason } = require("./browser-memory-policy.cjs");
+const { resolveBrowserMemoryPolicy, rendererMemorySnapshot, retainedTabReleaseReason, retainedTabRecycleReason } = require("./browser-memory-policy.cjs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { injectDomStealth, applyStealthHeaders } = require("./stealth.cjs");
@@ -2794,6 +2794,17 @@ class BrowserHost {
     }
     let exactRetained = retainedMatches[0];
     if (exactRetained && this.resolveAccountForConversation(conversationKey) !== accountNameForTab(exactRetained)) {
+      this.removeTurnTab(exactRetained, false);
+      exactRetained = undefined;
+    }
+    const recycleReason = exactRetained && !requireRetainedConversation
+      ? retainedTabRecycleReason(exactRetained, this.memoryPolicy ?? resolveBrowserMemoryPolicy()) : null;
+    if (recycleReason) {
+      this.logger.info("browser.tab_memory_released", {
+        tabId: exactRetained.id, traceId: exactRetained.traceId, reason: recycleReason,
+        retainedTurns: exactRetained.retainedTurnCount, rendererMemory: exactRetained.rendererMemory,
+        boundary: "next_normal_turn", resume: "full_codex_context",
+      });
       this.removeTurnTab(exactRetained, false);
       exactRetained = undefined;
     }

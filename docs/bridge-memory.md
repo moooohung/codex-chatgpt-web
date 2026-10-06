@@ -5,6 +5,8 @@ The launcher owns one `WebContentsView` per admitted automatic browser turn.
 terminal turns already close their views. Previously, retained views could remain
 loaded for 30 minutes. The daemon's `ChatGptBrowserRunQueue` holds its permit until
 the physical browser operation settles, and keeps queued request heartbeats alive.
+The logical session registry admits up to 32 active-or-waiting jobs independently
+of the physical tab cap, so the fifth job reaches the queue instead of failing.
 
 The memory policy closes a completed, hidden automatic tab after 60 seconds idle
 (the existing lease sweep runs every five seconds). The next request receives a
@@ -16,6 +18,9 @@ or changes account settings. Required-retained compaction already falls back to
 the full source context when the retained tab has been evicted.
 
 Running tabs, including active tool calls and compaction, are not memory-evicted.
+Turn-count and memory thresholds also recycle a ready tab immediately before its
+next normal turn, even when turns arrive faster than the idle grace period.
+Required-retained compaction bypasses this next-turn recycling check.
 A completed selected tab stays loaded while its browser surface is visible.
 Duplicate end notifications do not increment the turn count or restart the idle
 clock. Normal reuse clears the idle marker synchronously. The existing 30-minute
@@ -31,7 +36,7 @@ daemon launches must use the same maximum tab setting.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CODEX_WEB_GPT_RELEASE_IDLE_TAB_MEMORY` | `true` | Close completed hidden automatic tabs after the idle grace period. |
-| `CODEX_WEB_GPT_IDLE_TAB_TIMEOUT_MS` | `60000` | Idle grace, 0–1800000 ms; applies to all memory release reasons. |
+| `CODEX_WEB_GPT_IDLE_TAB_TIMEOUT_MS` | `60000` | Idle grace, 0–1800000 ms; next-turn threshold recycling does not wait for idle. |
 | `CODEX_WEB_GPT_RECYCLE_AFTER_TURNS` | `8` | Recycle a retained renderer after N completed turns, at a safe idle boundary; 0 disables. |
 | `CODEX_WEB_GPT_RECYCLE_RENDERER_MB` | `512` | Recycle above this process-memory threshold; 0 disables. Values are MiB. |
 | `CODEX_WEB_GPT_MAX_BROWSER_TABS` | `4` | Daemon FIFO admission and launcher physical-tab cap, 1–8. |
