@@ -20,6 +20,8 @@ const {
   Tray,
 } = require("electron");
 const { createAccountApi } = require("./account-api.cjs");
+const { applyChromiumMemoryPolicy } = require("./browser-memory-policy.cjs");
+const browserMemoryPolicy = applyChromiumMemoryPolicy(app);
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { configureBrowserDebugging, waitForBrowserDebugging, ownedDebuggingTarget, smokeBrowserDebugging } = require("./browser-debugging.cjs");
 const { CHATGPT_BROWSER_LOCALE } = require("./chatgpt-locale.cjs");
@@ -1234,6 +1236,7 @@ async function start() {
     cancelTurn: IS_DEV_PROFILE ? undefined : (traceId, reason) => runtimeSupervisor.cancelBrowserTurn(traceId, reason),
     getConnectorName: () => runtimeHost.browserConnectorName(),
     getUseSavedChats: () => runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+    memoryPolicy: browserMemoryPolicy,
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),

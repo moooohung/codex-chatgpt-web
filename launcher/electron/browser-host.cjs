@@ -2,7 +2,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { app, clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { resolveBrowserMemoryPolicy, rendererMemorySnapshot, retainedTabReleaseReason } = require("./browser-memory-policy.cjs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { injectDomStealth, applyStealthHeaders } = require("./stealth.cjs");
@@ -36,7 +37,6 @@ const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 60_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
-const MAX_BROWSER_TABS = 8;
 const MAX_CANCELLED_TURN_TRACES = 256;
 const MANUAL_SUBMIT_TIMEOUT_MS = 60_000;
 const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 600_000;
@@ -373,6 +373,8 @@ class BrowserHost {
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
     getUseSavedChats = () => false,
+    memoryPolicy = resolveBrowserMemoryPolicy(),
+    getProcessMetrics = () => app.getAppMetrics(),
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -407,6 +409,8 @@ class BrowserHost {
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.getUseSavedChats = getUseSavedChats;
+    this.memoryPolicy = memoryPolicy;
+    this.getProcessMetrics = getProcessMetrics;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -659,12 +663,13 @@ class BrowserHost {
   }
 
   allocateTabOrdinal() {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
-      const error = new Error(`ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`);
+    const maxTabs = this.memoryPolicy?.maxTabs ?? resolveBrowserMemoryPolicy().maxTabs;
+    if (this.turnTabs.size >= maxTabs && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
+      const error = new Error(`ChatGPT Web already has ${maxTabs} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`);
       error.code = "browser_tab_limit";
       throw error;
     }
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_, index) => index + 1)
+    const ordinal = Array.from({ length: maxTabs }, (_, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     return ordinal;
@@ -1714,7 +1719,7 @@ class BrowserHost {
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
           ]
         : [homeTab],
-      maxTabs: MAX_BROWSER_TABS,
+      maxTabs: this.memoryPolicy?.maxTabs ?? resolveBrowserMemoryPolicy().maxTabs,
     };
   }
 
@@ -1835,6 +1840,21 @@ class BrowserHost {
         continue;
       }
       if (tab.status === "ready") {
+        const policy = this.memoryPolicy ?? resolveBrowserMemoryPolicy();
+        const visible = this.visible === true && this.surfaceActive === true && this.selectedTabId === tab.id;
+        const reason = retainedTabReleaseReason(tab, policy, now, visible);
+        if (reason) {
+          this.logger.info("browser.tab_memory_released", {
+            tabId: tab.id, traceId: tab.traceId, reason,
+            retainedTurns: tab.retainedTurnCount, idleMs: now - tab.memoryIdleSince,
+            rendererMemory: tab.rendererMemory, resume: "full_codex_context",
+          });
+          // The complete request/checkpoint remains in Codex. A new lease selects prepare(),
+          // never the incremental prepareResume() or an unverified temporary-chat URL.
+          // Required-retained compaction uses the existing full-context fallback on a miss.
+          this.removeTurnTab(tab, false);
+          continue;
+        }
         if (now - (tab.lastHeartbeatAt ?? 0) < RETAINED_TURN_TAB_TTL_MS) continue;
         this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
         this.removeTurnTab(tab, false);
@@ -2798,6 +2818,7 @@ class BrowserHost {
       existing.helperPid = helperPid;
       existing.traceId = traceId;
       existing.status = "running";
+      existing.memoryIdleSince = undefined;
       existing.approvalPending = false;
       existing.turnProgress = undefined;
       existing.activity = undefined;
@@ -2885,7 +2906,9 @@ class BrowserHost {
     this.syncPowerSaveBlocker();
     tab.message = status === "completed" ? "Task completed" : message || `ChatGPT turn ${status}`;
     tab.loading = false;
-    if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
+    if (!tab.view.webContents.isDestroyed()) {
+      tab.view.webContents.setBackgroundThrottling((this.memoryPolicy ?? resolveBrowserMemoryPolicy()).throttleIdleTabs);
+    }
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
@@ -2895,6 +2918,16 @@ class BrowserHost {
       && (!tab.connectorIdentity || connectorBound)) {
       tab.connectorBound = connectorBound === true;
       tab.lastHeartbeatAt = Date.now();
+      if (tab.memoryCompletedTrace !== traceId) {
+        tab.memoryCompletedTrace = traceId;
+        tab.retainedTurnCount = (tab.retainedTurnCount ?? 0) + 1;
+        tab.memoryIdleSince = tab.lastHeartbeatAt;
+        try { tab.rendererMemory = rendererMemorySnapshot(tab.view.webContents, this.getProcessMetrics?.() ?? []); }
+        catch { tab.rendererMemory = null; }
+        this.logger.info("browser.tab_memory_sample", {
+          tabId: tab.id, traceId, retainedTurns: tab.retainedTurnCount, rendererMemory: tab.rendererMemory,
+        });
+      }
       if (hideAfterTurn && !this.activeTraceId) this.hide();
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
       this.publishState?.(this.snapshot());

@@ -2837,7 +2837,7 @@ test("eight occupied browser tabs reject a ninth allocation", async () => {
   ]));
 
   await assert.rejects(
-    BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_nine", 444),
+    BrowserHost.prototype.createTurnTab.call({ turnTabs, memoryPolicy: { maxTabs: 8 } }, "trace_nine", 444),
     /already has 8 browser tabs.*avoid excessive parallel traffic/,
   );
 });
@@ -3967,7 +3967,7 @@ test("recordAccountAuthFailure and recordAccountAuthSuccess deduplicate identica
 });
 
 test("browser allocation fills all eight ordinals and reuses a released slot", () => {
-  const fixture = { turnTabs: new Map() };
+  const fixture = { turnTabs: new Map(), memoryPolicy: { maxTabs: 8 } };
   for (let ordinal = 1; ordinal <= 8; ordinal++) {
     assert.equal(BrowserHost.prototype.allocateTabOrdinal.call(fixture), ordinal);
     fixture.turnTabs.set(`tab-${ordinal}`, { ordinal, status: "running" });
@@ -3975,4 +3975,46 @@ test("browser allocation fills all eight ordinals and reuses a released slot", (
   assert.throws(() => BrowserHost.prototype.allocateTabOrdinal.call(fixture), error => error.code === "browser_tab_limit");
   fixture.turnTabs.delete("tab-3");
   assert.equal(BrowserHost.prototype.allocateTabOrdinal.call(fixture), 3);
+});
+
+test("the default four-tab cap rejects another active tab while an explicit eight-tab cap remains available", () => {
+  const turnTabs = new Map(Array.from({ length: 4 }, (_, i) => [String(i), { ordinal: i + 1, status: "running" }]));
+  assert.throws(() => BrowserHost.prototype.allocateTabOrdinal.call({ turnTabs }), /already has 4 browser tabs/);
+  assert.equal(BrowserHost.prototype.allocateTabOrdinal.call({ turnTabs, memoryPolicy: { maxTabs: 8 } }), 5);
+});
+
+test("the existing reaper closes only completed hidden idle renderers and leaves a reused turn alive", () => {
+  const now = 100000;
+  const make = (id, status = "ready") => ({ id, traceId: `trace-${id}`, interactionMode: "automatic", status,
+    memoryIdleSince: now - 60000, lastHeartbeatAt: now, bootstrapReady: true, retainedTurnCount: 1 });
+  const idle = make("idle"), reused = make("reused", "running"), selected = make("selected"), warm = make("warm");
+  warm.memoryIdleSince = now - 59999;
+  const tabs = new Map([idle, reused, selected, warm].map(tab => [tab.id, tab]));
+  const removed = [], logs = [];
+  const fixture = { turnTabs: tabs, visible: true, surfaceActive: true, selectedTabId: selected.id,
+    logger: { info: (event, detail) => logs.push({ event, detail }) },
+    removeTurnTab: (tab, abort) => { removed.push([tab.id, abort]); tabs.delete(tab.id); } };
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, now);
+  assert.deepEqual(removed, [["idle", false]]);
+  assert.equal(tabs.has(reused.id), true);
+  assert.equal(tabs.has(selected.id), true);
+  assert.equal(tabs.has(warm.id), true);
+  assert.equal(logs[0].detail.resume, "full_codex_context");
+});
+
+test("completed-turn metrics are sampled once, and the same account and conversation remain until idle eviction", async () => {
+  const tab = { id: "memory", traceId: "trace-memory", helperPid: 44, status: "running", interactionMode: "automatic",
+    conversationKey: "conversation-memory", accountName: "original-account", connectorIdentity: "native", connectorBound: true,
+    view: { webContents: { isDestroyed: () => false, getOSProcessId: () => 123, setBackgroundThrottling() {} } } };
+  let samples = 0;
+  const fixture = { turnTabs: new Map([[tab.id, tab]]), userCancelledTurnOwners: new Map(),
+    logger: { info() {} }, syncPowerSaveBlocker() {}, snapshot: () => ({}), writeDescriptor() {},
+    getProcessMetrics: () => { samples++; return [{ pid: 123, memory: { privateBytes: 600 * 1024 } }]; } };
+  await BrowserHost.prototype.endTurn.call(fixture, tab.traceId, 44, "completed", false, undefined, true, true);
+  await BrowserHost.prototype.endTurn.call(fixture, tab.traceId, 44, "completed", false, undefined, true, true);
+  assert.equal(samples, 1);
+  assert.equal(tab.retainedTurnCount, 1);
+  assert.equal(tab.rendererMemory.privateMiB, 600);
+  assert.equal(tab.accountName, "original-account");
+  assert.equal(tab.conversationKey, "conversation-memory");
 });

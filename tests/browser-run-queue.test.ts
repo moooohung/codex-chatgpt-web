@@ -1,5 +1,5 @@
 import {expect,test} from "bun:test";
-import {ChatGptBrowserRunQueue,MAX_CHATGPT_BROWSER_TABS} from "../src/adapters/chatgpt-web/concurrency";
+import {ChatGptBrowserRunQueue,MAX_CHATGPT_BROWSER_TABS,resolveMaxChatGptBrowserTabs} from "../src/adapters/chatgpt-web/concurrency";
 import {ChatGptBrowserWorker,type BrowserTurn} from "../src/adapters/chatgpt-web/browser-worker";
 
 test("browser admission stays bounded and FIFO across successful and failed physical runs",async()=> {
@@ -13,6 +13,14 @@ test("browser admission stays bounded and FIFO across successful and failed phys
   finish.get(0)!(); await runs[0]; await Promise.resolve(); expect(starts).toEqual([0,1,2,3]);
   finish.get(2)!(); await runs[2]; await Promise.resolve(); expect(starts).toEqual([0,1,2,3,4]);
   finish.get(3)!();finish.get(4)!(); await Promise.all([runs[3],runs[4]]);
+});
+
+test("browser admission defaults to four slots and accepts only bounded overrides",()=> {
+  expect(resolveMaxChatGptBrowserTabs(undefined)).toBe(4);
+  expect(resolveMaxChatGptBrowserTabs("1")).toBe(1);
+  expect(resolveMaxChatGptBrowserTabs("8")).toBe(8);
+  expect(resolveMaxChatGptBrowserTabs("9")).toBe(4);
+  expect(resolveMaxChatGptBrowserTabs("nope")).toBe(4);
 });
 
 test("cancelled queued requests never prepare or start when a permit later becomes free",async()=> {
