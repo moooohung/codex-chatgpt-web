@@ -98,7 +98,7 @@ function ReplaceReviewedFile($Record, [string]$Source, [string]$ExpectedHash, [s
     if (Test-Path -LiteralPath $temporary) { throw 'Preserved temporary installation file already exists; inspect it first' }
     [IO.File]::Copy($Source, $temporary, $false)
     if ((FileHash $temporary) -ne $ExpectedHash) { throw 'Temporary candidate integrity failed' }
-    [IO.File]::Replace($temporary, $Record.target, $null)
+    [IO.File]::Replace($temporary, $Record.target, [NullString]::Value)
     if ((FileHash $Record.target) -ne $ExpectedHash) { throw 'Installed file integrity failed' }
 }
 $changed = @()
@@ -114,7 +114,7 @@ try {
     }
     [IO.Directory]::CreateDirectory($backupRoot) | Out-Null
     $receiptPath = Join-Path $backupRoot ($Action.ToLowerInvariant() + '-receipt-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '.json')
-    $receipt = [pscustomobject]@{ action = $Action; planId = $plan.id; at = [DateTime]::UtcNow.ToString('o'); changedFiles = $changed.target; profilesChanged = $false; processesStoppedOrStarted = $false }
+    $receipt = [pscustomobject]@{ action = $Action; planId = $plan.id; planSha256 = FileHash $planFile; bundleId = $plan.bundleId; at = [DateTime]::UtcNow.ToString('o'); changedFiles = $changed.target; profilesChanged = $false; processesStoppedOrStarted = $false }
     [IO.File]::WriteAllText($receiptPath, ($receipt | ConvertTo-Json -Depth 5))
     Write-Output ($Action.ToUpperInvariant() + '_VERIFIED ' + $receiptPath)
 } catch {
