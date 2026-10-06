@@ -2993,6 +2993,14 @@ describe("ChatGPT outer-native harness v4", () => {
         tools: [],
         total: 0,
         next_offset: null,
+        registry: {
+          status: "no_match_in_current_turn",
+          direct_tool_count: gatewayOnlyEnvironment.tools.length,
+          javascript_gateway: "exec",
+          deferred_loader_count: 1,
+          deferred_discovery_executed: false,
+          guidance: expect.any(String),
+        },
         discovery_tools: [{
           wire_name: "tool_search", name: "tool_search", namespace: null,
           description: "Load deferred tools", kind: "tool_search",

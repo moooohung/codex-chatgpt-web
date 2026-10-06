@@ -939,6 +939,16 @@ export async function runChatGptMcpServer(options: {
           total,
           next_offset: offset + page.length < total ? offset + page.length : null,
           ...(discoveryTools.length > 0 ? { discovery_tools: discoveryTools } : {}),
+          ...(needle && total === 0 ? {
+            registry: {
+              status: "no_match_in_current_turn",
+              direct_tool_count: visibleTools.length,
+              javascript_gateway: gateway ? wireName(gateway) : null,
+              deferred_loader_count: discoveryTools.length,
+              deferred_discovery_executed: false,
+              guidance: "Call only an advertised discovery tool with its exact schema. Loaded tools must be supplied by the outer harness before they can be inventoried. exec_command is a shell command tool, not a JavaScript gateway. A registry miss does not establish global tool availability.",
+            },
+          } : {}),
         });
       },
     ),
