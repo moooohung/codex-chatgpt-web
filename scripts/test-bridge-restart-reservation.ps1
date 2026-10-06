@@ -160,6 +160,19 @@ $armed | ConvertTo-Json -Depth 5
     Invoke-RestMethod -Uri ('http://127.0.0.1:' + $port + '/shutdown') -Method Post -TimeoutSec 3 | Out-Null
     WaitBridgeIdle $failure 10
 
+    # A late delivery of an already completed reservation must not reopen an app
+    # that has since been closed. Keep the guardian alive to test the real guard.
+    $completed = FixtureReservation 'completed-reservation'
+    $completedArmed = RegisterBridgeReservation $completed $source
+    $completedState = Get-Content -LiteralPath $completed.statePath -Raw | ConvertFrom-Json -AsHashtable
+    $completedState.phase = 'complete'
+    WriteBridgeJson $completed.statePath $completedState
+    InvokeReservedBridgeMaintenance $completed
+    $completedState = Get-Content -LiteralPath $completed.statePath -Raw | ConvertFrom-Json
+    AssertFixture ($completedState.launcherStarts -eq 0 -and @(BridgeProcesses $completed).Count -eq 0) 'Completed reservation reopened a closed launcher'
+    WaitFixtureGuardian $completedArmed
+    FixtureResult 'completed_reservation_does_not_reopen' $completedState
+
     $unknown = FixtureReservation 'unknown-target'
     [IO.File]::Copy($source, $unknown.workerPath, $false)
     $unknown.workerSha256 = BridgeFileHash $unknown.workerPath
@@ -184,7 +197,7 @@ $armed | ConvertTo-Json -Depth 5
     $report | ConvertTo-Json -Depth 12
 } finally {
     # Only this fixture's named tasks and private loopback service are cleaned up.
-    foreach ($reservation in @($crash, $existing, $failure)) {
+    foreach ($reservation in @($crash, $existing, $failure, $completed)) {
         if ($reservation -and (Get-ScheduledTask -TaskName $reservation.taskName -ErrorAction SilentlyContinue)) { Unregister-ScheduledTask -TaskName $reservation.taskName -Confirm:$false }
     }
     if ($port) {

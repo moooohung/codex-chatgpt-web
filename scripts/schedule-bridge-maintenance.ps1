@@ -286,6 +286,10 @@ function InvokeReservedBridgeMaintenance($Reservation) {
     $lock = [IO.File]::Open($Reservation.lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     try {
         $State = Get-Content -LiteralPath $Reservation.statePath -Raw | ConvertFrom-Json -AsHashtable -DateKind String
+        if ($State.phase -in @('complete', 'reservation_probe_complete')) {
+            CompleteBridgeReservation $Reservation
+            return
+        }
         $State.workerPid = $PID
         $State.workerStartedAt = [DateTime]::UtcNow.ToString('o')
         $State.runAttempts = 1 + [int]$State.runAttempts
