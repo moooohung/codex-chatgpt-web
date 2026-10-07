@@ -410,37 +410,48 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
 
 /**
  * Native world-state diffs omit unchanged cwd/shell at midnight but repeat the filesystem
- * profile. Recognize the observed unrestricted calendar fragment as a claim only: the store
- * still requires this exact turn's native rollout and corroborating current sandbox metadata.
+ * profile and sometimes the unchanged workspace roots. Recognize this as a claim only: the store
+ * still requires this exact turn's native rollout, equal roots and corroborating sandbox metadata.
  * Unknown profiles/fields are deliberately not classified as permission-neutral updates.
  */
-export function hasChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): boolean {
+export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): { workspaceRoots?: string[] } | undefined {
   const metadata = clientTurnMetadata(parsed);
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
-  if (!metadata || !turnId) return false;
+  if (!metadata || !turnId) return undefined;
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
   const activeIndex = input.findLastIndex(value => isNativeInstruction(record(value), metadata));
   const active = record(input[activeIndex]);
-  if (itemTurnId(active) !== turnId || typeof active?.id !== "string" || !active.id) return false;
+  if (itemTurnId(active) !== turnId || typeof active?.id !== "string" || !active.id) return undefined;
 
   let deltas = 0;
+  let workspaceRoots: string[] | undefined;
   for (let index = activeIndex + 1; index < input.length; index += 1) {
     const item = record(input[index]);
     if (!hasEnvironmentContextFragment(item)) continue;
     if (item.role !== "user" || itemTurnId(item) !== turnId || typeof item.id !== "string" || !item.id
-      || !hasAssistantOutputBetween(input, activeIndex + 1, index)) return false;
+      || !hasAssistantOutputBetween(input, activeIndex + 1, index)) return undefined;
     const text = rawMessageText(item).trim();
     // Match the whole native fragment, not just the presence of a disabled profile: another
     // profile, a malformed cwd, or any additional permission declaration must fail closed.
-    if (!/^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*<permission_profile type="disabled">\s*<file_system type="unrestricted"\s*\/>\s*<\/permission_profile>\s*<\/filesystem>\s*<\/environment_context>$/.test(text)
+    const calendar = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*(?:<workspace_roots>\s*((?:<root>[^<>]+<\/root>\s*)+)<\/workspace_roots>\s*)?<permission_profile type="disabled">\s*<file_system type="unrestricted"\s*\/>\s*<\/permission_profile>\s*<\/filesystem>\s*<\/environment_context>$/.exec(text);
+    if (!calendar
       || !sandboxMetadataMatchesEnvironment(canonicalSandboxMetadata(metadata), text)
       || [metadata.sandbox_mode, metadata.sandbox].some(value => (
         value !== undefined && !sandboxMetadataMatchesEnvironment(value, text)
-      ))) return false;
+      ))) return undefined;
+    if (calendar[1]) {
+      const roots = [...calendar[1].matchAll(/<root>([^<>]+)<\/root>/g)]
+        .map(match => decodeXmlText(match[1]!.trim()));
+      if (roots.some(root => !isAbsolute(root))) return undefined;
+      const identities = roots.map(pathIdentity).sort();
+      if (new Set(identities).size !== identities.length
+        || (workspaceRoots && JSON.stringify(identities) !== JSON.stringify(workspaceRoots.map(pathIdentity).sort()))) return undefined;
+      workspaceRoots = roots;
+    }
     deltas += 1;
   }
-  return deltas > 0;
+  return deltas > 0 ? { ...(workspaceRoots ? { workspaceRoots } : {}) } : undefined;
 }
 
 function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string, metadata?: Record<string, unknown>): string | undefined {

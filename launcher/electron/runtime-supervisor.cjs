@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const { accountPaths, readAccountConfig } = require("./account-policy.cjs");
+const { AccountTunnelMonitor } = require("./account-tunnel-monitor.cjs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
@@ -370,11 +371,25 @@ class RuntimeSupervisor {
     this.tunnelMonitorObservationUnavailable = false;
     this.tunnelMonitorGeneration = 0;
     this.tunnelHealthBaseUrl = null;
+    this.accountTunnelHealthFiles = new Map();
     this.recoveryTasks = new Set();
     this.expectedExits = new WeakSet();
     this.restartableChildren = new WeakSet();
     this.lastChildFailure = { daemon: null, tunnel: null };
     this.lastChildOutput = { daemon: null, tunnel: null };
+    this.accountTunnelMonitor = new AccountTunnelMonitor({
+      readAccounts: () => this.monitoredAccountTunnels(),
+      probe: (name) => this.probeAccountTunnel(name),
+      reconnect: (name, account, current) => this.recoverAccountTunnel(name, account, current),
+      write: (event, detail) => {
+        const level = event === "recovered" ? "info" : "warn";
+        this.logger[level](`runtime.account_tunnel_${event}`, detail);
+        if (["recovering", "recovered", "recovery_exhausted"].includes(event)) this.publishOperation?.({
+          name: "runtime-recovery", status: event === "recovered" ? "completed" : event === "recovering" ? "running" : "failed",
+          message: `Account ${detail.account} MCP relay ${event}`,
+        });
+      },
+    });
   }
 
   readConfig() {
@@ -742,14 +757,14 @@ class RuntimeSupervisor {
     }
   }
 
-  async probeTunnelMcpTransport(timeoutMs = 2_000) {
-    if (!this.tunnelHealthBaseUrl) {
+  async probeTunnelMcpTransport(timeoutMs = 2_000, baseUrl = this.tunnelHealthBaseUrl) {
+    if (!baseUrl) {
       return { observed: false, ok: false, fatal: false, detail: "local tunnel MCP diagnostics URL is not known" };
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${this.tunnelHealthBaseUrl}/api/logs?limit=100`, {
+      const response = await fetch(`${baseUrl}/api/logs?limit=100`, {
         method: "GET",
         signal: controller.signal,
       });
@@ -799,7 +814,7 @@ class RuntimeSupervisor {
     }
   }
 
-  async discoverTunnelHealthBaseUrl(config) {
+  async discoverTunnelHealthBaseUrl(config, alias = config.tunnel?.alias) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
     const result = await this.runTunnelCommand(
@@ -820,7 +835,7 @@ class RuntimeSupervisor {
     // Unscoped `list` is local-only. Its exact alias record points to the live health URL file;
     // `status` waits for an unrelated remote API before returning this same local information.
     const aliases = Array.isArray(parsed?.aliases)
-      ? parsed.aliases.filter(entry => entry?.alias === tunnel.alias)
+      ? parsed.aliases.filter(entry => entry?.alias === alias)
       : [];
     const healthFile = aliases.length === 1 ? aliases[0].health_url_file : undefined;
     if (typeof healthFile !== "string" || !path.isAbsolute(healthFile)) {
@@ -830,7 +845,8 @@ class RuntimeSupervisor {
     if (!baseUrl) {
       throw new Error("Local tunnel health discovery returned no verified loopback endpoint");
     }
-    this.tunnelHealthBaseUrl = baseUrl;
+    if (alias === tunnel.alias) this.tunnelHealthBaseUrl = baseUrl;
+    else this.accountTunnelHealthFiles.set(alias, healthFile);
     return baseUrl;
   }
 
@@ -1008,6 +1024,7 @@ class RuntimeSupervisor {
         await this.waitForTunnelMcpTransport(config);
         this.startTunnelMonitor(config);
         this.logger.info("runtime.tunnel_adopted", { pid: existing.pid });
+        await this.startAllAccountTunnels(config);
         return;
       }
       this.tunnel = null;
@@ -1057,6 +1074,43 @@ class RuntimeSupervisor {
   accountPaths() {
     return accountPaths(this.accountProfile || { coreHome: this.coreHome,
       partition: this.launcherProfile === "development" ? "persist:codex-web-gpt-dev-chatgpt" : "persist:codex-web-gpt-chatgpt" });
+  }
+
+  monitoredAccountTunnels() {
+    const config = this.readConfig();
+    if (this.stopping || !config?.tunnel || config.mode !== "full") return {};
+    return Object.fromEntries(Object.entries(readAccountConfig(this.accountPaths().config).accounts)
+      .filter(([name, account]) => !account.pendingRemoval && account.tunnelId && account.keyFile
+        && this.accountPaths().tunnelAlias(name) !== config.tunnel.alias
+        && !(account.tunnelId === config.tunnel.tunnelId && config.tunnel.alias === "codex-chatgpt-web")));
+  }
+
+  async probeAccountTunnel(name) {
+    const config = this.readConfig();
+    if (!config?.tunnel || this.stopping) return { observed: false };
+    const alias = this.accountPaths().tunnelAlias(name);
+    const healthFile = this.accountTunnelHealthFiles.get(alias);
+    // The verified alias file is stable across relay replacement; its loopback URL is not.
+    // Reread that tiny file, avoiding a tunnel-client subprocess for each account every poll.
+    const baseUrl = healthFile
+      ? loopbackHealthBaseURL(await fs.promises.readFile(healthFile, "utf8"))
+      : await this.discoverTunnelHealthBaseUrl(config, alias);
+    if (!baseUrl) return { observed: false };
+    return this.probeTunnelMcpTransport(2_000, baseUrl);
+  }
+
+  async recoverAccountTunnel(name, account, current) {
+    const eligible = () => {
+      const latest = this.monitoredAccountTunnels()[name];
+      return current() && !this.stopping && latest?.tunnelId === account.tunnelId && latest.keyFile === account.keyFile;
+    };
+    if (!eligible()) return false;
+    // A relay replacement does not replay commands or retire unrelated broker bindings. The
+    // originating jobs retain their existing reconnect/resume path and current turn capability.
+    if (!await this.stopAccountTunnel(name) || !eligible()) return false;
+    if (!await this.startAccountTunnel(name, account)) return false;
+    const health = await this.probeAccountTunnel(name);
+    return eligible() && health.observed && health.ok;
   }
 
   async startAllAccountTunnels(config) {
@@ -1148,6 +1202,7 @@ class RuntimeSupervisor {
 
   startTunnelMonitor(config) {
     this.stopTunnelMonitor();
+    this.accountTunnelMonitor.start();
     this.tunnelMonitorFailures = 0;
     this.tunnelMonitorObservationUnavailable = false;
     const generation = this.tunnelMonitorGeneration;
@@ -1214,6 +1269,8 @@ class RuntimeSupervisor {
   }
 
   stopTunnelMonitor() {
+    this.accountTunnelMonitor.stop();
+    this.accountTunnelHealthFiles.clear();
     if (this.tunnelMonitorTimer) clearInterval(this.tunnelMonitorTimer);
     this.tunnelMonitorTimer = null;
     this.tunnelMonitorFailures = 0;

@@ -1068,6 +1068,24 @@ describe("trusted Codex task environment continuity", () => {
     expect(() => store.resolve(request)).toThrow();
   });
 
+  test("midnight updates repeating workspace roots use current native authority without borrowing cwd", () => {
+    const { codexHome, request, delta } = midnightRolloutFixture();
+    delta.content[0]!.text = delta.content[0]!.text.replace("<filesystem>", `<filesystem><workspace_roots><root>${root}</root></workspace_roots>`);
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    expect(store.resolve(request).cwd).toBe(root);
+    const original = delta.content[0]!.text;
+    for (const roots of [
+      "<workspace_roots/>",
+      "<workspace_roots><root>relative</root></workspace_roots>",
+      `<workspace_roots><root>${root}</root><root>${root}</root></workspace_roots>`,
+      `<workspace_roots><root>${resolve(root, "unverified")}</root></workspace_roots>`,
+      `<workspace_roots><root>${root}</root><root>${resolve(root, "unverified")}</root></workspace_roots>`,
+    ]) {
+      delta.content[0]!.text = original.replace(/<workspace_roots>.*?<\/workspace_roots>/, roots);
+      expect(() => store.resolve(request)).toThrow();
+    }
+  });
+
   test("midnight recovery rejects conflicting current policy and malformed deltas even with a valid start envelope", () => {
     const { codexHome, request, body, delta } = midnightRolloutFixture();
     const original = delta.content[0]!.text;

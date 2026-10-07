@@ -12,7 +12,7 @@ import {
   extractChatGptThreadSpawnLineage,
   extractChatGptRootThreadMetadata,
   hasCurrentChatGptEnvironmentContext,
-  hasChatGptCalendarEnvironmentDelta,
+  extractChatGptCalendarEnvironmentDelta,
   hasRawChatGptEnvironmentContext,
   unattributedChatGptEnvironmentMessages,
   isChatGptCompactionContinuation,
@@ -179,7 +179,7 @@ export class ChatGptThreadEnvironmentStore {
         ? unattributedChatGptEnvironmentMessages(parsed) : undefined;
       const steeringClaim = hasCurrentContext && !currentCompaction
         ? extractChatGptSteeringEnvironmentClaim(parsed) : undefined;
-      const calendarDelta = hasCurrentContext && !currentCompaction && hasChatGptCalendarEnvironmentDelta(parsed);
+      const calendarDelta = hasCurrentContext && !currentCompaction ? extractChatGptCalendarEnvironmentDelta(parsed) : undefined;
       if (hasCurrentContext && !currentCompaction && !historicalMessages && !steeringClaim && !calendarDelta) throw error;
       const currentClaim = currentCompaction ? extractChatGptContinuationEnvironmentClaim(parsed) : steeringClaim;
       const rolloutIdentity = lineage ?? extractChatGptRootThreadMetadata(parsed);
@@ -201,6 +201,12 @@ export class ChatGptThreadEnvironmentStore {
           if (calendarDelta && rolloutEnvironment.sandboxPolicy.type !== "dangerFullAccess") {
             throw new Error("Calendar environment delta conflicts with its current Codex rollout");
           }
+          if (calendarDelta?.workspaceRoots && (
+            calendarDelta.workspaceRoots.length !== rolloutEnvironment.roots.length
+            || calendarDelta.workspaceRoots.some(root => !rolloutEnvironment.roots.some(nativeRoot => (
+              contains(root, nativeRoot) && contains(nativeRoot, root)
+            )))
+          )) throw new Error("Calendar workspace roots conflict with its current Codex rollout");
           if (currentClaim && !sameAuthority(currentClaim, rolloutEnvironment, steeringClaim !== undefined)) {
             throw new Error(`${currentCompaction ? "Compaction continuation" : "Steering"} environment conflicts with its current Codex rollout`);
           }
