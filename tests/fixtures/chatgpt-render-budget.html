@@ -1,0 +1,41 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Offline render budget fixture</title>
+<style>
+@font-face{font-family:fixture;src:url(https://cdn.oaistatic.com/fixture.woff2)}
+body{margin:0;font-family:fixture,monospace}main{width:700px}article{padding:8px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0} .history{animation:pulse 1.2s infinite alternate}
+@keyframes pulse{from{transform:translateX(0)}to{transform:translateX(1px)}}
+nav{position:fixed;right:0;top:0;width:25px}.decoration{width:32px;height:32px}
+</style><script>
+window.fixtureReady = new Promise(resolve => addEventListener('DOMContentLoaded', async () => {
+  const chars = Number(new URL(location.href).searchParams.get('chars') || 320000);
+  window.fixtureAnalyticsLoads = 0; window.fixtureAllowed = [];
+  const main = document.querySelector('main');
+  const portions = Array.from({length:12}, (_,i) => i===11 ? Math.floor(chars/2) : Math.floor(chars/22));
+  portions[0] += chars - portions.reduce((a,b) => a+b,0);
+  for (let i=0;i<12;i++) {
+    const group=document.createElement('article');group.dataset.turnKey='fixture_'+i;
+    group.innerHTML='<div data-user-message-bubble class="history"><pre class="payload"></pre></div><div data-content-search-unit-key="assistant_'+i+'"><div data-conversation-role="assistant"><div class="markdown"><p>ACK '+i+'</p></div><button data-testid="copy-turn-action-button">Copy</button></div></div>';
+    group.querySelector('.payload').textContent=('record '+i+' context line\n').repeat(Math.ceil(portions[i]/20)).slice(0,portions[i]).padEnd(portions[i],'x');
+    main.appendChild(group);
+  }
+  main.lastElementChild.querySelector('.markdown p').textContent='final boundary: fixture_tool';
+  main.lastElementChild.querySelector('[data-conversation-role="assistant"]').id='current-response';
+  const decorative=[];
+  for(let i=0;i<16;i++) {
+    const image=new Image();image.className='decoration';image.src='https://cdn.oaistatic.com/fixture-'+i+'.svg';
+    decorative.push(new Promise(done=>{image.onload=done;image.onerror=done;}));document.querySelector('aside').appendChild(image);
+  }
+  const script=document.createElement('script');script.src='https://cdn.segment.com/fixture.js';
+  decorative.push(new Promise(done=>{script.onload=done;script.onerror=done;}));document.head.appendChild(script);
+  const urls=['/backend-api/models','/backend-api/settings/effort','/backend-api/conversation/fixture','/backend-api/connectors/fixture'];
+  await Promise.all(urls.map(async url=>{await (await fetch(url)).json();window.fixtureAllowed.push(url);}));
+  await fetch('/backend-api/conversation',{method:'POST',body:'offline multipart fixture'}).then(r=>r.json());
+  window.fixtureAllowed.push('offline multipart POST');
+  await fetch('/backend-api/conversations?offset=0&limit=28').then(r=>r.json()).then(data=>{
+    for(const item of data.items){const row=document.createElement('div');row.textContent=item.title;document.querySelector('nav').appendChild(row);}
+  }).catch(()=>{window.fixtureSidebarUnavailable=true;});
+  await document.fonts.ready;await Promise.all(decorative);scrollTo(0,document.body.scrollHeight);resolve();
+}));
+</script></head><body><nav aria-label="Chat history"></nav><main></main><aside></aside>
+<footer><div id="prompt-textarea" contenteditable="true">Unsent draft</div><button id="model">GPT-5.6</button><button id="effort">High</button></footer>
+</body></html>

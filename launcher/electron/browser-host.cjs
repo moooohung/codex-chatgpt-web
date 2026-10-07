@@ -18,6 +18,7 @@ const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const { configureChatGptAnnouncementDismissal } = require("./browser-announcements.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { resolveBrowserMemoryPolicy } = require("./browser-memory-policy.cjs");
+const { bindBrowserResourceBudget, takeContentsResourceBudgetCounts } = require("./browser-resource-budget.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
   shouldBlockSleepForTurns,
@@ -712,6 +713,13 @@ class BrowserHost {
 
   configureLocalePreferences(browserSession) {
     applyStealthHeaders(browserSession);
+    bindBrowserResourceBudget(browserSession, contentsId => {
+      const tab = [...this.turnTabs.values()].find(candidate => candidate.view?.webContents?.id === contentsId);
+      if (!tab || tab.view.webContents.isDestroyed()) return null;
+      return { status: tab.status, interactionMode: tab.interactionMode,
+        authenticationRequired: tab.authenticationRequired, isSignInTab: tab.isSignInTab,
+        documentUrl: tab.view.webContents.getURL() };
+    });
     const ready = configureChatGptLocale(browserSession);
     void ready.catch(error => this.logger.warn("browser.locale_preference_failed", { message: String(error) }));
     return ready;
@@ -2216,6 +2224,7 @@ class BrowserHost {
 
   removeTurnTab(tab, abortRunning) {
     if (!this.turnTabs.has(tab.id)) return;
+    takeContentsResourceBudgetCounts(tab.view.webContents);
     this.turnTabs.delete(tab.id);
     if (tab.interactionMode === "manual") {
       if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
@@ -3129,9 +3138,10 @@ class BrowserHost {
     // A browser tab represents an active Codex turn, not durable task history. The result already
     // lives in Codex, so release the terminal browser document without touching concurrent turns.
     const rendererPid = rendererPidFor(tab.view?.webContents);
+    const blockedResources = takeContentsResourceBudgetCounts(tab.view.webContents);
     this.removeTurnTab(tab, false);
     if (hideAfterTurn && !this.activeTraceId) this.hide();
-    this.logger.info("browser.tab_released", { tabId: tab.id, traceId, rendererPid, status: tab.status });
+    this.logger.info("browser.tab_released", { tabId: tab.id, traceId, rendererPid, status: tab.status, blockedResources });
     return { cancelledByUser, ...(authenticationRequired ? { authenticationRequired: true } : {}) };
   }
 

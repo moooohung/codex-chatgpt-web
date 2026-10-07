@@ -5,6 +5,7 @@ import vm from "node:vm";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError, chatGptBrowserTabClosedError } from "../src/adapters/chatgpt-web/adapter-error";
 const ts = require("typescript");
 const { patchFailedTabRuntime, patchRendererOwnershipHost } = require("../scripts/bridge-failed-tab-release-runtime-overlay.cjs");
+const { patchRenderBudgetRuntime, patchResourceBudgetHost } = require("../scripts/bridge-render-budget-runtime-overlay.cjs");
 const base = process.env.CHATGPT_FAILED_TAB_BASE_ROOT;
 const candidate = process.env.CHATGPT_STAGE_CALL_RUNTIME_ROOT;
 const nodes = (root: any, predicate: (node: any) => boolean): any[] => {
@@ -22,7 +23,13 @@ test.skipIf(!base || !candidate)("failed-tab candidates reproduce guarded edits 
   for (const relative of ["app/cli.js", "app/browser-helper.cjs", "launcher/electron/browser-host.cjs"]) {
     const original = readFileSync(join(base!, relative), "utf8");
     const patch = relative.startsWith("app/") ? patchFailedTabRuntime : patchRendererOwnershipHost;
-    const result = patch(original);
+    let result = patch(original);
+    if (process.env.CHATGPT_RENDER_CANDIDATE_ROOT) {
+      const followup = relative.startsWith("app/") ? patchRenderBudgetRuntime : patchResourceBudgetHost;
+      const rendered = followup(result.code);
+      expect(rendered.evidence.reverseRestoresOriginalBytes).toBeTrue();
+      result = { ...result, code: rendered.code };
+    }
     expect(result.code).toBe(readFileSync(join(candidate!, relative), "utf8"));
     expect(result.evidence.reverseRestoresOriginalBytes).toBeTrue();
     expect(() => patch(result.code)).toThrow("already present");

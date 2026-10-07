@@ -56,6 +56,7 @@ test("waitForMultipartAcknowledgement accepts relaxed acknowledgements and marks
   const createMockLocator = () => {
     const loc: any = {
       isVisible: async () => false,
+      evaluateAll: async () => false,
       press: async () => {},
       count: async () => 1,
       last: () => loc,

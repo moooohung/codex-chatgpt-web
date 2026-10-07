@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Page } from "playwright-core";
-import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptCompletionTracker } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 
 function fixture(press: (key: string, options: any) => Promise<void>) {
@@ -34,7 +34,7 @@ test("semantic acceptance is observed while the Enter acknowledgement is stalled
   } finally { release?.(); }
 });
 
-test("a current MCP batch confirms a send even if Enter has not acknowledged and DOM cannot be queried", async () => {
+test("a current MCP batch confirms a stalled Enter after capturing and ACKing an empty assistant boundary", async () => {
   const progress = new ChatGptExternalTurnProgress();
   let release!: () => void;
   let presses = 0;
@@ -44,11 +44,15 @@ test("a current MCP batch confirms a send even if Enter has not acknowledged and
     await new Promise<void>(resolve => { release = resolve; });
   });
   worker.currentSubmissionEvidence = async () => { throw new Error("renderer DOM unavailable"); };
+  worker.submissionDomState = async () => ({ responseIdentities: [] });
+  const tracker = new ChatGptCompletionTracker();
   try {
     await expect(worker.runStage("mcp_during_enter", "send", 600, (signal: AbortSignal) =>
-      worker.sendAttachedPrompt(page, {}, undefined, signal, progress),
+      worker.sendAttachedPrompt(page, { initialTurnIdentities: [], domCache: {} }, undefined, signal, progress, undefined, tracker),
     )).resolves.toBe("mcp_tool_call");
     expect(presses).toBe(1);
+    expect(tracker.needsToolBatchObservation(1)).toBeFalse();
+    await progress.waitForToolBatchObservation(1);
   } finally { release?.(); }
 });
 

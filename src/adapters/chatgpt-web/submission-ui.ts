@@ -1,23 +1,50 @@
-export function chatGptSubmissionDomProjection(options: { userTurnSelector: string; assistantTurnSelector: string; stopButtonSelector: string; knownKey?: string; attributeFilter: string[] }) {
+export function chatGptSubmissionDomProjection(options: { userTurnSelector: string; assistantTurnSelector: string; stopButtonSelector: string; knownKey?: string; attributeFilter: string[]; renderBudget?: { history?: boolean; multipart?: boolean; motion?: boolean; sidebar?: boolean } }) {
   const projectionStarted = performance.now();
   // Preserve every DOM identity and text node. Only older offscreen layout can be skipped.
   // Keep the latest user/assistant pair fully rendered for acceptance and tool boundaries.
   const renderRoots = [...document.querySelectorAll('[data-turn-key], [data-turn-id-container]')]
     .filter(element => !element.parentElement?.closest('[data-turn-key], [data-turn-id-container]'));
-  let deferredHistoryNodes = 0;
-  if (typeof CSS !== "undefined" && CSS.supports("content-visibility", "auto") && renderRoots.length > 2) {
+  let deferredHistoryNodes = 0, deferredInputNodes = 0, reducedMotionNodes = 0;
+  const budget = options.renderBudget;
+  const history = budget?.history !== false;
+  const multipart = budget?.multipart !== false;
+  const motion = budget?.motion !== false;
+  const sidebar = budget?.sidebar !== false;
+  if (typeof CSS !== "undefined" && CSS.supports("content-visibility", "auto")) {
     let style = document.getElementById("codex-history-render-budget");
     if (!style) {
       style = document.createElement("style"); style.id = "codex-history-render-budget";
-      style.textContent = '[data-codex-history-render-budget="auto"]{content-visibility:auto;contain-intrinsic-size:auto 700px}';
+      style.textContent = `
+        [data-codex-history-render-budget="auto"]{content-visibility:auto;contain-intrinsic-size:auto 700px}
+        [data-codex-input-render-budget="auto"]{content-visibility:auto;contain-intrinsic-size:auto 1000px}
+        [data-codex-turn-motion="reduced"],[data-codex-turn-motion="reduced"] *{animation-duration:0.001ms!important;animation-iteration-count:1!important;transition-duration:0.001ms!important;transition-delay:0ms!important;scroll-behavior:auto!important}
+        html[data-codex-sidebar-budget="reduced"] nav[aria-label="Chat history"],html[data-codex-sidebar-budget="reduced"] [data-testid="conversation-history"]{content-visibility:hidden;contain-intrinsic-size:0 0}
+      `;
       document.head.appendChild(style);
     }
     renderRoots.forEach((element, index) => {
-      if (index < renderRoots.length - 2) {
+      if (history && index < renderRoots.length - 2) {
         if (element.getAttribute("data-codex-history-render-budget") !== "auto") element.setAttribute("data-codex-history-render-budget", "auto");
         deferredHistoryNodes++;
       } else if (element.hasAttribute("data-codex-history-render-budget")) element.removeAttribute("data-codex-history-render-budget");
+      // The streaming answer can use animation completion to reveal its controls.
+      // Restrict reduced motion to settled history and submitted user content.
+      if (motion && index < renderRoots.length - 2) element.setAttribute("data-codex-turn-motion", "reduced");
+      else element.removeAttribute("data-codex-turn-motion");
     });
+    const inputSelector = '[data-user-message-bubble], [data-message-author-role="user"]';
+    const inputs = [...document.querySelectorAll(inputSelector)].filter(input => !input.parentElement?.closest(inputSelector));
+    for (const input of inputs) {
+      if (multipart && (input.textContent?.length ?? 0) >= 32_768
+        && !input.querySelector('textarea,input,[contenteditable="true"]')) {
+        input.setAttribute("data-codex-input-render-budget", "auto"); deferredInputNodes++;
+      } else input.removeAttribute("data-codex-input-render-budget");
+      if (motion) input.setAttribute("data-codex-turn-motion", "reduced");
+      else input.removeAttribute("data-codex-turn-motion");
+    }
+    reducedMotionNodes = document.querySelectorAll('[data-codex-turn-motion="reduced"]').length;
+    if (sidebar) document.documentElement.setAttribute("data-codex-sidebar-budget", "reduced");
+    else document.documentElement.removeAttribute("data-codex-sidebar-budget");
   }
   const bodyTextChars = document.body?.textContent?.length ?? 0;
   type ObserverState = { id: string; revision: number; observer: MutationObserver };
@@ -43,7 +70,7 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
     return state;
   })();
   const observerKey = `${observerState.id}:${observerState.revision}`;
-  if (options.knownKey === observerKey) return { key: observerKey, bodyTextChars, deferredHistoryNodes, projectionElapsedMs: performance.now() - projectionStarted };
+  if (options.knownKey === observerKey) return { key: observerKey, bodyTextChars, deferredHistoryNodes, deferredInputNodes, reducedMotionNodes, projectionElapsedMs: performance.now() - projectionStarted };
   const identities = (elements: Element[], attribute: string): string[] => {
     const values = elements.map(element => element.getAttribute(attribute));
     if (values.some(value => typeof value !== "string" || value.trim().length === 0)) {
@@ -107,7 +134,7 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
   });
   return {
     key: observerKey,
-    bodyTextChars, deferredHistoryNodes, projectionElapsedMs: performance.now() - projectionStarted,
+    bodyTextChars, deferredHistoryNodes, deferredInputNodes, reducedMotionNodes, projectionElapsedMs: performance.now() - projectionStarted,
     snapshot: {
       userTurnCount: userIdentities.length,
       assistantTurnCount: responseIdentities.length,

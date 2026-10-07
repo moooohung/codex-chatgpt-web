@@ -3175,7 +3175,7 @@ test("terminal release closes only the exact failed owner even when retention is
   assert.equal(fixture.selectedTabId, "dashboard");
   assert.ok(protectedTabs.every(tab => tab.status === "running"));
   assert.deepEqual(logged.at(-1), { event: "browser.tab_released",
-    detail: { tabId: failed.id, traceId: failed.traceId, rendererPid: 42364, status: "error" } });
+    detail: { tabId: failed.id, traceId: failed.traceId, rendererPid: 42364, status: "error", blockedResources: {} } });
 });
 
 test("tab snapshots expose native renderer ownership without a DOM probe", () => {

@@ -111,7 +111,7 @@ test("submission DOM tracks logical identities and retains virtualized history i
     parentElement: { closest: () => container ? null : element(turn, true) },
   });
   const context = createContext({
-    performance: { timeOrigin: 1 },
+    performance: { timeOrigin: 1, now: () => 0 },
     document: {
       documentElement: {},
       querySelectorAll: (selector: string) => {
@@ -166,7 +166,7 @@ test("a current submission error without an assistant fails immediately and igno
     value() { return { width: this.closest("[hidden]") ? 0 : 100, height: this.closest("[hidden]") ? 0 : 20 }; } });
   const notifications: Array<() => void> = [];
   const context = createContext({
-    document: window.document, performance: { timeOrigin: 1 },
+    document: window.document, performance: { timeOrigin: 1, now: () => 0 },
     getComputedStyle: () => ({ visibility: "visible" }),
     MutationObserver: class { constructor(notify: () => void) { notifications.push(notify); } observe() {} },
   });
@@ -232,7 +232,7 @@ test("power turn identity separates roles and keeps virtualized groups in the su
   const window = createWindow('<div data-turn-id-container="legacy"><section data-testid="conversation-turn-0" data-turn="assistant" data-turn-id="legacy"></section></div><div data-turn-key="history"></div><div data-turn-key="previous"><div data-user-message-bubble></div><h4 data-conversation-role="assistant"></h4><div data-turn-id-container="search-only"><section data-testid="conversation-turn-search" data-turn="assistant"><div data-message-author-role="assistant"></div></section></div></div>');
   const observers: (() => void)[] = [];
   const context = createContext({
-    performance: { timeOrigin: 1 },
+    performance: { timeOrigin: 1, now: () => 0 },
     document: {
       documentElement: window.document.documentElement,
       querySelectorAll: (selector: string) => Array.from(window.document.querySelectorAll(selector)),

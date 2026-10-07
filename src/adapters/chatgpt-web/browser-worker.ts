@@ -5007,6 +5007,19 @@ export class ChatGptBrowserWorker {
       // The outer finally still owns this result and the existing control-error policy.
       await failedTabRelease.catch(() => {});
     };
+    const releaseCompletedTab = async () => {
+      // Retained and compaction continuations still require their exact document/URL.
+      if (turn.retainConversation) return;
+      if (!failedTabRelease) {
+        activityFinished = true;
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        failedTabRelease = notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+          phase: "end", traceId: turn.traceId, helperPid: process.pid, status: "completed",
+          ...(turn.nativeConnector || turn.capabilities.localToolsEnabled ? { connectorBound: true } : {}),
+        });
+      }
+      await failedTabRelease.catch(() => {});
+    };
     const sendHeartbeat = () => {
       if (activityFinished) return;
       if (heartbeatInFlight) { heartbeatPending = true; return; }
@@ -5053,7 +5066,7 @@ export class ChatGptBrowserWorker {
           sendHeartbeat();
           await turn.onSubmitted?.();
         },
-      }, surfaceId, undefined, reused, lease.trackUsage === true, releaseFailedTab);
+      }, surfaceId, undefined, reused, lease.trackUsage === true, releaseFailedTab, releaseCompletedTab);
     } catch (error) {
       originalError = error;
       ({ status: terminal, message: terminalMessage } = describeTerminal(error));
@@ -5100,6 +5113,7 @@ export class ChatGptBrowserWorker {
     reuseConversation = false,
     trackUsage = false,
     onFailure?: (error: unknown) => Promise<void>,
+    onCompleted?: () => Promise<void>,
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
@@ -6027,7 +6041,8 @@ export class ChatGptBrowserWorker {
         const state = await this.context.storageState();
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
       }
-      await diagnostics.capture(page, "turn-completed");
+      await onCompleted?.();
+      if (!page.isClosed()) await diagnostics.capture(page, "turn-completed");
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} completed`
         + ` (markdownChars=${finalText.length}, domFullScans=${responseDomCache.fullScans ?? 0}, domCacheHits=${responseDomCache.cacheHits ?? 0})`,
