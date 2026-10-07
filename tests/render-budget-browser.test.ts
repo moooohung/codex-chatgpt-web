@@ -47,6 +47,10 @@ for(const {name,project} of projections)for(const chars of [320000,1000000])test
   const projected=await page.evaluate(project,options);
   expect(projected.snapshot?.userTurnCount).toBe(8);expect(projected.snapshot?.assistantTurnCount).toBe(8);
   expect(projected.deferredHistoryNodes).toBe(6);expect(projected.deferredInputNodes).toBe(8);
+  const boundaryProjection=await page.evaluate(project,{...options,purpose:"tool_boundary" as const,knownKey:projected.key});
+  expect(boundaryProjection.snapshot?.turnIdentities).toEqual(projected.snapshot?.turnIdentities);
+  expect(boundaryProjection.deferredHistoryNodes).toBe(0);expect(boundaryProjection.deferredInputNodes).toBe(0);
+  expect(boundaryProjection.snapshot?.visibleStopButtonCount).toBe(0);
   const worker:any=Object.create(ChatGptBrowserWorker.prototype);
   const mode=await worker.selectModelAndEffort(page,CHATGPT_WEB_MODEL_ID,"high",{localToolsEnabled:false,solAvailable:true,extraHighAvailable:true,proAvailable:false},undefined,false,"5.6");
   await worker.assertSelectedEffort(page,mode);
