@@ -84,7 +84,19 @@ function WaitBridgeMaintenanceWindow($Reservation, $State) {
     $deadline = [DateTime]::UtcNow.AddSeconds($Reservation.waitForIdleSeconds)
     $idleSamples = 0
     do {
-        $health = Invoke-RestMethod -Uri $Reservation.healthUri -TimeoutSec 5
+        try {
+            $health = Invoke-RestMethod -Uri $Reservation.healthUri -TimeoutSec 5
+        } catch {
+            # A busy daemon can miss the health deadline. An unobserved state is never idle.
+            $idleSamples = 0
+            $State.healthObservationFailures = [int]$State['healthObservationFailures'] + 1
+            $State.lastHealthObservationFailedAt = [DateTime]::UtcNow.ToString('o')
+            $State.lastHealthObservationError = $_.Exception.Message
+            BridgePhase $Reservation $State 'waiting_for_idle'
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'Idle maintenance window did not arrive; health remained unconfirmed; no drain or quit was requested' }
+            Start-Sleep -Seconds 2
+            continue
+        }
         if ($health.status -ne 'ok' -or $health.pid -ne $Reservation.priorDaemonPid) { throw 'Owned daemon changed while waiting for idle' }
         if ($health.active_browser_turns -eq 0 -and $health.active_http_turns -eq 0 -and (BridgeProtectedJobsFinished $Reservation)) { $idleSamples++ } else { $idleSamples = 0 }
         if ($idleSamples -ge 2) {
