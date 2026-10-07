@@ -1,6 +1,27 @@
 # Windows 전용 경량 브라우저 호스트 검토
 
-2026-10-07, 브리지 작업 세션 01a1119c. 범위는 교체 구조 검토이며, 새 브라우저를 구현하거나 운영 설치한 결과는 아니다.
+2026-10-07, 브리지 작업 세션 01a1119c. 사용자의 최신 지시: **브리지 지연 수정 우선, 네이티브 교체는 보류**. 운영 런처는 Electron을 유지한다. 아래 네이티브 소스는 개발 시제품을 보존한 WIP이며 운영 설치 또는 전체 기능 완료를 뜻하지 않는다.
+
+## 보류 시점의 개발 및 측정 결과
+
+`launcher/native-webview2/`에 Win32 + WebView2 호스트, 기존 UI의 59개 API를 연결하는 Bun backend 및 오프라인 비교 도구를 구현했다. 사용자가 선택한 범위는 Browser/Setup/MCP/Accounts/Activity/Limits/Settings와 기존 기능 전체다. 현재는 일부분만 실행 검증했다.
+
+- `tests/native-webview2-browser.test.ts`: 1개 테스트, 28개 assertion. 로컬 문서의 계정 profile 격리, CDP target 소유권, 작업 lease 중 close/quit 거부, 표시 복원, 닫은 controller 제거를 확인했다.
+- `tests/native-webview2-ui.test.ts`: 1개 테스트, 13개 assertion. 기존 7개 메뉴 렌더링, preload의 59개 API 이름, 설정 저장 및 잘못된 설정 거부, 페이지 오류 0을 확인했다. 모든 메뉴의 실사용 기능 검증은 아니다.
+- `tests/native-webview2-control.test.ts`: 1개 테스트, 19개 assertion. 로컬 bearer control의 turn 시작/heartbeat/approval/end/재사용/해제와 잘못된 helper 신원 거부를 확인했다. ChatGPT 로그인이나 실제 Native2 emission 검증은 아니다.
+- 이후 추가한 GUI bootstrap/부모 stdio 연결/descriptor PID 변경은 C++ 빌드만 통과했다. 위 테스트 결과를 이 추가 경로에 적용하지 않는다. 배포 packaging, autostart, 업그레이드/guardian/rollback, 로그인 지속성, 실제 MCP capture→observe→ACK는 미완료다.
+
+동일한 120만 자 로컬 문서와 viewport를 사용한 단일 순차 측정의 private bytes 합계는 다음과 같다. 각 행에는 문서 탭 외 빈 bootstrap 탭 하나가 포함된다.
+
+| 문서 탭 수 | WebView2 전체 | 최소 Electron 전체 | WebView2 호스트 본체 | Electron 호스트 본체 |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 362.4 MiB | 342.3 MiB | 3.8 MiB | 43.3 MiB |
+| 2 | 563.5 MiB | 486.8 MiB | 3.8 MiB | 44.6 MiB |
+| 4 | 984.9 MiB | 774.4 MiB | 3.8 MiB | 46.5 MiB |
+
+WebView2 155.0.4283.39와 Electron 41.10.7/Chromium 146.0.7680.216의 엔진 버전은 다르다. 공통 Playwright 측정 harness, bridge daemon/helper와 전체 메뉴 backend는 합계에서 제외했다. 따라서 이 결과로 전체 제품의 절감률이나 RAM 누수 해결을 주장할 수 없다. 호스트 본체는 작아졌지만 이 조건의 전체 합계는 증가했으므로 운영 전환을 보류했다.
+
+증거는 `C:/Users/Administrator/.codex-chatgpt-web/builds/native-webview2-20261007-01a1119c/verification/` 및 `comparison-matched/comparison.json`에 보존했다. 이전 `comparison/comparison.json`은 viewport가 달라 절감 주장에 사용하지 않는다. 운영 계정/설정/descriptor는 시제품 테스트에서 변경하지 않았으며 Pro 테스트 전송은 0회다.
 
 전용 Win32 호스트에 시스템 WebView2를 붙이는 구조가 우선 후보다. 런처의 메뉴·탭·설정은 네이티브 UI로 표시하고, 웹 콘텐츠에만 WebView2를 사용한다. Electron과 WebView2를 동시에 상주시켜 두 웹 엔진을 유지하는 구성은 비교 후보에서 제외한다. 웹 엔진을 자체 구현하는 경우에는 HTML/CSS/JavaScript, 네트워크, 인증, GPU 합성까지 ChatGPT와 호환되어야 하므로 전용 호스트 개발과 별개의 큰 범위다.
 
@@ -9,7 +30,7 @@
 - 현재 PC: .NET 10 및 WebView2 Evergreen 155.0.4283.39 설치 확인.
 - 현재 Electron 실행 파일의 프로세스 7개를 한 번 조회한 값: private bytes 합계 약 852.2 MiB, working set 합계 약 1,086 MiB. 탭 수가 바뀌는 활성 작업 중 스냅샷이며, 공유 메모리를 포함하는 working set 합계는 고유 물리 RAM 사용량이 아니다. 콘텐츠·GPU·Node helper를 포함하므로 이 수치를 호스트 교체 절감량으로 사용할 수 없다.
 - 기존 런처는 Electron 메인 프로세스, React UI 렌더러, ChatGPT WebContentsView, `ELECTRON_RUN_AS_NODE` helper를 사용한다. ChatGPT의 DOM/JS 비용은 호스트를 바꾸어도 남는다.
-- WebView2는 Chromium 기반 CDP를 지원한다. 여러 탭에 동일 환경을 사용하고, 같은 사용자 데이터 폴더 안에서 계정별 profile을 분리할 수 있다. 실제 절감률은 아직 측정하지 않았다.
+- WebView2는 Chromium 기반 CDP를 지원한다. 여러 탭에 동일 환경을 사용하고, 같은 사용자 데이터 폴더 안에서 계정별 profile을 분리할 수 있다. 위 시제품의 제한된 비교에서는 전체 메모리 절감이 확인되지 않았다.
 
 ## 교체 경계
 

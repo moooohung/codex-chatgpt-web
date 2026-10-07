@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.25)
+project(CodexWebGPTNative VERSION 0.1.0 LANGUAGES CXX)
+
+if(NOT WIN32 OR NOT MSVC)
+  message(FATAL_ERROR "The native host requires Windows and MSVC")
+endif()
+if(NOT EXISTS "${WEBVIEW2_SDK_ROOT}/build/native/include/WebView2.h")
+  message(FATAL_ERROR "Set WEBVIEW2_SDK_ROOT to the restored Microsoft.Web.WebView2 SDK")
+endif()
+
+add_executable(CodexWebGPTNative WIN32 host.cpp)
+target_compile_features(CodexWebGPTNative PRIVATE cxx_std_17)
+target_compile_definitions(CodexWebGPTNative PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(CodexWebGPTNative PRIVATE /W4 /EHsc /utf-8)
+target_include_directories(CodexWebGPTNative PRIVATE "${WEBVIEW2_SDK_ROOT}/build/native/include")
+target_link_libraries(CodexWebGPTNative PRIVATE "${WEBVIEW2_SDK_ROOT}/build/native/x64/WebView2LoaderStatic.lib" user32 shell32 ole32 oleaut32 shlwapi comctl32 crypt32 psapi version uuid ws2_32)
+set_property(TARGET CodexWebGPTNative PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
