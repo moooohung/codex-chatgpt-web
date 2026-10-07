@@ -848,7 +848,9 @@ export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<voi
 }
 
 const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
-  .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
+  // A grouped response can include a large user prompt. Bound the known short error copy so
+  // repeated prefixes without a help link cannot backtrack across that whole prompt per match.
+  .getByText(/Something went wrong[\s\S]{0,512}help\.openai\.com/i)
   .last();
 
 // The current UI renders message_length_exceeds_limit as an ordinary response error.
