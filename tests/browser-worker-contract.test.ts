@@ -2755,7 +2755,7 @@ test("submission acceptance reports a rate-limit dialog that appears after Enter
   }).waitForSubmissionAccepted;
 
   await expect(waitForSubmissionAccepted.call(
-    {},
+    Object.create(ChatGptBrowserWorker.prototype),
     fixture.page,
     {},
   )).rejects.toMatchObject({
@@ -4265,8 +4265,9 @@ test("multipart observation surfaces Stopped thinking on its first observation e
   const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
   const worker = Object.create(ChatGptBrowserWorker.prototype);
   worker.responseDomSnapshot = async () => { observations += 1; return snapshot; };
+  worker.submissionDomState = async () => ({ responseIdentities: ["current-assistant"] });
   await expect(observe.call(worker,
-    page, binding, {}, {}, Date.now() + 1_000, undefined, progress,
+    page, binding, { initialTurnIdentities: [], domCache: {} }, {}, Date.now() + 1_000, undefined, progress,
   )).rejects.toMatchObject({ code: "chatgpt_stopped_thinking", retryable: false });
   expect(observations).toBe(1);
   expect(acknowledged).toBeFalse();

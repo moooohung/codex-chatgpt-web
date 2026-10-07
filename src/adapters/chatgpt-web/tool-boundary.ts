@@ -1,4 +1,5 @@
 import { ChatGptWebAdapterError } from "./adapter-error";
+import type { ChatGptTurnProgressReader } from "./turn-progress";
 
 export const CHATGPT_TOOL_BOUNDARY_ACK_TIMEOUT_MS = 30_000;
 
@@ -94,7 +95,7 @@ export function captureChatGptToolBoundary(options: {
     logChatGptToolBoundary("ack_complete", traceId, revision, { elapsedMs: Date.now() - started });
   }, options.signal, options.timeoutMs, () => phase === "capture" ? "chatgpt_tool_boundary_observation_timeout" : "chatgpt_tool_boundary_ack_timeout").catch(error => {
     const failure = options.signal?.aborted ? options.signal.reason
-      : error instanceof ChatGptWebAdapterError && error.code.startsWith("chatgpt_tool_boundary_") ? error
+      : error instanceof ChatGptWebAdapterError && !error.retryable ? error
       : chatGptToolBoundaryError(phase === "capture" ? "chatgpt_tool_boundary_observation_failed" : "chatgpt_tool_boundary_ack_failed", error);
     logChatGptToolBoundary("capture_failed", traceId, revision, {
       elapsedMs: Date.now() - started,
@@ -125,5 +126,51 @@ export async function waitForChatGptToolBoundaryAck(options: {
       code: error instanceof ChatGptWebAdapterError ? error.code : "cancelled",
     });
     throw error;
+  }
+}
+
+/** A batch arriving during a slow UI probe must enter capture before that probe finishes.
+ * This never acknowledges progress alone: capture retains the existing observe/ACK contract. */
+export async function observeChatGptToolBoundaryDuring<T>(options: {
+  progress?: ChatGptTurnProgressReader;
+  signal?: AbortSignal;
+  observe: (signal: AbortSignal) => Promise<T>;
+  capture: (signal: AbortSignal) => Promise<void>;
+}): Promise<T> {
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  try {
+    signal.throwIfAborted();
+    if (!options.progress) return await options.observe(signal);
+    let revision = options.progress.snapshot().revision;
+    await options.capture(signal);
+    // Convert both outcomes to values so a probe rejection cannot become unhandled
+    // while the concurrent boundary capture is still finishing.
+    const observation = Promise.resolve().then(() => options.observe(signal)).then(
+      value => ({ kind: "observed" as const, value }),
+      error => ({ kind: "failed" as const, error }),
+    );
+    for (;;) {
+      const waitAbort = new AbortController();
+      let next;
+      try {
+        next = await Promise.race([
+          observation,
+          options.progress.waitForChange(revision, AbortSignal.any([signal, waitAbort.signal])).then(
+            snapshot => ({ kind: "progress" as const, snapshot }),
+            error => ({ kind: "failed" as const, error }),
+          ),
+        ]);
+      } finally {
+        waitAbort.abort();
+      }
+      signal.throwIfAborted();
+      await options.capture(signal);
+      if (next.kind === "failed") throw next.error;
+      if (next.kind === "observed") return next.value;
+      revision = next.snapshot.revision;
+    }
+  } finally {
+    controller.abort();
   }
 }

@@ -4,6 +4,29 @@ import { ChatGptWebAdapterError } from "./adapter-error";
 
 type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
 
+export const CHATGPT_MODEL_SELECTION_SETTLE_MS = 10_000;
+
+function selectionTimeout(family: ChatGptWebModelFamily, phase: string, cause?: unknown): ChatGptWebAdapterError {
+  console.info(`[chatgpt-web] model_selection ${JSON.stringify({ family, phase, outcome: "timeout" })}`);
+  return new ChatGptWebAdapterError(
+    `ChatGPT model ${family} could not be selected and verified while its controls were responding slowly. The pending message was not sent.`,
+    { status: 502, errorType: "server_error", code: "chatgpt_model_selection_timeout", retryable: true, cause },
+  );
+}
+
+async function modelProbe<T>(operation: () => Promise<T>, family: ChatGptWebModelFamily, phase: string, timeoutMs: number): Promise<T> {
+  if (timeoutMs <= 0) throw selectionTimeout(family, phase);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(selectionTimeout(family, phase)), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     `ChatGPT model ${family} could not be selected and verified. The pending message was not sent. Check the selected model and account availability in the browser, then retry.`,
@@ -26,41 +49,56 @@ export async function selectChatGptModelFamily(
   menu: EffortMenu,
   family: ChatGptWebModelFamily,
   activate: () => Promise<EffortMenu>,
+  settleMs = CHATGPT_MODEL_SELECTION_SETTLE_MS,
 ): Promise<EffortMenu> {
+  let phase = "family-view";
+  const deadline = Date.now() + settleMs;
+  const remaining = () => Math.max(0, deadline - Date.now());
+  const probe = <T>(operation: () => Promise<T>) => modelProbe(operation, family, phase, remaining());
   try {
     const option = familyOption(menu, family);
-    if (await option.count() > 1) throw familyError(family);
-    if (await option.count() === 1 && await option.getAttribute("aria-checked") === "true") return menu;
+    const count = await probe(() => option.count());
+    if (count > 1) throw familyError(family);
+    if (count === 1 && await probe(() => option.getAttribute("aria-checked")) === "true") return menu;
     // The attached radio rows are inert while this composer-owned advanced view is collapsed.
     const powerView = menu.menu.locator('[data-model-picker-view]');
-    if (await powerView.count() === 1) {
-      const view = await powerView.getAttribute("data-model-picker-view");
+    const viewCount = await probe(() => powerView.count());
+    if (viewCount === 1) {
+      const view = await probe(() => powerView.getAttribute("data-model-picker-view"));
       if (view === "simple") {
         const trigger = powerView.locator('[data-model-picker-view-toggle="true"][aria-hidden="false"]');
-        if (await trigger.count() !== 1) throw familyError(family);
-        await trigger.click({ timeout: 5_000 });
+        if (await probe(() => trigger.count()) !== 1) throw familyError(family);
+        await probe(() => trigger.click({ timeout: Math.max(1, remaining()) }));
       } else if (view !== "advanced") throw familyError(family);
     } else {
       const trigger = menu.menu.locator('[role="menuitem"][aria-expanded][aria-hidden="false"]');
-      if (await powerView.count() !== 0 || await trigger.count() !== 1) throw familyError(family);
-      if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click({ timeout: 5_000 });
+      if (viewCount !== 0 || await probe(() => trigger.count()) !== 1) throw familyError(family);
+      if (await probe(() => trigger.getAttribute("aria-expanded")) === "false") {
+        await probe(() => trigger.click({ timeout: Math.max(1, remaining()) }));
+      }
     }
-    await option.waitFor({ state: "visible", timeout: 5_000 });
-    await option.click({ timeout: 5_000 });
+    phase = "family-click";
+    await probe(() => option.waitFor({ state: "visible", timeout: Math.max(1, remaining()) }));
+    await probe(() => option.click({ timeout: Math.max(1, remaining()) }));
     // Choosing a family returns the open picker to its slider. Keep that surface:
     // Escape followed by an immediate reopen races the outgoing menu's cleanup.
     // Activation reuses the open menu and verifies its owner before returning it.
-    const selected = await activate();
-    const deadline = Date.now() + 1_000;
+    phase = "family-readback";
+    let selected = await probe(activate);
     do {
       const current = familyOption(selected, family);
-      if (await current.count() > 1) throw familyError(family);
-      if (await current.count() === 1 && await current.getAttribute("aria-checked") === "true") return selected;
+      const count = await probe(() => current.count());
+      if (count > 1) throw familyError(family);
+      if (count === 1 && await probe(() => current.getAttribute("aria-checked")) === "true") return selected;
       await new Promise(resolve => setTimeout(resolve, 50));
+      // A family change can replace the portal or close its old menu. Resolve the
+      // current composer-owned picker again instead of polling a detached ID.
+      selected = await probe(activate);
     } while (Date.now() < deadline);
-    throw familyError(family);
+    throw selectionTimeout(family, phase);
   } catch (cause) {
     if (cause instanceof ChatGptWebAdapterError) throw cause;
+    if (cause instanceof Error && cause.name === "TimeoutError") throw selectionTimeout(family, phase, cause);
     throw familyError(family, cause);
   }
 }
@@ -91,17 +129,39 @@ export async function assertChatGptModelFamily(
   settleMs = 0,
 ): Promise<void> {
   const deadline = Date.now() + settleMs;
+  const probe = <T>(operation: () => Promise<T>) => modelProbe(operation, family, "model-effort-readback",
+    settleMs > 0 ? Math.max(0, deadline - Date.now()) : CHATGPT_MODEL_SELECTION_SETTLE_MS);
   do {
+    if (settleMs > 0 && Date.now() >= deadline) break;
     const option = familyOption(menu, family);
-    const checked = await option.count() === 1 && await option.getAttribute("aria-checked") === "true";
+    const count = await probe(() => option.count());
+    if (count > 1) throw familyError(family);
+    const checked = count === 1 && await probe(() => option.getAttribute("aria-checked")) === "true";
     const state = parseChatGptEffortSliderState(
-      await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),
-      await menu.slider.getAttribute("aria-valuenow"),
+      ...await probe(() => Promise.all([menu.slider.getAttribute("aria-valuemin"), menu.slider.getAttribute("aria-valuemax"),
+        menu.slider.getAttribute("aria-valuenow")])) as [string | null, string | null, string | null],
     );
-    const descriptions = await readChatGptModelAnnouncements(menu.slider);
+    const descriptions = await probe(() => readChatGptModelAnnouncements(menu.slider));
     if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   } while (true);
   throw familyError(family);
+}
+
+/** Closing animations must finish before the trigger label becomes selection evidence. */
+export async function readClosedChatGptEffortLabel(control: EffortMenu["slider"], family: ChatGptWebModelFamily,
+  settleMs = CHATGPT_MODEL_SELECTION_SETTLE_MS): Promise<string> {
+  const deadline = Date.now() + settleMs;
+  let previous: string | undefined;
+  do {
+    const [expanded, label] = await modelProbe(() => Promise.all([
+      control.getAttribute("aria-expanded"), control.innerText(),
+    ]), family, "effort-menu-close", Math.max(0, deadline - Date.now()));
+    const closedLabel = expanded === "false" && label.trim() ? label.trim() : undefined;
+    if (closedLabel && closedLabel === previous) return closedLabel;
+    previous = closedLabel;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  throw selectionTimeout(family, "effort-menu-close");
 }
