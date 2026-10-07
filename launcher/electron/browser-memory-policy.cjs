@@ -2,7 +2,7 @@ const DEFAULT_BROWSER_MEMORY_POLICY = Object.freeze({
   releaseIdleTabMemory: true,
   recycleAfterTurns: 8,
   recycleRendererMb: 512,
-  maxTabs: 4,
+  maxTabs: 8,
   disableBackForwardCache: true,
   disableGpu: false,
   rendererJsHeapMb: 0,

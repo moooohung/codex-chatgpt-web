@@ -7,6 +7,7 @@ import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../lau
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
+import { isChatGptResponseWaitState, type ChatGptResponseWaitState } from "./response-wait";
 import {
   parseChatGptLunaCheckpoint,
   type ChatGptLunaCheckpoint,
@@ -28,6 +29,7 @@ type HelperMessage =
   | { type: "ready"; features?: string[] }
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
+  | { type: "event"; id: string; event: "response_wait"; state: ChatGptResponseWaitState | null }
   | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
@@ -64,6 +66,12 @@ function parseHelperMessage(line: string): HelperMessage {
   }
   if (message.type === "event") {
     const event = message.event;
+    if (event === "response_wait") {
+      if (message.state !== null && !isChatGptResponseWaitState(message.state)) {
+        throw new Error("Launcher browser helper response-wait state is invalid");
+      }
+      return { type: "event", id: message.id, event, state: message.state };
+    }
     if (event === "multipart_stage_acknowledged") {
       if (!Number.isSafeInteger(message.stageIndex) || (message.stageIndex as number) <= 0) {
         throw new Error("Launcher browser helper multipart stage index is invalid");
@@ -558,6 +566,7 @@ export class LauncherBrowserHelperClient {
         }
         pending.turn.onLunaCheckpoint({ checkpoint: message.checkpoint, answerHash: message.answerHash });
       }
+      else if (message.event === "response_wait") pending.turn.onResponseWait?.(message.state);
       else if (message.event === "reasoning" && message.text) {
         pending.turn.onReasoningSummary?.(message.text, message.continuation === true);
       }

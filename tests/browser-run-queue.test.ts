@@ -16,15 +16,15 @@ test("browser admission stays bounded and FIFO across successful and failed phys
   finish.get(3)!();finish.get(4)!(); await Promise.all([runs[3],runs[4]]);
 });
 
-test("browser admission defaults to four slots and accepts only bounded overrides",()=> {
-  expect(resolveMaxChatGptBrowserTabs(undefined)).toBe(4);
+test("browser admission defaults to eight slots and accepts only bounded overrides",()=> {
+  expect(resolveMaxChatGptBrowserTabs(undefined)).toBe(8);
   expect(resolveMaxChatGptBrowserTabs("1")).toBe(1);
   expect(resolveMaxChatGptBrowserTabs("8")).toBe(8);
-  expect(resolveMaxChatGptBrowserTabs("9")).toBe(4);
-  expect(resolveMaxChatGptBrowserTabs("nope")).toBe(4);
+  expect(resolveMaxChatGptBrowserTabs("9")).toBe(8);
+  expect(resolveMaxChatGptBrowserTabs("nope")).toBe(8);
 });
 
-test("a fifth registered request queues before browser preparation and starts after physical settlement",async()=> {
+test("eight registered requests start physical runs together, including the fifth job",async()=> {
   const sessions=new ChatGptTurnSessions(), starts:string[]=[], releases=new Map<string,()=>void>();
   const worker=Object.assign(Object.create(ChatGptBrowserWorker.prototype),{
     config:{browserHost:"managed-chrome"},activeRuns:new Map(),
@@ -32,7 +32,7 @@ test("a fifth registered request queues before browser preparation and starts af
       starts.push(turn.traceId);releases.set(turn.traceId,()=>resolve(turn.traceId));
     }),
   }) as ChatGptBrowserWorker;
-  const runs=Array.from({length:5},(_,index)=>sessions.getOrCreate(`request_${index}`,()=>{
+  const runs=Array.from({length:8},(_,index)=>sessions.getOrCreate(`request_${index}`,()=>{
     const browser=worker.run({traceId:`request_${index}`,modelId:"chatgpt-web/high",
       capabilities:{localToolsEnabled:false,solAvailable:true,extraHighAvailable:true,proAvailable:true},
       prepare:async()=>({text:"queued",images:[],release(){}}),onTextDelta(){}});
@@ -40,11 +40,9 @@ test("a fifth registered request queues before browser preparation and starts af
       trace:new ChatGptTraceFeed(),text:new ChatGptTextFeed(),cancel(){}};
   }));
   await Promise.resolve();
-  expect(sessions.activeCount()).toBe(5);
-  expect(starts).toEqual(["request_0","request_1","request_2","request_3"]);
-  releases.get("request_0")!();await runs[0]!.runtime.browser;await Promise.resolve();
-  expect(starts).toEqual(["request_0","request_1","request_2","request_3","request_4"]);
-  for(const id of starts.slice(1))releases.get(id)!();
+  expect(sessions.activeCount()).toBe(8);
+  expect(starts).toEqual(Array.from({length:8},(_,index)=>`request_${index}`));
+  for(const id of starts)releases.get(id)!();
   await Promise.all(runs.map(session=>session.runtime.browser));sessions.clear();
 });
 

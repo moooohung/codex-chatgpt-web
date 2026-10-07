@@ -32,6 +32,10 @@ test("daemon streams browser lifecycle through the real helper process", async (
       }
       await turn.onSendActivated();
       turn.onSubmitted();
+      turn.onResponseWait("connection_interrupted");
+      turn.onResponseWait("connection_interrupted_and_service_thinking");
+      turn.onResponseWait("service_thinking");
+      turn.onResponseWait(null);
       turn.onReasoningSummary("Reading project");
       turn.onReasoningSummary(" files", true);
       turn.onTextDelta("done");
@@ -85,6 +89,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
+  const responseWaits: unknown[] = [];
   const acknowledgedStages: number[] = [];
   let sendActivated = false;
   let submitted = false;
@@ -108,6 +113,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
+      onResponseWait: state => responseWaits.push(state),
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
       captureLunaCheckpoint: true,
@@ -121,6 +127,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
+    expect(responseWaits).toEqual(["connection_interrupted", "connection_interrupted_and_service_thinking", "service_thinking", null]);
     expect(acknowledgedStages).toEqual([1, 2, 3, 4, 5]);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),

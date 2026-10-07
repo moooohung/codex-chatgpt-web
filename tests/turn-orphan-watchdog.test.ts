@@ -7,6 +7,28 @@ import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../src/types";
+import type { ChatGptResponseWaitState } from "../src/adapters/chatgpt-web/response-wait";
+
+test("service banners explain stalls without extending the budget, and recovery clears the reason", () => {
+  for (const state of ["connection_interrupted", "service_thinking", "connection_interrupted_and_service_thinking"] as const) {
+    const tracker = new ChatGptResponseProgressTracker(300); tracker.accepted(0);
+    for (let at = 0; at < 300_000; at += 250) {
+      tracker.observeResponseWait(state);
+      expect(tracker.check(undefined, at)).toBeUndefined();
+    }
+    expect(tracker.check(undefined, 300_000)).toMatchObject({
+      status: 504, retryable: false, code: state === "service_thinking" ? "chatgpt_service_wait_timeout" : "chatgpt_connection_recovery_timeout",
+      message: expect.stringContaining("accepted request was not resent"),
+    });
+    tracker.observeResponseWait(null);
+    expect(tracker.check(undefined, 300_000)?.code).toBe("upstream_stall_timeout");
+  }
+  const live = new ChatGptResponseProgressTracker(300); live.accepted(0);
+  live.observeResponseWait("connection_interrupted");
+  expect(live.check(toolProgress(250_000), 300_000)).toBeUndefined();
+  live.emittedContent(500_000); expect(live.check(undefined, 799_999)).toBeUndefined();
+  expect(live.check(undefined, 800_000)?.code).toBe("chatgpt_connection_recovery_timeout");
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -213,3 +235,35 @@ test("accepted automatic browser stalls are cancelled once and terminal reconnec
     expect(replay.find(event => event.type === "error")).toMatchObject({ code: "upstream_stall_timeout", retryable: false });
   } finally { worker.run = original; }
 }, 10_000);
+
+for (const state of ["connection_interrupted", "service_thinking", "connection_interrupted_and_service_thinking"] as ChatGptResponseWaitState[]) {
+  test(`accepted ${state} timeout is classified and a native reconnect cannot send again`, async () => {
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://wait-${state}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, stallTimeoutSec: 1 } };
+    const id = `wait_${state}`;
+    const request: CodexParsedRequest = { modelId: CHATGPT_WEB_MODEL_ID, stream: true,
+      context: { tools: [], messages: [{ role: "user", content: "wait fixture", timestamp: 1 }] },
+      options: { reasoning: "high" }, _rawBody: {
+        prompt_cache_key: id,
+        client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: id, turn_id: id }) },
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "wait fixture" }],
+          internal_chat_message_metadata_passthrough: { turn_id: id } }],
+      } };
+    const worker = ChatGptBrowserWorker.forProvider(provider), original = worker.run;
+    let starts = 0, cancellations = 0;
+    worker.run = (turn: BrowserTurn) => new Promise((_resolve, reject) => {
+      starts++; turn.onSubmitted?.(); turn.onResponseWait?.(state); turn.onHeartbeat?.();
+      turn.abortSignal?.addEventListener("abort", () => { cancellations++; reject(turn.abortSignal?.reason); }, { once: true });
+    });
+    const code = state === "service_thinking" ? "chatgpt_service_wait_timeout" : "chatgpt_connection_recovery_timeout";
+    try {
+      const adapter = createChatGptWebAdapter(provider), events: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(events.find(event => event.type === "error")).toMatchObject({ status: 504, code, retryable: false });
+      const replay: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => replay.push(event));
+      expect(replay.find(event => event.type === "error")).toMatchObject({ code, retryable: false });
+      expect(starts).toBe(1); expect(cancellations).toBe(1);
+    } finally { worker.run = original; }
+  }, 10_000);
+}

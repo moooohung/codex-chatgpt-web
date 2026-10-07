@@ -533,7 +533,7 @@ export function createChatGptWebAdapter(
         const failure = progressTracker.check(runtime.mode === "tools" ? runtime.externalProgress.snapshot() : undefined);
         if (!failure) return;
         clearInterval(timer);
-        console.warn(`[chatgpt-web] browser_progress_stalled ${JSON.stringify({ traceId, stallMs: progressTracker.timeoutMs })}`);
+        console.warn(`[chatgpt-web] browser_progress_stalled ${JSON.stringify({ traceId, stallMs: progressTracker.timeoutMs, code: failure.code })}`);
         runtime.cancel(failure);
       }, Math.min(1000, progressTracker.timeoutMs));
       timer.unref?.();
@@ -770,6 +770,7 @@ export function createChatGptWebAdapter(
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
         ...multipartProgressLifecycle,
+        onResponseWait: state => progressTracker?.observeResponseWait(state),
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
@@ -835,6 +836,7 @@ export function createChatGptWebAdapter(
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
       ...multipartProgressLifecycle,
+      onResponseWait: state => progressTracker?.observeResponseWait(state),
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),

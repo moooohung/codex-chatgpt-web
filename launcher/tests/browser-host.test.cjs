@@ -2889,15 +2889,15 @@ test("a required retained conversation fails before creating a browser tab", asy
   assert.equal(created, false);
 });
 
-test("the default browser memory cap rejects a fifth occupied tab", async () => {
-  const turnTabs = new Map(Array.from({ length: 4 }, (_unused, index) => [
+test("the default browser memory cap rejects a ninth occupied tab", async () => {
+  const turnTabs = new Map(Array.from({ length: 8 }, (_unused, index) => [
     `tab-${index + 1}`,
     { ordinal: index + 1 },
   ]));
 
   await assert.rejects(
-    BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_five", 444),
-    /already has 4 browser tabs.*avoid excessive parallel traffic/,
+    BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_nine", 444),
+    /already has 8 browser tabs.*avoid excessive parallel traffic/,
   );
 });
 
@@ -4131,8 +4131,8 @@ test("recordAccountAuthFailure and recordAccountAuthSuccess deduplicate identica
 });
 
 test("browser allocation fills the configured ordinals and reuses a released slot", () => {
-  const fixture = { turnTabs: new Map(), memoryPolicy: { maxTabs: 4 } };
-  for (let ordinal = 1; ordinal <= 4; ordinal++) {
+  const fixture = { turnTabs: new Map(), memoryPolicy: { maxTabs: 8 } };
+  for (let ordinal = 1; ordinal <= 8; ordinal++) {
     assert.equal(BrowserHost.prototype.allocateTabOrdinal.call(fixture), ordinal);
     fixture.turnTabs.set(`tab-${ordinal}`, { ordinal, status: "running" });
   }

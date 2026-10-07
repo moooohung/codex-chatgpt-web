@@ -1,4 +1,4 @@
-export const DEFAULT_MAX_CHATGPT_BROWSER_TABS = 4;
+export const DEFAULT_MAX_CHATGPT_BROWSER_TABS = 8;
 // Keep bounded request/observer ownership while extra turns wait for a physical browser slot.
 export const MAX_CHATGPT_REGISTERED_TURNS = 8;
 

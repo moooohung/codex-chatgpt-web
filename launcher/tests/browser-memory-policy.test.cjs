@@ -6,10 +6,10 @@ const {
   resolveBrowserMemoryPolicy,
 } = require("../electron/browser-memory-policy.cjs");
 
-test("browser memory policy defaults favor idle release and a four-tab queue", () => {
+test("browser memory policy defaults favor idle release and eight concurrent tabs", () => {
   assert.deepEqual(resolveBrowserMemoryPolicy({}), DEFAULT_BROWSER_MEMORY_POLICY);
   assert.equal(DEFAULT_BROWSER_MEMORY_POLICY.releaseIdleTabMemory, true);
-  assert.equal(DEFAULT_BROWSER_MEMORY_POLICY.maxTabs, 4);
+  assert.equal(DEFAULT_BROWSER_MEMORY_POLICY.maxTabs, 8);
   assert.equal(DEFAULT_BROWSER_MEMORY_POLICY.recycleAfterTurns, 8);
   assert.equal(DEFAULT_BROWSER_MEMORY_POLICY.recycleRendererMb, 512);
   assert.equal(DEFAULT_BROWSER_MEMORY_POLICY.disableBackForwardCache, true);
@@ -35,7 +35,7 @@ test("browser memory policy accepts bounded overrides and ignores invalid values
     disableGpu: true,
     rendererJsHeapMb: 640,
   });
-  assert.equal(resolveBrowserMemoryPolicy({ CODEX_WEB_GPT_MAX_BROWSER_TABS: "99" }).maxTabs, 4);
+  assert.equal(resolveBrowserMemoryPolicy({ CODEX_WEB_GPT_MAX_BROWSER_TABS: "99" }).maxTabs, 8);
   assert.equal(resolveBrowserMemoryPolicy({ CODEX_WEB_GPT_RECYCLE_AFTER_TURNS: "invalid" }).recycleAfterTurns, 8);
 });
 

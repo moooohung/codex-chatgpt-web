@@ -6,6 +6,47 @@ import { ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptVisibleTraceTrac
 import { ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "../src/adapters/chatgpt-web/markdown";
 
 const smokeHtml = readFileSync(new URL("./fixtures/chatgpt-dil-smoke.html", import.meta.url), "utf8");
+const waitHtml = readFileSync(new URL("./fixtures/chatgpt-response-wait.html", import.meta.url), "utf8");
+
+test("observed service-wait UI cannot complete a partial answer or enter the reasoning stream", async () => {
+  const result = await snapshot(waitHtml);
+  expect(result.responseWaitState).toBe("connection_interrupted_and_service_thinking");
+  expect(result.visibleText).toBe("Partial answer.");
+  expect(result.completionActionVisible).toBeTrue();
+  expect(chatGptTurnIsComplete({ ...result, currentText: result.visibleText, running: false })).toBeFalse();
+  expect(result.traceBlocks.some(b => /Our systems are thinking|Connection interrupted/.test(b.text))).toBeFalse();
+  const tracker = new ChatGptCompletionTracker(0);
+  expect(tracker.update({ ...result, currentText: result.visibleText, running: false }, 0)).toBeFalse();
+  expect(tracker.update({ ...result, currentText: result.visibleText, running: false }, 10_000)).toBeFalse();
+  const recovered = await snapshot(waitHtml.replaceAll('role="status"', 'role="presentation"'));
+  expect(recovered.responseWaitState).toBeUndefined();
+  expect(tracker.update({ ...recovered, currentText: recovered.visibleText, running: false }, 10_001)).toBeFalse();
+  expect(tracker.update({ ...recovered, currentText: recovered.visibleText, running: false }, 10_002)).toBeTrue();
+});
+
+test("each notice is identified independently and hidden or quoted notices remain ordinary content", async () => {
+  for (const [id, expected] of [["service-wait", "connection_interrupted"], ["connection-wait", "service_thinking"]] as const) {
+    const result = await snapshot(waitHtml.replace(`role="status" id="${id}"`, `role="status" id="${id}" style="display:none"`));
+    expect(result.responseWaitState).toBe(expected);
+  }
+  for (const wrapper of ['<div hidden>', '<div style="display:none">', '<div style="visibility:hidden">']) {
+    expect((await snapshot(wrapper + waitHtml + '</div>')).responseWaitState).toBeUndefined();
+  }
+  const quote = 'Our systems are thinking a bit more about this request before responding.';
+  for (const wrapper of ['<div data-user-message-bubble>', '<div class="markdown">', '<div data-markdown-text-style="assistant-message">', '<pre>', '<blockquote>', '<div data-testid="cot-v5-fixture">']) {
+    expect((await snapshot(`<section id="turn">${wrapper}<div role="status">${quote}</div></div></section>`)).responseWaitState).toBeUndefined();
+  }
+});
+
+test("large status wrappers and prompt quotes do not become wait evidence", async () => {
+  for (const chars of [320_000, 1_000_000]) {
+    const giant = 'Connection interrupted. Waiting for the complete answer '.repeat(Math.ceil(chars / 55)).slice(0, chars);
+    const started = performance.now();
+    const result = await snapshot(`<section id="turn"><div role="status">${giant}</div><div data-user-message-bubble>${giant}</div></section>`);
+    expect(result.responseWaitState).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(1_000);
+  }
+});
 test("switching responses disconnects the previous observer and releases its DOM references", async () => {
   const root = (id: string) => ({ id, isConnected: true, getAttribute: () => null, hasAttribute: () => false,
     querySelectorAll: () => [], contains: () => false, closest: () => null });
@@ -71,6 +112,7 @@ type Snapshot = {
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
   completionActionVisible: boolean;
+  responseWaitState?: "connection_interrupted" | "service_thinking" | "connection_interrupted_and_service_thinking";
   traceBlocks: { kind: "answer" | "commentary" | "status"; text: string }[];
 };
 
@@ -96,7 +138,7 @@ async function snapshot(html: string): Promise<Snapshot> {
       document: window.document, HTMLElement: window.HTMLElement, Element: window.Element,
       Node: window.Node, NodeFilter: window.NodeFilter, performance: { timeOrigin: 1 },
       getComputedStyle: (element: HTMLElement) => ({
-        display: element.style.display || "block", visibility: "visible", opacity: "1",
+        display: element.style.display || "block", visibility: element.style.visibility || "visible", opacity: "1",
       }),
       MutationObserver: class { observe() {} },
     });

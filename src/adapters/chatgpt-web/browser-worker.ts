@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { observeChatGptToolBoundaryDuring, captureChatGptToolBoundary, chatGptToolBoundaryError, setChatGptToolBoundaryTrace, logChatGptBrowserObservation, type ChatGptBrowserProbe } from "./tool-boundary";
 import { chatGptTerminalErrorUiVisible } from "./terminal-ui";
 import { chatGptSessionFailureUiState } from "./session-ui";
+import { CHATGPT_RESPONSE_WAIT_LABELS, type ChatGptResponseWaitState } from "./response-wait";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
@@ -1414,6 +1415,8 @@ export interface BrowserTurn {
   onReasoningSummary?: (text: string, continuation?: boolean) => void;
   /** Stable visible ChatGPT prose between status/tool rows. */
   onCommentary?: (text: string, continuation?: boolean) => void;
+  /** Service UI is diagnostic state only; it cannot buy more execution time. */
+  onResponseWait?: (state: ChatGptResponseWaitState | null) => void;
   /** Append-only, structurally stable Markdown chunks. */
   onTextDelta: (delta: string) => void;
   /** Proven current-turn MCP activity; never response content or completion. */
@@ -1504,10 +1507,12 @@ export function chatGptTurnIsComplete(state: {
   currentHtml?: string;
   completionActionVisible: boolean;
   boundMessageStatus?: string;
+  responseWaitState?: ChatGptResponseWaitState;
 }): boolean {
   return state.responsePresent
     && !state.running
     && state.boundMessageStatus !== "in_progress"
+    && !state.responseWaitState
     && state.currentText.length > 0
     && state.completionActionVisible;
 }
@@ -1734,12 +1739,13 @@ export class ChatGptTurnDomHealthTracker {
     completionActionVisible: boolean;
     externalProgressLive?: boolean;
     activityText?: string;
+    responseWaitState?: ChatGptResponseWaitState;
   }, now = Date.now()): string | undefined {
     if (state.responsePresent) this.sawResponse = true;
-    if (state.externalProgressLive || state.running) {
+    if (state.externalProgressLive || state.running || state.responseWaitState) {
       // Every conclusion below asserts that ChatGPT stopped producing this turn. A tool call that
-      // is still completing or a visible Stop control disproves that, whatever response content
-      // the renderer currently exposes. Start a fresh grace period once generation stops.
+      // is still completing, a visible Stop control, or explicit service-wait UI disproves that.
+      // Wait banners never extend the independent response-progress watchdog or stage deadline.
       this.suspendForProgress();
       return undefined;
     }
@@ -1843,6 +1849,7 @@ interface ChatGptResponseDomSnapshot {
   completionActionVisible: boolean;
   boundMessageStatus?: string;
   stoppedThinkingVisible: boolean;
+  responseWaitState?: ChatGptResponseWaitState;
   traceBlocks: ChatGptVisibleTraceBlock[];
 }
 
@@ -4253,11 +4260,13 @@ export class ChatGptBrowserWorker {
         completionActionVisible: snapshot.completionActionVisible,
         externalProgressLive,
         activityText: JSON.stringify(snapshot.traceBlocks),
+        responseWaitState: snapshot.responseWaitState,
       });
       if (domError) throw chatGptResponseIncompleteError(domError);
       if (completionTracker.update({
         responsePresent: snapshot.responsePresent,
         boundMessageStatus: snapshot.boundMessageStatus,
+        responseWaitState: snapshot.responseWaitState,
         running,
         currentText: snapshot.visibleText,
         currentHtml: snapshot.fullHtml,
@@ -4930,6 +4939,42 @@ export class ChatGptBrowserWorker {
             && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING))
         : undefined;
       const completionActionSet = new Set(completionAction ? [completionAction] : []);
+      // Exact service copy in short status UI belongs to this bound turn, not the answer stream.
+      // Prune quoted prose and cap text/nodes before reading a potentially enormous status wrapper.
+      const waitNotices = new Map<HTMLElement, "connection" | "service">();
+      const waitProse = '[data-user-message-bubble], [data-message-author-role="user"], .markdown, '
+        + '[data-markdown-text-style], .puik-root.not-markdown, pre, code, blockquote, [data-testid^="cot-v5"]';
+      for (const candidate of root.querySelectorAll<HTMLElement>('[role="status"]')) {
+        if (candidate.closest(waitProse) || candidate.querySelector(waitProse) || !renderedInDom(candidate)) continue;
+        let text = "", visited = 0, oversized = false;
+        const stack: Node[] = [candidate];
+        while (stack.length) {
+          const node = stack.pop()!;
+          if (++visited > 128) { oversized = true; break; }
+          if (node.nodeType === Node.TEXT_NODE) {
+            const chunk = node.textContent ?? "";
+            if (text.length + chunk.length > 512) { oversized = true; break; }
+            text += chunk;
+          } else for (let child = node.lastChild; child; child = child.previousSibling) {
+            if (visited + stack.length >= 128) { oversized = true; break; }
+            stack.push(child);
+          }
+        }
+        if (oversized) continue;
+        text = text.replace(/\s+/g, " ").trim();
+        const kind = text === options.responseWaitLabels.connection ? "connection"
+          : text === options.responseWaitLabels.service ? "service" : undefined;
+        if (!kind) continue;
+        let visible = true;
+        for (let ancestor: HTMLElement | null = candidate; ancestor; ancestor = ancestor.parentElement) {
+          if (ancestor.hidden || !renderedInDom(ancestor)) { visible = false; break; }
+        }
+        if (visible) waitNotices.set(candidate, kind);
+      }
+      const waitKinds = new Set(waitNotices.values());
+      const responseWaitState: ChatGptResponseWaitState | undefined = waitKinds.has("connection")
+        ? waitKinds.has("service") ? "connection_interrupted_and_service_thinking" : "connection_interrupted"
+        : waitKinds.has("service") ? "service_thinking" : undefined;
       const candidates = new Map<HTMLElement, ChatGptVisibleTraceBlock["kind"]>();
       renderedRoots.forEach(candidate => candidates.set(candidate, "answer"));
       commentaryRoots.forEach(candidate => candidates.set(candidate, "commentary"));
@@ -5010,6 +5055,7 @@ export class ChatGptBrowserWorker {
       const traceByKey = new Map<string, ChatGptVisibleTraceBlock>();
       [...candidates]
         .filter(([candidate]) => renderedInDom(candidate))
+        .filter(([candidate]) => ![...waitNotices.keys()].some(notice => notice === candidate || notice.contains(candidate)))
         .sort(([left], [right]) => left === right
           ? 0
           : left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
@@ -5071,12 +5117,14 @@ export class ChatGptBrowserWorker {
           completionActionVisible: completionAction !== undefined,
           boundMessageStatus,
           stoppedThinkingVisible,
+          responseWaitState,
           traceBlocks,
         },
       };
     }, {
       completionActionSelector: CHATGPT_COMPLETION_ACTION_SELECTOR,
       stoppedThinkingLabels: [...CHATGPT_STOPPED_THINKING_LABELS],
+      responseWaitLabels: CHATGPT_RESPONSE_WAIT_LABELS,
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
     }, { timeout: 2_000 }).catch(() => undefined);
@@ -5900,6 +5948,7 @@ export class ChatGptBrowserWorker {
       let internalObservationFaults = 0;
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
+      let reportedResponseWait: ChatGptResponseWaitState | null = null;
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5975,6 +6024,12 @@ export class ChatGptBrowserWorker {
         // this iteration goes on to `continue` for a rebind, confirmation, or liveness pause.
         internalObservationFaults = 0;
         observedThisIteration = true;
+        const responseWait = snapshot.responseWaitState ?? null;
+        if (snapshot.responsePresent && responseWait !== reportedResponseWait) {
+          reportedResponseWait = responseWait;
+          console.info(`[chatgpt-web] response_wait ${JSON.stringify({ traceId: turn.traceId.slice(0, 12), state: responseWait, responseIdentity: responseTurn.identity })}`);
+          turn.onResponseWait?.(responseWait);
+        }
         // Liveness may postpone a verdict, never waive it: once activity goes stale the DOM alone
         // decides, so a tool call that never returns cannot hold a turn with no explicit deadline open forever.
         const externalProgressSnapshot = turn.externalProgress?.snapshot();
@@ -6108,11 +6163,13 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
             externalProgressLive,
             activityText: JSON.stringify(snapshot.traceBlocks),
+            responseWaitState: snapshot.responseWaitState,
           });
           if (domError) throw chatGptResponseIncompleteError(domError);
           const completionReady = completionTracker.update({
             responsePresent: snapshot.responsePresent,
             boundMessageStatus: snapshot.boundMessageStatus,
+            responseWaitState: snapshot.responseWaitState,
             running,
             currentText: snapshot.visibleText,
             currentHtml: snapshot.fullHtml,

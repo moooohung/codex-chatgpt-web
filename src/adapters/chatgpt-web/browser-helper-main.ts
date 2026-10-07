@@ -293,6 +293,11 @@ async function run(message: RunMessage): Promise<void> {
         throw new Error("Browser helper could not persist multipart acknowledgement evidence");
       }
     },
+    onResponseWait: state => {
+      if (!writeProtocol({ type: "event", id: message.id, event: "response_wait", state })) {
+        throw new Error("Browser helper could not report ChatGPT response-wait state");
+      }
+    },
     onReasoningSummary: (text, continuation) => writeProtocol({
       type: "event",
       id: message.id,

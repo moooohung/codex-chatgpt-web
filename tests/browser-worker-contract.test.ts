@@ -340,7 +340,7 @@ test("response caching rechecks CSS visibility without requiring a DOM mutation"
 });
 
 test("browser turns run concurrently up to the configured default tab limit", async () => {
-  expect(MAX_CHATGPT_BROWSER_TABS).toBe(4);
+  expect(MAX_CHATGPT_BROWSER_TABS).toBe(8);
   const releases = new Map<string, () => void>();
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { browserHost: "managed-chrome" },
@@ -369,9 +369,7 @@ test("browser turns run concurrently up to the configured default tab limit", as
   await active[0];
   await Promise.resolve();
   expect(releases.has("trace_queued")).toBeTrue();
-  for (const traceId of ["trace_2", "trace_3", "trace_4", "trace_queued"]) {
-    releases.get(traceId)?.();
-  }
+  for (const release of releases.values()) release();
   await Promise.all([...active.slice(1), queued]);
 });
 
