@@ -1,15 +1,43 @@
 # Windows 전용 경량 브라우저 호스트 검토
 
-2026-10-07, 브리지 작업 세션 01a1119c. 사용자의 최신 지시: **브리지 지연 수정 우선, 네이티브 교체는 보류**. 운영 런처는 Electron을 유지한다. 아래 네이티브 소스는 개발 시제품을 보존한 WIP이며 운영 설치 또는 전체 기능 완료를 뜻하지 않는다.
+2026-10-07, 브리지 작업 세션 01a1119c. 사용자의 최신 순서: **WebView2 시제품과 Electron 비교 먼저, 그다음 큰 대화 처리와 실패 탭 정리**. 운영 런처는 Electron을 유지한다. 아래 결과는 격리된 DEV 시제품의 오프라인 검증이며 운영 설치 또는 기존 기능 전체의 실사용 동등성을 뜻하지 않는다.
 
-## 보류 시점의 개발 및 측정 결과
+## 실행 가능한 DEV 시제품
 
-`launcher/native-webview2/`에 Win32 + WebView2 호스트, 기존 UI의 59개 API를 연결하는 Bun backend 및 오프라인 비교 도구를 구현했다. 사용자가 선택한 범위는 Browser/Setup/MCP/Accounts/Activity/Limits/Settings와 기존 기능 전체다. 현재는 일부분만 실행 검증했다.
+`launcher/native-webview2/`에 Win32 + WebView2 호스트, 기존 React 메뉴와 Bun action backend 및 오프라인 비교 도구를 구현했다. 창·트레이·WebView2 controller는 Win32가 관리하며, 메뉴 UI도 WebView2에서 표시한다. 사용자가 선택한 최종 범위는 Browser/Setup/MCP/Accounts/Activity/Limits/Settings와 기존 기능 전체다. 현재 frozen preload의 실제 API 수는 **58개**이며 이름 전체가 일치하는 것을 확인했다. 이전 기록의 59개는 정정한다.
 
-- `tests/native-webview2-browser.test.ts`: 1개 테스트, 28개 assertion. 로컬 문서의 계정 profile 격리, CDP target 소유권, 작업 lease 중 close/quit 거부, 표시 복원, 닫은 controller 제거를 확인했다.
-- `tests/native-webview2-ui.test.ts`: 1개 테스트, 13개 assertion. 기존 7개 메뉴 렌더링, preload의 59개 API 이름, 설정 저장 및 잘못된 설정 거부, 페이지 오류 0을 확인했다. 모든 메뉴의 실사용 기능 검증은 아니다.
-- `tests/native-webview2-control.test.ts`: 1개 테스트, 19개 assertion. 로컬 bearer control의 turn 시작/heartbeat/approval/end/재사용/해제와 잘못된 helper 신원 거부를 확인했다. ChatGPT 로그인이나 실제 Native2 emission 검증은 아니다.
-- 이후 추가한 GUI bootstrap/부모 stdio 연결/descriptor PID 변경은 C++ 빌드만 통과했다. 위 테스트 결과를 이 추가 경로에 적용하지 않는다. 배포 packaging, autostart, 업그레이드/guardian/rollback, 로그인 지속성, 실제 MCP capture→observe→ACK는 미완료다.
+- 브라우저 fixture: profile 격리, 소유 CDP target, lease 중 close/quit 거부, 표시 복원, controller 8회 생성·제거.
+- control fixture: bearer 인증, helper 소유권 거부, heartbeat/approval/end, 유지된 문서 재사용·해제, 활성 turn 중 런처 종료 거부.
+- UI fixture: 7개 메뉴의 제목과 화면 전환 완료, 58개 API 이름의 전체 일치, 설정 저장과 잘못된 설정 거부, 페이지 오류 0.
+- GUI fixture 3개: 패키지 실행 파일에서 부모 stdio backend 시작, 명시적 DEV 및 기본 DEV, 격리 descriptor의 부모 PID 일치, UI를 통한 정상 종료와 backend 종료. 별도 사례에서 테스트 소유 부모 프로세스가 사라지면 backend 서버도 종료됨을 확인했다. 운영 descriptor를 쓰지 않고 bridge daemon은 시작하지 않았다.
+- controller 생성 도중 종료 fixture: 대기 중인 표시·줌·focus 명령을 취소하고 실제 controller 해제를 확인.
+- 총 7개 고유 사례가 통과했다. action packaging 수정 뒤 영향받는 control/UI/GUI 사례를 재검증했고, 부모 종료 처리 추가 뒤 control 및 GUI 3개 사례를 다시 확인했다. C++ Release 빌드, TypeScript 검사, 변경 CJS 문법 검사를 별도로 수행했다.
+
+DEV profile을 backend 인자로 전달하지 않던 오류, DEV 경로를 운영 profile 비교에 넣던 오류, TypeScript 의존성의 잘못된 상대 경로, 고해상도 초기 창 크기를 수정했다. 종료 전에 UI polling을 멈추고, 해제 중인 controller에 늦게 표시 명령을 보내지 않도록 했다. 활성 turn이 있으면 종료 전에 거부하므로 lease를 삭제해서 종료 검증을 통과시키지 않는다.
+
+기존 launcher action은 패키지 생성 시 TypeScript AST로 추출한다. 실행 시에는 frozen `main.cjs` SHA256과 일치하는 action 묶음을 읽어 동일 handler를 등록한다. 패키지 backend에는 TypeScript compiler를 싣지 않는다. 순차 GUI 측정에서 전체 private bytes는 추출 이전 644.1/648.4 MiB, 패키지 action 적용 뒤 597.1/600.8 MiB, 최종 lifecycle 검증에서 599.6/600.8 MiB였다. 각 값은 Settings까지 7개 메뉴를 열어 본 뒤의 native host+Bun+WebView2 합계이며, ChatGPT 대화와 bridge daemon은 제외했다. 전체 Electron GUI의 동일 조건 baseline은 아직 없다.
+
+검토용 capsule은 `C:/Users/Administrator/.codex-chatgpt-web/builds/native-webview2-followup-20261007-01a1119c/prototype/`에 생성한다. `Launch-Prototype.ps1`은 capsule 아래 별도 DEV profile과 `--offline`으로 실행한다. capsule의 `prototype-package.json`에 소스 revision, 파일 해시와 외부 runtime 의존성을 기록한다. 설치된 WebView2와 명시된 R12 runtimeRoot가 필요하므로 독립적인 배포 release가 아니다. 로그인 지속성·마이그레이션, 실사용 setup/MCP/Native2 ACK, autostart, update feed와 guardian/rollback 통합은 후속 검증 범위다.
+
+## 동일 viewport의 후속 비교
+
+`comparison-final/comparison.json`은 725×431 CSS pixels, DPR 1, 동일 120만 자 `<pre>` 문서와 두 profile을 사용했다. 각 값은 1회 순차 측정의 프로세스 private bytes 합계이며 빈 bootstrap 탭 하나가 포함된다.
+
+| 문서 탭 수/단계 | WebView2 전체 | 최소 Electron 전체 | WebView2 본체 | Electron 본체 |
+| --- | ---: | ---: | ---: | ---: |
+| 대기 | 139.1 MiB | 98.4 MiB | 3.8 MiB | 41.7 MiB |
+| 1 | 334.1 MiB | 320.4 MiB | 3.7 MiB | 43.4 MiB |
+| 2 | 520.2 MiB | 468.0 MiB | 3.9 MiB | 45.2 MiB |
+| 4 | 870.0 MiB | 756.7 MiB | 3.9 MiB | 47.9 MiB |
+| 4개 문서 탭 해제 뒤 | 191.3 MiB | 181.9 MiB | 3.9 MiB | 46.9 MiB |
+
+WebView2 156.0.4314.8 beta와 Electron의 Chromium 146.0.7680.216으로 엔진 버전이 다르다. 각 단계의 scalar DOM 관찰 7회 중앙값은 native 0.35~0.54ms, Electron 0.34~0.50ms였다. 탭 선택 후 CDP 왕복은 native 0.50~0.59ms, Electron 0.98~1.06ms였다. native는 stdio, Electron 비교 shim은 loopback HTTP를 쓰므로 순수 엔진 선택 성능으로 해석하지 않는다. 짧은 idle CPU sample은 최대 약 0.057코어였으며 지속 부하 또는 누수 검증은 아니다.
+
+4개 문서 해제 뒤 양쪽 controller inventory는 bootstrap만 남았다. 메모리는 크게 줄었지만 첫 대기 수준까지 돌아오지 않았고, 이 한 번의 release cycle로 메모리 누수 여부를 판정할 수 없다. 최소 host 비교에서는 메뉴 backend·bridge daemon/helper·공통 측정 harness를 제외했다. 위 GUI 전체 수치와 합치거나 운영 제품의 절감률로 환산하지 않는다. 실제 ChatGPT 페이지의 DOM, 모델/effort 선택, compaction, ACK 지연은 별도 문제다.
+
+후속 증거는 `C:/Users/Administrator/.codex-chatgpt-web/builds/native-webview2-followup-20261007-01a1119c/`의 `build.json`, `comparison-final/`, `verification-final/`, `verification-packaged/`, `verification-lifecycle/`에 보존한다. 중간 `comparison/`은 대기 viewport가 달라 대기 비교 근거로 사용하지 않는다. 초기 실패 fixture가 남긴 오프라인 backend 4개는 실행 파일 경로와 `--offline` 신원을 확인해 정리했고, 최종 테스트 뒤 이 작업 소유 native/Bun 프로세스 잔류는 0개였다. Pro/인증된 prompt 전송은 모두 0회다.
+
+## 이전 비교 기록
 
 동일한 120만 자 로컬 문서와 viewport를 사용한 단일 순차 측정의 private bytes 합계는 다음과 같다. 각 행에는 문서 탭 외 빈 bootstrap 탭 하나가 포함된다.
 
@@ -19,15 +47,15 @@
 | 2 | 563.5 MiB | 486.8 MiB | 3.8 MiB | 44.6 MiB |
 | 4 | 984.9 MiB | 774.4 MiB | 3.8 MiB | 46.5 MiB |
 
-WebView2 155.0.4283.39와 Electron 41.10.7/Chromium 146.0.7680.216의 엔진 버전은 다르다. 공통 Playwright 측정 harness, bridge daemon/helper와 전체 메뉴 backend는 합계에서 제외했다. 따라서 이 결과로 전체 제품의 절감률이나 RAM 누수 해결을 주장할 수 없다. 호스트 본체는 작아졌지만 이 조건의 전체 합계는 증가했으므로 운영 전환을 보류했다.
+이전 실행은 DPR 2.5, WebView2 155.0.4283.39와 Electron 41.10.7/Chromium 146.0.7680.216이었다. 공통 Playwright 측정 harness, bridge daemon/helper와 전체 메뉴 backend는 합계에서 제외했다. 이 조건에서도 호스트 본체는 작아졌지만 전체 합계는 증가했다. 후속 실행과 엔진/DPR이 달라 전후 개선율을 계산하지 않는다.
 
 증거는 `C:/Users/Administrator/.codex-chatgpt-web/builds/native-webview2-20261007-01a1119c/verification/` 및 `comparison-matched/comparison.json`에 보존했다. 이전 `comparison/comparison.json`은 viewport가 달라 절감 주장에 사용하지 않는다. 운영 계정/설정/descriptor는 시제품 테스트에서 변경하지 않았으며 Pro 테스트 전송은 0회다.
 
-전용 Win32 호스트에 시스템 WebView2를 붙이는 구조가 우선 후보다. 런처의 메뉴·탭·설정은 네이티브 UI로 표시하고, 웹 콘텐츠에만 WebView2를 사용한다. Electron과 WebView2를 동시에 상주시켜 두 웹 엔진을 유지하는 구성은 비교 후보에서 제외한다. 웹 엔진을 자체 구현하는 경우에는 HTML/CSS/JavaScript, 네트워크, 인증, GPU 합성까지 ChatGPT와 호환되어야 하므로 전용 호스트 개발과 별개의 큰 범위다.
+전용 Win32 호스트에 시스템 WebView2를 붙이는 구조를 사용했다. 현재 시제품은 기존 메뉴·설정을 React/WebView2로 재사용하며 순수 Win32 메뉴로 다시 구현하지 않았다. Electron과 WebView2를 동시에 유지하는 구조는 시제품에서 쓰지 않는다. 웹 엔진 자체 구현은 HTML/CSS/JavaScript, 네트워크, 인증, GPU 합성까지 ChatGPT와 호환되어야 하므로 전용 호스트와 별개의 범위다.
 
 ## 확인한 설치 환경과 현재 비용
 
-- 현재 PC: .NET 10 및 WebView2 Evergreen 155.0.4283.39 설치 확인.
+- 이전 환경 조회: .NET 10 및 WebView2 Evergreen 155.0.4283.39. 후속 fixture가 실제 반환한 runtime은 156.0.4314.8 beta였다.
 - 현재 Electron 실행 파일의 프로세스 7개를 한 번 조회한 값: private bytes 합계 약 852.2 MiB, working set 합계 약 1,086 MiB. 탭 수가 바뀌는 활성 작업 중 스냅샷이며, 공유 메모리를 포함하는 working set 합계는 고유 물리 RAM 사용량이 아니다. 콘텐츠·GPU·Node helper를 포함하므로 이 수치를 호스트 교체 절감량으로 사용할 수 없다.
 - 기존 런처는 Electron 메인 프로세스, React UI 렌더러, ChatGPT WebContentsView, `ELECTRON_RUN_AS_NODE` helper를 사용한다. ChatGPT의 DOM/JS 비용은 호스트를 바꾸어도 남는다.
 - WebView2는 Chromium 기반 CDP를 지원한다. 여러 탭에 동일 환경을 사용하고, 같은 사용자 데이터 폴더 안에서 계정별 profile을 분리할 수 있다. 위 시제품의 제한된 비교에서는 전체 메모리 절감이 확인되지 않았다.

@@ -78,7 +78,7 @@ std::wstring commandArgument(const std::wstring& argument) {
     }
     result.append(slashes * 2, L'\\'); return result + L'"';
 }
-void startBackend(const std::wstring& userDataFolder, bool hidden, bool offline) {
+void startBackend(const std::wstring& userDataFolder, bool hidden, bool offline, bool development) {
     const auto executable = executablePath(); const auto root = std::filesystem::path(executable).parent_path();
     const auto bun = root / L"backend" / L"bun.exe", entry = root / L"backend" / L"entry.cjs";
     if (!std::filesystem::is_regular_file(bun) || !std::filesystem::is_regular_file(entry)) throw std::runtime_error("Native launcher backend package is missing");
@@ -91,6 +91,7 @@ void startBackend(const std::wstring& userDataFolder, bool hidden, bool offline)
     startup.hStdInput = childInput; startup.hStdOutput = childOutput; startup.hStdError = log;
     auto command = commandArgument(bun.wstring()) + L" " + commandArgument(entry.wstring()) + L" --native-executable " + commandArgument(executable) + L" --user-data-folder " + commandArgument(userDataFolder);
     if (hidden) command += L" --hidden"; if (offline) command += L" --offline";
+    if (development) command += L" --dev-profile";
     PROCESS_INFORMATION child{};
     const BOOL started = CreateProcessW(bun.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, root.c_str(), &startup, &child);
     CloseHandle(childInput); CloseHandle(childOutput); if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
@@ -621,7 +622,8 @@ void readCommands() {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     std::wstring userDataFolder;
-    bool hidden = false, noHome = false, offline = false; controlledMode = false;
+    // The prototype defaults to the existing DEV namespace, including double-click startup.
+    bool hidden = false, noHome = false, offline = false, development = true; controlledMode = false;
     int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     try {
         for (int index = 1; index < argc; ++index) {
@@ -629,6 +631,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
             if (argument == L"--hidden") hidden = true;
             else if (argument == L"--controlled" || argument == L"--standalone") controlledMode = true;
             else if (argument == L"--offline") offline = true;
+            else if (argument == L"--dev-profile") development = true;
             else if (argument == L"--no-home") noHome = true;
             else if (argument == L"--user-data-folder" && index + 1 < argc) userDataFolder = argv[++index];
             else if (argument == L"--debug-port" && index + 1 < argc) debugPort = std::stoi(argv[++index]);
@@ -636,8 +639,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
         }
         if (userDataFolder.empty()) {
             wchar_t local[MAX_PATH]{};
-            if (!GetEnvironmentVariableW(L"APPDATA", local, MAX_PATH)) throw std::runtime_error("Application data folder unavailable");
-            userDataFolder = std::wstring(local) + L"\\Codex Web GPT\\native-webview2";
+            if (development) {
+                if (GetEnvironmentVariableW(L"CODEX_WEB_GPT_DEV_HOME", local, MAX_PATH)) {
+                    userDataFolder = std::wstring(local) + L"\\launcher\\native-webview2";
+                } else {
+                    if (!GetEnvironmentVariableW(L"USERPROFILE", local, MAX_PATH)) throw std::runtime_error("Development home unavailable");
+                    userDataFolder = std::wstring(local) + L"\\.codex-chatgpt-web-dev\\launcher\\native-webview2";
+                }
+            } else {
+                if (!GetEnvironmentVariableW(L"APPDATA", local, MAX_PATH)) throw std::runtime_error("Application data folder unavailable");
+                userDataFolder = std::wstring(local) + L"\\Codex Web GPT\\native-webview2";
+            }
         }
         if (debugPort < 0 || debugPort > 65535) throw std::runtime_error("Invalid CDP port");
         std::filesystem::create_directories(userDataFolder);
@@ -656,11 +668,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     windowClass.lpszClassName = L"CodexWebGPTNativeHost"; windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION); windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&windowClass);
-    mainWindow = CreateWindowExW(0, windowClass.lpszClassName, L"Codex Web GPT", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1120, 800, nullptr, nullptr, instance, nullptr);
+    const UINT initialDpi = GetDpiForSystem();
+    mainWindow = CreateWindowExW(0, windowClass.lpszClassName, L"Codex Web GPT", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+        MulDiv(1120, initialDpi, 96), MulDiv(800, initialDpi, 96), nullptr, nullptr, instance, nullptr);
     if (!mainWindow) { CoUninitialize(); ReleaseMutex(instanceLock); CloseHandle(instanceLock); return 1; }
     if (!controlledMode) {
         noHome = true;
-        try { if (!debugPort) debugPort = availablePort(); startBackend(userDataFolder, hidden, offline); }
+        try { if (!debugPort) debugPort = availablePort(); startBackend(userDataFolder, hidden, offline, development); }
         catch (const std::exception& error) { failure(0, error.what()); DestroyWindow(mainWindow); CoUninitialize(); ReleaseMutex(instanceLock); CloseHandle(instanceLock); return 1; }
     }
     newButton = CreateWindowW(L"BUTTON", L"새 탭", WS_CHILD | WS_VISIBLE, 5, 5, 64, 25, mainWindow, reinterpret_cast<HMENU>(101), instance, nullptr);

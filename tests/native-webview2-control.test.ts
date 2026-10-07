@@ -9,9 +9,12 @@ const {startNativeLauncher}=require('../launcher/native-webview2/backend.cjs');
 test.skipIf(!process.env.CHATGPT_NATIVE_HOST_BINARY||!process.env.CHATGPT_NATIVE_RUNTIME_ROOT)('native WebView2 preserves authenticated control leases, retained targets and owner rejection',async()=>{
   const root=resolve(process.env.CHATGPT_NATIVE_TEST_OUTPUT||'output/native-webview2'),caseRoot=join(root,'control-'+randomBytes(6).toString('hex'));mkdirSync(caseRoot,{recursive:true});
   const {legacyRoot}=freezeLegacy(resolve(import.meta.dir,'..'),join(caseRoot,'capsule'));
-  const application=await startNativeLauncher({nativeExecutable:process.env.CHATGPT_NATIVE_HOST_BINARY,legacyRoot,rendererRoot:resolve('launcher/dist'),runtimeRoot:process.env.CHATGPT_NATIVE_RUNTIME_ROOT,
+  const application=await startNativeLauncher({nativeExecutable:process.env.CHATGPT_NATIVE_HOST_BINARY,legacyRoot,rendererRoot:resolve(process.env.CHATGPT_NATIVE_RENDERER_ROOT||'launcher/dist'),runtimeRoot:process.env.CHATGPT_NATIVE_RUNTIME_ROOT,
     profile:{kind:'development',displayName:'Codex Web GPT DEV',coreHome:join(caseRoot,'core'),userData:join(caseRoot,'launcher'),codexHome:join(caseRoot,'codex'),browserPartition:'persist:codex-web-gpt-dev-chatgpt'},startRuntime:false});
   let connection;
+  const protocol:any[]=[];
+  application.client.on('request',(entry:any)=>protocol.push({stage:'request',...entry}));
+  application.client.on('reply',(entry:any)=>protocol.push({stage:'reply',...entry}));
   const descriptor=JSON.parse(readFileSync(application.descriptorPath,'utf8'));
   const post=(route:string,body:object,authorized=true)=>fetch(descriptor.control.endpoint+route,{method:'POST',headers:{'content-type':'application/json',...(authorized?{authorization:'Bearer '+descriptor.control.token}:{})},body:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
   const owner={traceId:'native_fixture_one',helperPid:process.pid,conversationKey:'a'.repeat(64),connectorIdentity:'OfflineFixture'};
@@ -23,6 +26,9 @@ test.skipIf(!process.env.CHATGPT_NATIVE_HOST_BINARY||!process.env.CHATGPT_NATIVE
     const tab=[...application.browserHost.turnTabs.values()].find((entry:any)=>entry.traceId===owner.traceId) as any;
     await application.platform.flush();
     await expect(application.client.closeTab(tab.view.id)).rejects.toThrow('Active turn tab');
+    expect(await application.close()).toMatchObject({ok:false,message:'Finish or cancel active ChatGPT turns before quitting'});
+    expect(await connection.page.evaluate(()=>(window as any).nativeFixtureDocument)).toBe('preserved');
+    expect((await application.client.snapshot()).tabs.some((entry:any)=>entry.tabId===tab.view.id&&entry.leased)).toBe(true);
     expect((await post('/v1/turn/heartbeat',{...owner,helperPid:process.pid+9876})).status).toBe(400);
     expect((await post('/v1/turn/approval',{...owner,pending:true})).status).toBe(200);
     expect(tab.approvalPending).toBe(true);
@@ -39,5 +45,5 @@ test.skipIf(!process.env.CHATGPT_NATIVE_HOST_BINARY||!process.env.CHATGPT_NATIVE
     await application.platform.flush();
     expect(application.browserHost.turnTabs.size).toBe(0);
     writeFileSync(join(root,'native-control-verification.json'),JSON.stringify({at:new Date().toISOString(),bearerRequired:true,wrongOwnerRejected:true,leasedCloseRejected:true,retainedDocumentPreserved:true,connectorIdentityPreserved:true,releaseCompleted:true,scope:'Offline real WebView2 and existing HTTP control server; no ChatGPT authentication, prompt send, MCP tool emission or boundary ACK proof.',proTestSends:0,authenticatedSends:0},null,2));
-  } finally {await connection?.browser.close().catch(()=>{});const result=await application.close();if(!result.ok){application.client.child.kill();throw Error(result.message);}}
+  } finally {await connection?.browser.close().catch(()=>{});const result=await application.close();writeFileSync(join(caseRoot,'native-control-protocol.json'),JSON.stringify(protocol,null,2));if(!result.ok){application.client.child.kill();throw Error(result.message);}}
 },60000);

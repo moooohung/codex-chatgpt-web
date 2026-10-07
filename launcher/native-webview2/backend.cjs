@@ -62,13 +62,17 @@ async function startNativeLauncher({nativeExecutable,legacyRoot,rendererRoot,run
     const requestQuit=async()=>{
       if(closing)return {ok:false,message:'Native launcher shutdown is already in progress'};
       const operation=runtimeHost.currentOperation()||browserHost.currentOperation();if(operation)return {ok:false,message:'Wait for '+operation+' to finish before quitting'};
+      if([...browserHost.turnTabs.values()].some(tab=>tab.status==='running'))return {ok:false,message:'Finish or cancel active ChatGPT turns before quitting'};
       closing=true;
+      // Stop renderer polling before disposing its browser surfaces. A late
+      // snapshot must not reconfigure a controller already closing.
+      dispatcher.accepting=false;uiReady=false;
       try {
         if(startRuntime)await runtimeSupervisor.shutdown({cancelActiveTurns:true,force:true});scope?.stopCatalogVerificationMonitor();
         await browserHost.persistSession();browserHost.destroy();await platform.close();await control.close();
         dispatcher.destroy();uiReady=false;await renderer.close();await client.closeTab('launcher_ui');await client.quit();
         return {ok:true};
-      } catch(error){closing=false;logger.error('native.shutdown_failed',{message:error.message});return {ok:false,message:error.message};}
+      } catch(error){closing=false;dispatcher.accepting=true;uiReady=true;logger.error('native.shutdown_failed',{message:error.message});return {ok:false,message:error.message};}
     };
     mainWindow.on('close',event=>{event.preventDefault();if(stateStore.read().keepRunningOnClose)mainWindow.hide();else void requestQuit();});
     mainWindow.on('quit-requested',()=>{void requestQuit();});
@@ -86,7 +90,15 @@ async function startNativeLauncher({nativeExecutable,legacyRoot,rendererRoot,run
     uiReady=true;
     if(!hidden)mainWindow.show();
     if(startRuntime)await runtimeSupervisor.startIfConfigured();
-    return {client,platform,browserHost,runtimeHost,runtimeSupervisor,dispatcher,stateStore,logger,ui,uiUrl:renderer.url,actions,descriptorPath,close:requestQuit};
+    const parentExited=async()=>{
+      closing=true;uiReady=false;dispatcher.destroy();scope.stopCatalogVerificationMonitor();
+      // The native parent already owns no live controllers after process exit.
+      // Stop accepting work and dispose backend servers without pretending that
+      // a failed native command acknowledged a tool or released a live lease.
+      if(startRuntime)await runtimeSupervisor.shutdown({cancelActiveTurns:true,force:true});
+      browserHost.destroy();await Promise.all([control.close(),renderer.close()]);
+    };
+    return {client,platform,browserHost,runtimeHost,runtimeSupervisor,dispatcher,stateStore,logger,ui,uiUrl:renderer.url,actions,descriptorPath,close:requestQuit,isClosing:()=>closing,parentExited};
   } catch(error) {
     logger.error('native.startup_failed',{message:error.message});
     browserHost?.destroy();await platform.close().catch(()=>{});await control?.close().catch(()=>{});await renderer?.close().catch(()=>{});dispatcher?.destroy();

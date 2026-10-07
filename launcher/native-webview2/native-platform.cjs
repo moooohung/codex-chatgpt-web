@@ -82,7 +82,7 @@ class NativeView {
   }
   setBounds(bounds){this.bounds={...bounds};this.sync();}
   setVisible(visible){this.visible=visible===true;this.sync();}
-  sync(){this.platform.background(this.webContents.ready.then(()=>this.platform.client.request('bounds',[this.id,...['x','y','width','height'].map(key=>Math.round(this.bounds[key])),this.visible?'1':'0'])));}
+  sync(){this.platform.background(this.webContents.ready.then(()=>{if(!this.webContents.isDestroyed())return this.platform.client.request('bounds',[this.id,...['x','y','width','height'].map(key=>Math.round(this.bounds[key])),this.visible?'1':'0']);}));}
 }
 
 class NativeContents extends EventEmitter {
@@ -117,13 +117,13 @@ class NativeContents extends EventEmitter {
   }
   async insertCSS(css) { const key='native-css-'+randomBytes(6).toString('hex');await this.executeJavaScript(`(()=>{const style=document.createElement('style');style.id=${JSON.stringify(key)};style.textContent=${JSON.stringify(css)};(document.head||document.documentElement).append(style);})()`);this.cssKeys.add(key);return key; }
   async removeInsertedCSS(key){if(!this.cssKeys.delete(key))return;await this.executeJavaScript(`document.getElementById(${JSON.stringify(key)})?.remove()`);}
-  setZoomFactor(value){this.zoomFactor=value;this.platform.background(this.ready.then(()=>this.platform.client.request('zoom',[this.tabId,String(value)])));}
+  setZoomFactor(value){this.zoomFactor=value;this.platform.background(this.ready.then(()=>{if(!this.destroyed)return this.platform.client.request('zoom',[this.tabId,String(value)]);}));}
   setZoomLevel(level){this.setZoomFactor(Math.pow(1.2,level));}
   setBackgroundThrottling(){/* Active leases remain drawable; no WebView2 suspension is requested. */}
   enableDeviceEmulation(options){const size=options.viewSize;this.platform.background(this.cdp('Emulation.setDeviceMetricsOverride',{width:size.width,height:size.height,deviceScaleFactor:options.deviceScaleFactor||0,mobile:false}));}
   disableDeviceEmulation(){this.platform.background(this.cdp('Emulation.clearDeviceMetricsOverride',{}));}
   setWindowOpenHandler(handler){this.windowOpenHandler=handler;}
-  backgroundAction(action){this.platform.background(this.ready.then(()=>this.platform.client.request('action',[this.tabId,action])));}
+  backgroundAction(action){this.platform.background(this.ready.then(()=>{if(!this.destroyed)return this.platform.client.request('action',[this.tabId,action]);}));}
   focus(){this.backgroundAction('focus');}
   stop(){this.backgroundAction('stop');}
   reload(){return this.reloadIgnoringCache(false);}
@@ -220,7 +220,7 @@ function loadNativeBrowserHost(file,platform) {
   const LegacyHost=module.exports.BrowserHost;
   return class NativeBrowserHost extends LegacyHost {
     async beginTurn(...args){const result=await super.beginTurn(...args);this.syncPowerSaveBlocker();await platform.flush();return result;}
-    syncPowerSaveBlocker(){super.syncPowerSaveBlocker();for(const tab of this.turnTabs.values())platform.background(tab.view.webContents.ready.then(()=>platform.client.setLease(tab.view.id,tab.status==='running')));}
+    syncPowerSaveBlocker(){super.syncPowerSaveBlocker();for(const tab of this.turnTabs.values())platform.background(tab.view.webContents.ready.then(()=>{if(!tab.view.webContents.isDestroyed())return platform.client.setLease(tab.view.id,tab.status==='running');}));}
     writeDescriptor(){super.writeDescriptor();const descriptor=JSON.parse(readFileSync(this.descriptorPath,'utf8'));descriptor.pid=platform.client.pid;originalRequire('./atomic-file.cjs').writePrivateFileAtomic(this.descriptorPath,JSON.stringify(descriptor,null,2)+'\n');}
     destroy(){super.destroy();}
   };

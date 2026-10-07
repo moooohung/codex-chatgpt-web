@@ -4,13 +4,14 @@ import {mkdirSync,writeFileSync,readFileSync} from 'node:fs';
 import {randomBytes} from 'node:crypto';
 import {chromium} from 'playwright-core';
 import {selectLauncherPage} from '../src/launcher-browser-host';
+import {copyFor} from '../launcher/src/i18n';
 const {freezeLegacy}=require('../launcher/native-webview2/freeze-legacy.cjs');
 const {startNativeLauncher}=require('../launcher/native-webview2/backend.cjs');
 
 test.skipIf(!process.env.CHATGPT_NATIVE_HOST_BINARY||!process.env.CHATGPT_NATIVE_RUNTIME_ROOT)('native launcher displays every existing menu and uses the existing action handlers',async()=>{
   const root=resolve(process.env.CHATGPT_NATIVE_TEST_OUTPUT||'output/native-webview2'),caseRoot=join(root,'ui-'+randomBytes(6).toString('hex'));mkdirSync(caseRoot,{recursive:true});
   const {legacyRoot}=freezeLegacy(resolve(import.meta.dir,'..'),join(caseRoot,'capsule'));
-  const application=await startNativeLauncher({nativeExecutable:process.env.CHATGPT_NATIVE_HOST_BINARY,legacyRoot,rendererRoot:resolve('launcher/dist'),runtimeRoot:process.env.CHATGPT_NATIVE_RUNTIME_ROOT,
+  const application=await startNativeLauncher({nativeExecutable:process.env.CHATGPT_NATIVE_HOST_BINARY,legacyRoot,rendererRoot:resolve(process.env.CHATGPT_NATIVE_RENDERER_ROOT||'launcher/dist'),runtimeRoot:process.env.CHATGPT_NATIVE_RUNTIME_ROOT,
     profile:{kind:'development',displayName:'Codex Web GPT DEV',coreHome:join(caseRoot,'core'),userData:join(caseRoot,'launcher'),codexHome:join(caseRoot,'codex'),browserPartition:'persist:codex-web-gpt-dev-chatgpt'},startRuntime:false});
   let browser;
   const errors:string[]=[],menus:string[]=[];
@@ -25,9 +26,11 @@ test.skipIf(!process.env.CHATGPT_NATIVE_HOST_BINARY||!process.env.CHATGPT_NATIVE
     const expectedMethods=[...readFileSync(join(legacyRoot,'preload.cjs'),'utf8').matchAll(/^  (\w+):/gm)].map(match=>match[1]);
     expect(methods.sort()).toEqual(expectedMethods.sort());
     expect(application.actions.actionCount).toBeGreaterThanOrEqual(48);
+    const copy=copyFor('en'),titles:Record<string,string>={Setup:copy.devSetupTitle,MCP:copy.devMcpTitle,Accounts:copy.accountsTitle,Activity:copy.activityTitle,Limits:'Limits',Settings:copy.devSettingsTitle,Browser:copy.stepAccount};
     for(const name of ['Setup','MCP','Accounts','Activity','Limits','Settings','Browser']) {
       await page.getByRole('button',{name,exact:true}).click();menus.push(name);
-      await page.waitForTimeout(100);
+      await page.getByRole('heading',{name:titles[name],exact:true}).waitFor({state:'visible',timeout:10000});
+      await page.waitForFunction(()=>Number(getComputedStyle(document.querySelector('.surface-transition')!).opacity)>0.99);
       expect(await page.locator('#root').textContent()).not.toContain('Unknown launcher action');
     }
     const state=await page.evaluate(async()=>{const api=(window as any).codexWebLauncher;await api.setPreference('showBrowserDuringTurns',true);await api.setSidebarState({open:true,width:336});return api.snapshot();});

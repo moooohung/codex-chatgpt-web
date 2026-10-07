@@ -25,6 +25,7 @@ class NativeHostClient extends EventEmitter {
     this.ready = new Promise((accept, reject) => { this.acceptReady = accept; this.rejectReady = reject; });
     this.exited = new Promise(accept => { this.acceptExit = accept; });
     this.child.on('error', error => this.fail(error));
+    this.child.stdin.on('error', error => this.fail(error));
     this.child.on('exit', (code, signal) => { this.fail(new Error('Native host exited: ' + code + ' ' + (signal ?? '') + '; ' + this.stderr.slice(-2000))); this.acceptExit({code, signal}); });
     this.child.stderr?.on('data', chunk => { this.stderr = (this.stderr + chunk.toString('utf8')).slice(-8192); });
     if(attached)this.child.stdout.on('end',()=>{this.child.exitCode=0;this.child.emit('exit',0,null);});
