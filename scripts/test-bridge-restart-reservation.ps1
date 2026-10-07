@@ -145,14 +145,20 @@ $armed | ConvertTo-Json -Depth 5
 
     # Exercise the actual transaction's finally path with a failing fixture installer.
     $failure = FixtureReservation 'installer-failure'
-    $failureArmed = RegisterBridgeReservation $failure $source
-    function RequestBridgeQuit($Reservation, $State) {
-        AssertFixture (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetDirectoryName($Reservation.statePath)) 'armed.json')) 'Quit ran before verified reservation'
-        $State.shutdownRequested = $true
-        BridgePhase $Reservation $State 'waiting_for_owned_exit'
-    }
-    # Run now, before its timer. Removing the task at completion cancels the timer.
-    InvokeReservedBridgeMaintenance $failure
+    $failureSource = Join-Path $fixtureRoot 'fixture-failure-worker.ps1'
+    $entry = 'if ($MyInvocation.InvocationName -eq ''.'') { return }'
+    $fixtureQuit = @'
+function RequestBridgeQuit($Reservation, $State) {
+    if (-not (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetDirectoryName($Reservation.statePath)) 'armed.json'))) { throw 'Quit ran before verified reservation' }
+    $State.shutdownRequested = $true
+    BridgePhase $Reservation $State 'waiting_for_owned_exit'
+}
+'@
+    [IO.File]::WriteAllText($failureSource, (Get-Content -LiteralPath $source -Raw).Replace($entry, $fixtureQuit + [Environment]::NewLine + $entry))
+    # The already-armed guardian owns this transaction. A manual Run would race
+    # its five-second timer and leave the fallback guardian in lock-conflict backoff.
+    $failureArmed = RegisterBridgeReservation $failure $failureSource
+    WaitFixture $failure.statePath 'complete' | Out-Null
     $failureState = Get-Content -LiteralPath $failure.statePath -Raw | ConvertFrom-Json
     WaitFixtureGuardian $failureArmed
     AssertFixture ($failureState.phase -eq 'complete' -and $failureState.operationSucceeded -eq $false -and $failureState.recoveredAfterFailure -and $failureState.launcherStarts -eq 1) 'Installer failure did not execute restart recovery'

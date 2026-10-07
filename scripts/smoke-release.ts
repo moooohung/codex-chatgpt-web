@@ -140,7 +140,9 @@ try {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: "chatgpt-web/high", reasoning: { effort: "high" }, input: "test", stream: false }),
   });
-  if (rejectedWhileDraining.status !== 503) {
+  const maintenance = await rejectedWhileDraining.json() as { error?: { code?: string; retryable?: boolean } };
+  if (rejectedWhileDraining.status !== 502 || maintenance.error?.code !== "bridge_maintenance"
+    || maintenance.error.retryable !== true || rejectedWhileDraining.headers.get("retry-after") !== "5") {
     throw new Error(`daemon accepted a new turn while draining: HTTP ${rejectedWhileDraining.status}`);
   }
   const resume = await fetch(`http://127.0.0.1:${port}/admin/resume`, {
