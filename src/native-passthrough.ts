@@ -6,6 +6,7 @@ import {
 } from "./responses/compaction";
 import { BRIDGE_REASONING_PREFIX } from "./responses/reasoning-envelope";
 import { fetchNativeCodex } from "./native-network";
+import { fetchWithNativeCapacityRetry, type NativeCapacityRetryOptions } from "./native-capacity-retry";
 
 const CODEX_BACKEND = "https://chatgpt.com/backend-api/codex";
 const FIRST_PARTY_CODEX_ORIGINATORS = new Set([
@@ -210,6 +211,7 @@ export async function forwardNativeCodexRequest(
   endpoint: NativeCodexEndpoint,
   fetchUpstream: NativeFetch = fetchNativeCodex,
   decodedBody?: unknown,
+  capacityRetryOptions?: NativeCapacityRetryOptions,
 ): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
   if (!authorization.startsWith("Bearer ") || authorization.length <= "Bearer ".length) {
@@ -250,7 +252,7 @@ export async function forwardNativeCodexRequest(
       body = originalBody;
     }
   }
-  const upstreamRequest = new Request(`${CODEX_BACKEND}/${endpoint}${incomingUrl.search}`, {
+  const makeUpstreamRequest = (): Request => new Request(`${CODEX_BACKEND}/${endpoint}${incomingUrl.search}`, {
     method,
     headers,
     ...(body ? { body } : {}),
@@ -259,7 +261,15 @@ export async function forwardNativeCodexRequest(
     // forwarding account headers to a redirect destination.
     redirect: imageRequest ? "manual" : "follow",
   });
-  const upstream = await fetchUpstream(upstreamRequest);
+  const upstream = endpoint === "models" || endpoint === "responses" || endpoint === "responses/compact"
+    ? await fetchWithNativeCapacityRetry(makeUpstreamRequest, fetchUpstream, {
+      ...capacityRetryOptions,
+      onEvent: event => {
+        console.warn(`[codex-chatgpt-web] native_capacity_retry ${JSON.stringify({ endpoint, model, ...event })}`);
+        capacityRetryOptions?.onEvent?.(event);
+      },
+    })
+    : await fetchUpstream(makeUpstreamRequest());
   if (compactionRequest && !upstream.ok) {
     console.warn(`[codex-chatgpt-web] native_compaction_upstream_failed ${JSON.stringify({
       endpoint, model, status: upstream.status,

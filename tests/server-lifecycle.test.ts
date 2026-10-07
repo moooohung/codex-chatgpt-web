@@ -1159,11 +1159,15 @@ test("a drained runtime rejects new model-catalog work before shutdown", async (
     expect(drain.status).toBe(200);
 
     const models = await fetch(`${endpoint}/v1/models`);
-    expect(models.status).toBe(503);
+    expect(models.status).toBe(502);
+    expect(models.headers.get("retry-after")).toBe("5");
+    expect(models.headers.get("x-codex-bridge-error-source")).toBe("maintenance");
     expect(await models.json()).toMatchObject({
       error: {
         type: "server_error",
-        message: "codex-chatgpt-web is draining for a requested service operation",
+        code: "bridge_maintenance",
+        retryable: true,
+        message: expect.stringContaining("not submitted to a model"),
       },
     });
 
@@ -1175,6 +1179,43 @@ test("a drained runtime rejects new model-catalog work before shutdown", async (
   } finally {
     await server.stop(true);
   }
+});
+
+test("maintenance rejects web and native routes distinctly without contacting a model", async () => {
+  let upstreamRequests = 0;
+  let browserRequests = 0;
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config, {
+    fetchUpstream: async () => { upstreamRequests += 1; return Response.json({ results: [] }); },
+    adapterFactory: () => { browserRequests += 1; throw new Error("must not acquire a browser during maintenance"); },
+  });
+  const endpoint = `http://127.0.0.1:${server.port}`;
+  const authorization = { authorization: `Bearer ${config.controlToken}` };
+  try {
+    await fetch(`${endpoint}/admin/drain`, { method: "POST", headers: authorization });
+    const work = [
+      ["/v1/responses", "chatgpt-web/gpt-5.6-sol"], ["/v1/responses", "gpt-6.1-sol"],
+      ["/v1/responses/compact", "chatgpt-web/gpt-5.6-sol"], ["/v1/responses/compact", "gpt-6.1-sol"],
+      ["/v1/alpha/search", undefined], ["/v1/images/generations", undefined], ["/v1/images/edits", undefined],
+    ];
+    for (const [route, model] of work) {
+      const response = await fetch(`${endpoint}${route}`, { method: "POST", headers: authorization,
+        body: JSON.stringify({ model, input: "fixture" }) });
+      expect(response.status).toBe(502);
+      expect(response.headers.get("retry-after")).toBe("5");
+      expect(response.headers.get("x-codex-bridge-error-source")).toBe("maintenance");
+      expect(await response.json()).toMatchObject({ error: { code: "bridge_maintenance", retryable: true } });
+    }
+    expect(upstreamRequests).toBe(0);
+    expect(browserRequests).toBe(0);
+    expect(await (await fetch(`${endpoint}/healthz`)).json()).toMatchObject({
+      active_http_turns: 0, active_browser_turns: 0, maintenance_rejections: work.length,
+    });
+    await fetch(`${endpoint}/admin/resume`, { method: "POST", headers: authorization });
+    const resumed = await fetch(`${endpoint}/v1/alpha/search`, { method: "POST", headers: authorization, body: "{}" });
+    expect(resumed.status).toBe(200);
+    expect(upstreamRequests).toBe(1);
+  } finally { await server.stop(true); }
 });
 
 test("health proves that Codex received a successful augmented model catalog", async () => {
@@ -1306,7 +1347,8 @@ test("standalone native image generation and edits preserve their upstream proto
     const drained = await fetch(`${endpoint}/v1/images/edits`, {
       method: "POST", headers: { authorization: "Bearer test-codex-session" }, body: "{}",
     });
-    expect(drained.status).toBe(503);
+    expect(drained.status).toBe(502);
+    expect(await drained.json()).toMatchObject({ error: { code: "bridge_maintenance" } });
     expect(requests).toHaveLength(2);
   } finally {
     await server.stop(true);

@@ -13,15 +13,18 @@ $log = Join-Path $directory 'events.jsonl'
 import { appendFileSync } from "node:fs";
 const log=(event:string)=>appendFileSync(process.argv[3],JSON.stringify({event})+"\n");
 let drainBad=false;
+let browserTurns=2, httpTurns=3;
 const server=Bun.serve({hostname:"127.0.0.1",port:Number(process.argv[2]),fetch(request,server){
  const url=new URL(request.url);
  if(url.pathname==="/devtools/browser/fixture") {server.upgrade(request);return;}
  if(url.pathname==="/json/version")return Response.json({webSocketDebuggerUrl:`ws://127.0.0.1:${server.port}/devtools/browser/fixture`});
- if(url.pathname==="/admin/drain") {log("drain");return Response.json({status:"ok",accepting_turns:drainBad,active_browser_turns:2});}
+ if(url.pathname==="/admin/drain") {log("drain");return Response.json({status:"ok",accepting_turns:drainBad,active_browser_turns:browserTurns,active_http_turns:httpTurns});}
  if(url.pathname==="/admin/resume") {log("resume");return Response.json({status:"ok"});}
  if(url.pathname==="/bad-drain") {drainBad=true;return Response.json({status:"ok"});}
+ if(url.pathname==="/native-only") {browserTurns=0;return Response.json({status:"ok"});}
+ if(url.pathname==="/browser-work") {browserTurns=2;return Response.json({status:"ok"});}
  if(url.pathname==="/shutdown") {setTimeout(()=>{server.stop(true);process.exit(0)},50);return Response.json({status:"stopping"});}
- return Response.json({status:"ok",pid:process.pid,active_browser_turns:2,accepting_turns:true});
+ return Response.json({status:"ok",pid:process.pid,active_browser_turns:browserTurns,active_http_turns:httpTurns,accepting_turns:true});
 },websocket:{message(ws,message){if(JSON.parse(String(message)).method==="Browser.close")log("quit");},close(){}}});
 setTimeout(()=>{server.stop(true);process.exit(0)},60_000);
 '@)
@@ -43,11 +46,16 @@ try {
     $rejected = $false
     try { RequestBridgeQuit $reservation $state } catch { $rejected = $_.Exception.Message -match 'browser work changed' }
     if (-not $rejected -or (Test-Path -LiteralPath $log)) { throw 'Default active-turn guard sent drain or quit' }
+    Invoke-RestMethod -Uri ($uri + '/native-only') -TimeoutSec 1 | Out-Null
+    $nativeRejected = $false
+    try { RequestBridgeQuit $reservation $state } catch { $nativeRejected = $_.Exception.Message -match 'native HTTP turns' }
+    if (-not $nativeRejected -or (Test-Path -LiteralPath $log)) { throw 'Native-only active work sent drain or quit' }
+    Invoke-RestMethod -Uri ($uri + '/browser-work') -TimeoutSec 1 | Out-Null
     $reservation.allowActiveBrowserTurns = $true
     RequestBridgeQuit $reservation $state
     Start-Sleep -Milliseconds 150
     $events = Get-Content -LiteralPath $log
-    if ($events.Count -ne 2 -or $events[0] -notmatch 'drain' -or $events[1] -notmatch 'quit' -or $state.browserTurnsAtQuit -ne 2) { throw 'Explicit active maintenance did not use normal quit with count receipt' }
+    if ($events.Count -ne 2 -or $events[0] -notmatch 'drain' -or $events[1] -notmatch 'quit' -or $state.browserTurnsAtQuit -ne 2 -or $state.httpTurnsAtQuit -ne 3) { throw 'Explicit active maintenance did not use normal quit with count receipt' }
     $reservation.priorDaemonPid = -1
     $ownerRejected = $false
     try { RequestBridgeQuit $reservation $state } catch { $ownerRejected = $_.Exception.Message -match 'daemon or browser work changed' }
@@ -58,7 +66,7 @@ try {
     try { RequestBridgeQuit $reservation $state } catch { $drainRejected = $_.Exception.Message -match 'drain was not acknowledged' }
     $events = Get-Content -LiteralPath $log
     if (-not $drainRejected -or $events.Count -ne 4 -or $events[2] -notmatch 'drain' -or $events[3] -notmatch 'resume') { throw 'Unacknowledged drain did not resume before rejecting quit' }
-    $report = @{ passed = $true; cases = @('default_busy_guard_no_writes','explicit_active_normal_quit','daemon_owner_guard','unacknowledged_drain_resumes'); browserTurnsAtQuit = 2; realLauncherQuitRequests = 0; fixtureRoot = $directory }
+    $report = @{ passed = $true; cases = @('default_busy_guard_no_writes','native_only_busy_guard_no_writes','explicit_active_normal_quit','daemon_owner_guard','unacknowledged_drain_resumes'); browserTurnsAtQuit = 2; httpTurnsAtQuit = 3; realLauncherQuitRequests = 0; fixtureRoot = $directory }
     if ($OutputDirectory) { [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($OutputDirectory)) | Out-Null; WriteBridgeJson (Join-Path $OutputDirectory 'maintenance-active-tests.json') $report }
     $report | ConvertTo-Json -Depth 5
 } finally {

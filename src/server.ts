@@ -855,6 +855,20 @@ export async function compactRequest(
   return Response.json({ output: buildCompactV1Output(extractCompactUserMessages(input), summary) });
 }
 
+/** HTTP 503 is interpreted as model capacity by Codex. Local maintenance uses retryable 502. */
+export function bridgeMaintenanceResponse(): Response {
+  return Response.json({ error: {
+    type: "server_error",
+    code: "bridge_maintenance",
+    message: "codex-chatgpt-web is draining for a requested service operation. "
+      + "This request was not submitted to a model; retry after the bridge resumes.",
+    retryable: true,
+  } }, { status: 502, headers: {
+    "retry-after": "5",
+    "x-codex-bridge-error-source": "maintenance",
+  } });
+}
+
 export function startServer(
   config: AppConfig,
   dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
@@ -872,6 +886,14 @@ export function startServer(
     });
   }
   let draining = false;
+  let maintenanceRejections = 0;
+  const rejectDuringMaintenance = (endpoint: string): Response => {
+    maintenanceRejections += 1;
+    console.warn(`[codex-chatgpt-web] maintenance_request_rejected ${JSON.stringify({
+      source: "bridge_maintenance", endpoint, status: 502, retryAfterSeconds: 5,
+    })}`);
+    return bridgeMaintenanceResponse();
+  };
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
   let lastSuccessfulModelCatalogRequestAt: string | null = null;
@@ -906,6 +928,7 @@ export function startServer(
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
           accepting_turns: !draining,
+          maintenance_rejections: maintenanceRejections,
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           model_catalog_requests: modelCatalogRequests,
@@ -1054,13 +1077,7 @@ export function startServer(
         return Response.json({ status: "ok", accepting_turns: false, ...current });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        if (draining) {
-          return formatErrorResponse(
-            503,
-            "server_error",
-            "codex-chatgpt-web is draining for a requested service operation",
-          );
-        }
+        if (draining) return rejectDuringMaintenance("models");
         return httpTurns.track(async signal => {
           const request = ++modelCatalogRequests;
           const started = Date.now();
@@ -1110,7 +1127,7 @@ export function startServer(
         });
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (draining) return rejectDuringMaintenance("responses");
         return httpTurns.track(
           (signal, bindIdentity) => responseRequest(
             new Request(req, { signal }),
@@ -1124,7 +1141,7 @@ export function startServer(
         );
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (draining) return rejectDuringMaintenance("compact");
         return httpTurns.track(
           (signal, bindIdentity) => compactRequest(
             new Request(req, { signal }),
@@ -1138,7 +1155,7 @@ export function startServer(
         );
       }
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (draining) return rejectDuringMaintenance("alpha/search");
         return httpTurns.track(
           signal => nativeSearchRequest(new Request(req, { signal }), dependencies.fetchUpstream),
           req.signal,
@@ -1148,7 +1165,7 @@ export function startServer(
       }
       if (req.method === "POST"
         && (url.pathname === "/v1/images/generations" || url.pathname === "/v1/images/edits")) {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (draining) return rejectDuringMaintenance(url.pathname.slice(4));
         const endpoint: NativeImageEndpoint = url.pathname === "/v1/images/generations"
           ? "images/generations"
           : "images/edits";

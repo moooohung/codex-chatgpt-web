@@ -8,7 +8,9 @@ param(
     [string]$ReservationPath,
     [string]$ReservationSha256,
     [switch]$ShutdownAuthorized,
-    [switch]$AllowActiveBrowserTurns
+    [switch]$AllowActiveBrowserTurns,
+    [ValidateRange(0, 7200)][int]$WaitForIdleSeconds = 0,
+    [string[]]$ProtectedJobPaths = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,6 +62,40 @@ function BridgePhase($Reservation, $State, [string]$Phase) {
     WriteBridgeJson $Reservation.statePath $State
 }
 function BridgeReservationDirectory($Reservation) { return [IO.Path]::GetDirectoryName($Reservation.statePath) }
+function AssertBridgeProtectedJobPath([string]$Path) {
+    $absolute = [IO.Path]::GetFullPath($Path)
+    $root = 'C:\Users\Administrator\.claude\plugins\data\codex-openai-codex\state\'
+    if (-not $absolute.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or $absolute -notmatch '\\jobs\\task-[a-z0-9-]+\.json$') { throw 'Protected job must be an exact local plugin job record' }
+    return $absolute
+}
+function BridgeProtectedJobsFinished($Reservation) {
+    foreach ($path in $Reservation.protectedJobPaths) {
+        $absolute = AssertBridgeProtectedJobPath $path
+        $job = Get-Content -LiteralPath $absolute -Raw | ConvertFrom-Json
+        if ($job.id -ne [IO.Path]::GetFileNameWithoutExtension($absolute)) { throw 'Protected job identity changed' }
+        if ($job.status -notin @('completed', 'failed', 'cancelled', 'canceled', 'stopped')) { return $false }
+    }
+    return $true
+}
+function WaitBridgeMaintenanceWindow($Reservation, $State) {
+    if (-not $Reservation.waitForIdleSeconds) { return }
+    if ($Reservation.allowActiveBrowserTurns) { throw 'Idle waiting cannot authorize active-turn cancellation' }
+    BridgePhase $Reservation $State 'waiting_for_idle'
+    $deadline = [DateTime]::UtcNow.AddSeconds($Reservation.waitForIdleSeconds)
+    $idleSamples = 0
+    do {
+        $health = Invoke-RestMethod -Uri $Reservation.healthUri -TimeoutSec 5
+        if ($health.status -ne 'ok' -or $health.pid -ne $Reservation.priorDaemonPid) { throw 'Owned daemon changed while waiting for idle' }
+        if ($health.active_browser_turns -eq 0 -and $health.active_http_turns -eq 0 -and (BridgeProtectedJobsFinished $Reservation)) { $idleSamples++ } else { $idleSamples = 0 }
+        if ($idleSamples -ge 2) {
+            $State.idleWindowObservedAt = [DateTime]::UtcNow.ToString('o')
+            BridgePhase $Reservation $State 'prepared'
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Idle maintenance window did not arrive; no drain or quit was requested' }
+        Start-Sleep -Seconds 2
+    } while ($true)
+}
 function CompleteBridgeReservation($Reservation) {
     $armed = Get-Content -LiteralPath (Join-Path (BridgeReservationDirectory $Reservation) 'armed.json') -Raw | ConvertFrom-Json -DateKind String
     if ($armed.backend -eq 'task_scheduler') { Unregister-ScheduledTask -TaskName $Reservation.taskName -Confirm:$false -ErrorAction Stop }
@@ -89,9 +125,9 @@ function RegisterBridgeReservation($Reservation, [string]$WorkerSource) {
     $taskAction = New-ScheduledTaskAction -Execute $Reservation.powershellPath -Argument $taskArguments
     $trigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddSeconds(5))
     $trigger.EndBoundary = [DateTime]::Now.AddMinutes(30).ToString('s')
-    $settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -DeleteExpiredTaskAfter (New-TimeSpan -Minutes 1)
+    $settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds (900 + [int]$Reservation.waitForIdleSeconds)) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -DeleteExpiredTaskAfter (New-TimeSpan -Minutes 1)
     $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) -LogonType Interactive -RunLevel Limited
-    $state = [ordered]@{ phase = 'prepared'; preparedAt = [DateTime]::UtcNow.ToString('o'); operation = $Reservation.operation; shutdownRequested = $false; browserTurnsAtQuit = 0; installerInvocations = 0; launcherStarts = 0; operationSucceeded = $false }
+    $state = [ordered]@{ phase = 'prepared'; preparedAt = [DateTime]::UtcNow.ToString('o'); operation = $Reservation.operation; shutdownRequested = $false; browserTurnsAtQuit = 0; httpTurnsAtQuit = 0; installerInvocations = 0; launcherStarts = 0; operationSucceeded = $false }
     WriteBridgeJson $Reservation.statePath $state
     $schedulerError = $null
     try {
@@ -166,7 +202,8 @@ function RequestBridgeQuit($Reservation, $State) {
     $owner = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $Reservation.priorLauncherPid)
     if (-not $owner -or $owner.ExecutablePath -ne $Reservation.launcherPath -or $owner.CreationDate.ToUniversalTime().ToString('o') -ne $Reservation.priorLauncherCreatedAt) { throw 'Reviewed launcher owner changed before quit' }
     $health = Invoke-RestMethod -Uri $Reservation.healthUri -TimeoutSec 5
-    if ($health.status -ne 'ok' -or $health.pid -ne $Reservation.priorDaemonPid -or ($health.active_browser_turns -ne 0 -and -not $Reservation.allowActiveBrowserTurns)) { throw 'Reviewed daemon or browser work changed before quit' }
+    if ($health.status -ne 'ok' -or $health.pid -ne $Reservation.priorDaemonPid -or
+        (($health.active_browser_turns -ne 0 -or $health.active_http_turns -gt 0) -and -not $Reservation.allowActiveBrowserTurns)) { throw 'Reviewed daemon or browser work changed before quit (includes native HTTP turns)' }
     $config = Get-Content -LiteralPath $Reservation.configPath -Raw | ConvertFrom-Json
     $descriptor = Get-Content -LiteralPath $Reservation.descriptorPath -Raw | ConvertFrom-Json
     $endpoint = [Uri]$descriptor.endpoint
@@ -177,13 +214,16 @@ function RequestBridgeQuit($Reservation, $State) {
     $headers = @{ Authorization = 'Bearer ' + $config.controlToken }
     $State.shutdownRequested = $true
     $State.browserTurnsAtQuit = $health.active_browser_turns
+    $State.httpTurnsAtQuit = $health.active_http_turns
     BridgePhase $Reservation $State 'shutdown_requested'
     $drain = Invoke-RestMethod -Uri ([Uri]::new([Uri]$Reservation.healthUri, '/admin/drain')) -Method Post -Headers $headers -TimeoutSec 5
-    if ($drain.status -ne 'ok' -or $drain.accepting_turns -ne $false -or ($drain.active_browser_turns -ne 0 -and -not $Reservation.allowActiveBrowserTurns)) {
+    if ($drain.status -ne 'ok' -or $drain.accepting_turns -ne $false -or
+        (($drain.active_browser_turns -ne 0 -or $drain.active_http_turns -gt 0) -and -not $Reservation.allowActiveBrowserTurns)) {
         Invoke-RestMethod -Uri ([Uri]::new([Uri]$Reservation.healthUri, '/admin/resume')) -Method Post -Headers $headers -TimeoutSec 5 | Out-Null
         throw 'Idle browser drain was not acknowledged'
     }
     $State.browserTurnsAtQuit = [Math]::Max($State.browserTurnsAtQuit, $drain.active_browser_turns)
+    $State.httpTurnsAtQuit = [Math]::Max($State.httpTurnsAtQuit, $drain.active_http_turns)
     $socket = [Net.WebSockets.ClientWebSocket]::new()
     $timeout = [Threading.CancellationTokenSource]::new(10000)
     try {
@@ -301,10 +341,11 @@ function InvokeReservedBridgeMaintenance($Reservation) {
             CompleteBridgeReservation $Reservation
             return
         }
-        $initial = $State.phase -eq 'prepared'
+        $initial = $State.phase -in @('prepared', 'waiting_for_idle')
         $operationError = $null
         try {
             if ($initial) {
+                WaitBridgeMaintenanceWindow $Reservation $State
                 RequestBridgeQuit $Reservation $State
                 WaitBridgeIdle $Reservation
                 BridgePhase $Reservation $State 'owned_exit_observed'
@@ -337,7 +378,10 @@ function InvokeReservedBridgeMaintenance($Reservation) {
         throw
     } finally { $lock.Dispose() }
 }
-function NewBridgeMaintenanceReservation([string]$RequestedOperation, [string]$ReviewedPlanPath, [string]$ReviewedPlanHash, [string]$ReviewedInstallerPath, [string]$ReviewedInstallerHash, [bool]$AllowActive = $false) {
+function NewBridgeMaintenanceReservation([string]$RequestedOperation, [string]$ReviewedPlanPath, [string]$ReviewedPlanHash, [string]$ReviewedInstallerPath, [string]$ReviewedInstallerHash, [bool]$AllowActive = $false, [int]$IdleWaitSeconds = 0, [string[]]$JobPaths = @()) {
+    if ($IdleWaitSeconds -and $AllowActive) { throw 'Idle waiting cannot authorize active-turn cancellation' }
+    if ($JobPaths.Count -and -not $IdleWaitSeconds) { throw 'Protected jobs require an idle waiting budget' }
+    $protectedJobs = @($JobPaths | ForEach-Object { AssertBridgeProtectedJobPath $_ })
     $runtimeRoot = 'C:\Users\Administrator\.codex-chatgpt-web'
     $launcherPath = 'C:\Users\Administrator\AppData\Local\Programs\Codex Web GPT\Codex Web GPT.exe'
     $powershellPath = 'C:\Program Files\PowerShell\7\pwsh.exe'
@@ -365,7 +409,8 @@ function NewBridgeMaintenanceReservation([string]$RequestedOperation, [string]$R
     if (-not $owner -or $owner.ExecutablePath -ne $launcherPath) { throw 'Live launcher ownership could not be verified' }
     $healthUri = 'http://127.0.0.1:' + $config.port + '/healthz'
     $health = Invoke-RestMethod -Uri $healthUri -TimeoutSec 5
-    if ($health.status -ne 'ok' -or ($RequestedOperation -ne 'Probe' -and $health.active_browser_turns -ne 0 -and -not $AllowActive)) { throw 'Bridge is not in a reviewed idle browser window' }
+    if ($health.status -ne 'ok' -or ($RequestedOperation -ne 'Probe' -and
+        ($health.active_browser_turns -ne 0 -or $health.active_http_turns -gt 0) -and -not $AllowActive -and -not $IdleWaitSeconds)) { throw 'Bridge is not in a reviewed idle browser and native HTTP window' }
     $id = [Guid]::NewGuid().ToString('N')
     $directory = Join-Path $runtimeRoot ('runtime/restart-reservations/' + $id)
     $prefix = if ($RequestedOperation -eq 'Probe') { 'RestartProbe' } else { 'Maintenance' }
@@ -381,6 +426,8 @@ function NewBridgeMaintenanceReservation([string]$RequestedOperation, [string]$R
         healthUri = $healthUri; configPath = $configPath; descriptorPath = $descriptorPath
         priorLauncherPid = $owner.ProcessId; priorLauncherCreatedAt = $owner.CreationDate.ToUniversalTime().ToString('o'); priorDaemonPid = $health.pid
         allowActiveBrowserTurns = $AllowActive; browserTurnsAtReservation = $health.active_browser_turns
+        httpTurnsAtReservation = $health.active_http_turns
+        waitForIdleSeconds = $IdleWaitSeconds; protectedJobPaths = $protectedJobs
         rawRuntimeTokensRetained = 0
     }
     $state = BridgeRuntimeState $reservation
@@ -400,7 +447,7 @@ try {
         if ($Action -eq 'Reserve' -and -not $ShutdownAuthorized) { throw 'Reserve requires an authorized launcher shutdown window (-ShutdownAuthorized)' }
         if ($Action -eq 'Reserve' -and @(Get-ScheduledTask -TaskName 'CodexWebGPT-Maintenance-*' -ErrorAction SilentlyContinue).Count -gt 0) { throw 'A launcher maintenance reservation already exists; inspect its receipt first' }
         $requested = if ($Action -eq 'Probe') { 'Probe' } else { $Operation }
-        $reservation = NewBridgeMaintenanceReservation $requested $PlanPath $PlanSha256 $InstallerPath $InstallerSha256 $AllowActiveBrowserTurns.IsPresent
+        $reservation = NewBridgeMaintenanceReservation $requested $PlanPath $PlanSha256 $InstallerPath $InstallerSha256 $AllowActiveBrowserTurns.IsPresent $WaitForIdleSeconds $ProtectedJobPaths
         RegisterBridgeReservation $reservation $PSCommandPath | ConvertTo-Json -Depth 6
     }
 } catch {
