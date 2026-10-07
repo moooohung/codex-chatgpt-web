@@ -45,6 +45,7 @@ const MAX_MANUAL_TERMINAL_SIGNALS = 256;
 const MAX_MANUAL_PROMPT_CHARS = 1_000_000;
 const INTERACTION_MODE_CHANGE_OPERATION = "browser interaction mode change";
 const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
+const MAX_HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 1280, height: 900 });
 // These are lease/initialization guards only. They do not limit a live ChatGPT turn: active turns
 // stay alive as long as the helper keeps heartbeating. They only reclaim a blank surface or a turn
 // whose helper disappeared without delivering the normal /v1/turn/end event.
@@ -1894,7 +1895,8 @@ class BrowserHost {
     const state = selected
       ? {
           ...this.state,
-          status: selected.authenticationRequired ? "signed-out" : selected.status,
+          status: selected.authenticationRequired ? "signed-out"
+            : selected.presentationRestoreFailed ? "error" : selected.status,
           message: selected.message,
           url: selected.url,
           title: selected.interactionMode === "manual" ? selected.label : selected.pageTitle,
@@ -2094,10 +2096,14 @@ class BrowserHost {
 
   setBounds(bounds, rendererZoomFactor = 1) {
     const [width, height] = this.window.getContentSize();
-    this.bounds = constrainBrowserBounds(
+    const next = constrainBrowserBounds(
       normalizeBounds(scaleBrowserBounds(bounds, rendererZoomFactor)),
       { width, height },
     );
+    if (this.boundsReady && this.boundsWindowSize?.[0] === width && this.boundsWindowSize?.[1] === height
+      && ["x", "y", "width", "height"].every(key => this.bounds[key] === next[key])) return;
+    this.bounds = next;
+    this.boundsWindowSize = [width, height];
     this.boundsReady = true;
     this.authView?.setBounds(this.bounds);
     this.syncViewVisibility();
@@ -2113,10 +2119,49 @@ class BrowserHost {
     return this.authView || this.selectedTurnTab()?.view || this.view;
   }
 
+  restoreSelectedRetainedTab() {
+    const canPresent = () => this.visible && this.surfaceActive && this.boundsReady
+      && this.window?.isVisible() && !this.window.isMinimized() && !this.authView && !this.manualOperation;
+    if (!canPresent()) return;
+    const tab = this.selectedTurnTab();
+    if (!tab || tab.interactionMode !== "automatic" || tab.status !== "ready") return;
+    if (tab.presentationRestore) return tab.presentationRestore;
+    if (tab.presentationRestoreFailed || (!tab.memorySuspended && !tab.memoryTransition)) return;
+    const previous = tab.memoryTransition;
+    // Reserve the transition before navigation can emit events. The next worker must wait for
+    // this restore too; showing a tab never takes ownership of a running turn or sends a message.
+    const transition = Promise.resolve().then(async () => {
+      await previous;
+      if (!canPresent() || this.selectedTurnTab() !== tab || this.turnTabs.get(tab.id) !== tab
+        || tab.status !== "ready" || !tab.memorySuspended) return;
+      tab.loading = true;
+      this.publishState?.(this.snapshot());
+      await BrowserHost.prototype.restoreRetainedTurnTab.call(this, tab);
+    }).catch(error => {
+      tab.presentationRestoreFailed = true;
+      tab.message = "Could not restore ChatGPT conversation. Select the tab again to retry.";
+      this.logger.warn("browser.tab_presentation_restore_failed", { tabId: tab.id, traceId: tab.traceId,
+        ...navigationErrorForLog(error) });
+    }).finally(() => {
+      if (tab.presentationRestore === transition) tab.presentationRestore = undefined;
+      if (tab.memoryTransition === transition) tab.memoryTransition = undefined;
+      tab.loading = false;
+      if (!this.window?.isDestroyed?.()) {
+        this.syncViewVisibility();
+        this.publishState?.(this.snapshot());
+      }
+    });
+    tab.presentationRestore = transition;
+    tab.memoryTransition = transition;
+    return transition;
+  }
+
   hiddenTurnBounds() {
     const [contentWidth, contentHeight] = this.window.getContentSize();
-    const width = Math.max(HIDDEN_TURN_VIEWPORT.width, Math.round(contentWidth || 0));
-    const height = Math.max(HIDDEN_TURN_VIEWPORT.height, Math.round(contentHeight || 0));
+    const width = Math.min(MAX_HIDDEN_TURN_VIEWPORT.width,
+      Math.max(HIDDEN_TURN_VIEWPORT.width, Math.round(contentWidth || 0)));
+    const height = Math.min(MAX_HIDDEN_TURN_VIEWPORT.height,
+      Math.max(HIDDEN_TURN_VIEWPORT.height, Math.round(contentHeight || 0)));
     return {
       // Electron collapses a hidden WebContentsView's renderer viewport to 0x0. Keep running
       // turn views visible to Chromium and move them wholly outside the launcher content area so
@@ -2212,18 +2257,28 @@ class BrowserHost {
     const visible = windowVisible
       && browserViewVisible(this.visible, this.surfaceActive, this.boundsReady);
     const selected = this.selectedTurnTab();
-    this.presentPrimaryView(visible && !this.authView && !selected);
+    const hasDocument = contents => {
+      const url = contents?.getURL?.();
+      return url !== IDLE_BROWSER_URL && url !== "about:blank";
+    };
+    // Keep the exact owned CDP target drawable offscreen during idle/bootstrap. The launcher
+    // shows its preparation/empty state instead of putting an empty native document over it.
+    this.presentPrimaryView(visible && !this.authView && !selected && hasDocument(this.view.webContents));
     for (const tab of this.turnTabs.values()) {
-      const tabVisible = visible && !this.authView && selected?.id === tab.id;
+      const tabVisible = visible && !this.authView && selected?.id === tab.id
+        && hasDocument(tab.view.webContents);
       this.presentTurnView(tab, tabVisible);
     }
     this.authView?.setVisible(visible);
+    BrowserHost.prototype.restoreSelectedRetainedTab.call(this);
   }
 
   selectTab(tabId) {
     if (tabId !== "home" && !this.turnTabs.has(tabId)) throw new Error("Browser tab does not exist");
     if (this.authView) this.closeAuthView(this.authView, true);
     this.selectedTabId = tabId;
+    const selected = this.selectedTurnTab();
+    if (selected) selected.presentationRestoreFailed = false;
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
     this.publishState?.(this.snapshot());
@@ -2503,7 +2558,10 @@ class BrowserHost {
   async reveal(inspectSession = true) {
     await this.localeReady;
     if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
+    const selected = this.selectedTurnTab();
+    if (selected) selected.presentationRestoreFailed = false;
     this.show();
+    await BrowserHost.prototype.restoreSelectedRetainedTab.call(this);
     if (!this.selectedTurnTab() && this.view.webContents.getURL() === IDLE_BROWSER_URL) {
       await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
       if (inspectSession) await this.probeAuthentication();
@@ -2963,9 +3021,13 @@ class BrowserHost {
     const transitioning = [...this.turnTabs.values()].find(tab => tab.memoryTransition
       && (tab.traceId === traceId || (conversationKey && tab.conversationKey === conversationKey)));
     if (transitioning) {
-      await waitForBrowserMemoryTransition(transitioning.memoryTransition, signal);
-      signal?.throwIfAborted();
-      if (this.userCancelledTurnOwners.has(traceId)) throw new BrowserTurnCancelledError(traceId);
+      let awaitedTransition;
+      while (transitioning.memoryTransition && transitioning.memoryTransition !== awaitedTransition) {
+        awaitedTransition = transitioning.memoryTransition;
+        await waitForBrowserMemoryTransition(awaitedTransition, signal);
+        signal?.throwIfAborted();
+        if (this.userCancelledTurnOwners.has(traceId)) throw new BrowserTurnCancelledError(traceId);
+      }
     }
     const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
     if (sameTrace && sameTrace.interactionMode !== "automatic") {
@@ -3013,6 +3075,7 @@ class BrowserHost {
       existing.helperPid = helperPid;
       existing.traceId = traceId;
       existing.status = "running";
+      existing.presentationRestoreFailed = false;
       if (reused && existing.memorySuspended) {
         try {
           await BrowserHost.prototype.restoreRetainedTurnTab.call(this, existing, signal);

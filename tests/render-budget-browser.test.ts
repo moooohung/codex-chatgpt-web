@@ -29,7 +29,8 @@ if(process.env.CHATGPT_RENDER_CANDIDATE_ROOT){
 for(const {name,project} of projections)for(const chars of [320000,1000000])test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`${name}: ${chars} chars preserve model/effort, multipart ACK, tool boundary and completion`,async()=>{
  const browser=await chromium.launch({executablePath:process.env.CHATGPT_DOM_TEST_BROWSER,headless:true});
  try{
-  const page=await browser.newPage({viewport:{width:1120,height:800}});await page.route("**/*",route=>route.abort());await page.setContent(picker);
+  const page=await browser.newPage({viewport:process.env.CHATGPT_RENDER_TEST_VIEWPORT === "bounded"
+    ? {width:1280,height:900} : {width:1120,height:800}});await page.route("**/*",route=>route.abort());await page.setContent(picker);
   await page.evaluate(({chars,ack})=>{
    const main=document.createElement("main");document.body.prepend(main);
    for(let i=0;i<8;i++){

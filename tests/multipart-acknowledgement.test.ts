@@ -104,7 +104,7 @@ test("waitForMultipartAcknowledgement accepts relaxed acknowledgements and marks
     undefined,
     undefined,
     completionTracker,
-  )).resolves.toBeUndefined();
+  )).resolves.toBe(fakeBinding);
 
   // Case 2: Complete mismatch throws ChatGptWebAdapterError with retryable: true
   snapshotText = "I will now proceed with answering the user question directly...";

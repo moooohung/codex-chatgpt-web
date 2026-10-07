@@ -1,0 +1,9 @@
+# Embedded browser idle restoration
+
+The launcher parks reloadable retained conversations in its owned `IDLE_BROWSER_URL` to release memory. Selecting that tab, returning to Browser, or restoring the tray window now resumes only the selected ready automatic tab from its exact saved conversation URL. The presentation restore shares the tab's memory transition with the next worker. A worker waits through both an in-progress release and a newly queued restore before claiming the lease. Running and manual tabs are never navigated by presentation recovery.
+
+Idle and bootstrap native documents remain drawable offscreen for CDP ownership and a nonzero viewport. The launcher renders its preparation or empty state in their place, hides the internal data URL, and permits explicit restoration retry after navigation failure. Failure preserves the completed result and saved URL. The normal retry button cannot reload a running turn.
+
+Background views retain an explicit viewport between 800×600 and 1280×900; their placement stays outside the complete launcher content area. Foreground views still use the measured browser slot. Identical surface measurements skip repeated native layout and resize scripts; changes to the window dimensions still update offscreen placement.
+
+Validation: launcher lifecycle/presentation fixtures cover selection, visibility, coalescing, ownership handoff, cancellation, retry, native bounds and actual panel rendering. `CHATGPT_RENDER_TEST_VIEWPORT=bounded` runs the existing 320,000/1,000,000-character rendering fixture at 1280×900 with model/effort selection, multipart acknowledgement, tool-boundary ACK and completion checks. Local synthetic Electron measurements preserve every input hash and turn identity; viewport capping does not establish a consistent memory or CPU improvement on all document sizes. Network hydration, server delays and unrelated renderer failures can still require their own recovery.

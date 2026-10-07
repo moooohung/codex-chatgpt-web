@@ -19,6 +19,7 @@ import { LimitsSurface } from "./LimitsSurface";
 import { limitsCopyFor } from "./limits-copy";
 import { useLimits } from "./useLimits";
 import { describeTurnActivity } from "./turn-activity";
+import { isIdleBrowserSurface } from "./browser-surface";
 import { createLauncherLogStore, type LauncherLogStore } from "./log-store";
 import type {
   BrowserInteractionMode,
@@ -905,6 +906,7 @@ function BrowserSurface({
 }) {
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
   const visible = browser?.visible === true;
+  const idleSurface = isIdleBrowserSurface(browser?.url);
   const manualInteraction = interactionMode === "manual";
   const passkeyAvailable = !manualInteraction
     && platform === "darwin"
@@ -936,6 +938,13 @@ function BrowserSurface({
     try {
       if (visible) await api!.hideBrowser();
       else await api!.showBrowser();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const open = async () => {
+    try {
+      await api!.showBrowser();
     } catch (cause) {
       setError(messageOf(cause));
     }
@@ -1034,7 +1043,7 @@ function BrowserSurface({
           />
           <IconButton disabled={navigationLocked || !visible} icon="reload" label={copy.reload} onClick={() => void navigate("reload")} />
         </div>
-        <div className="browser-address" title={browser?.url || copy.browserAddress}>
+        <div className="browser-address" title={idleSurface ? copy.browserAddress : browser?.url || copy.browserAddress}>
           <Icon name="globe" />
           <span>{formatBrowserAddress(browser?.url, copy)}</span>
         </div>
@@ -1079,19 +1088,25 @@ function BrowserSurface({
         />
       ) : null}
       <div className="browser-viewport" ref={browserSlotRef}>
-        {!visible ? (
+        {!visible || idleSurface ? (
           <div className="browser-empty">
             <BrandMark />
-            <h1>{manualInteraction
+            <h1>{visible && idleSurface && (navigationLocked || browser?.loading)
+              ? copy.loading
+              : manualInteraction
               ? copy.browserReady
               : browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
-            <p>{manualInteraction
+            <p>{visible && idleSurface && browser?.status === "error"
+              ? browser.message
+              : visible && idleSurface && (navigationLocked || browser?.loading)
+              ? copy.loading
+              : manualInteraction
               ? copy.stepAccountBody
               : browser?.authenticated
               ? copy.noActiveTaskBody
               : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
+              <PrimaryButton disabled={passkeyWaiting || (visible && idleSurface && navigationLocked)} onClick={() => void open()}>
                 {manualInteraction || browser?.authenticated ? copy.openChatgpt : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (
@@ -2800,7 +2815,7 @@ function browserTabTone(status: BrowserState["tabs"][number]["status"]): "idle" 
 }
 
 function formatBrowserAddress(url: string | undefined, copy: Copy): string {
-  if (!url || url.startsWith("about:blank")) return copy.browserAddress;
+  if (!url || isIdleBrowserSurface(url)) return copy.browserAddress;
   try {
     const parsed = new URL(url);
     if (parsed.hostname === "chatgpt.com" && parsed.searchParams.get("temporary-chat") === "true") {
