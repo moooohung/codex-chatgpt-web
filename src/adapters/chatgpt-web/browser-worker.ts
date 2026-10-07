@@ -3173,19 +3173,21 @@ export class ChatGptBrowserWorker {
     page: Page,
     cache?: ChatGptSubmissionDomCache,
     signal?: AbortSignal,
+    purpose: "submission" | "tool_boundary" = "submission",
   ): Promise<ChatGptSubmissionDomState> {
     throwIfPromptAttachmentAborted(signal);
     const observed = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(page.evaluate(chatGptSubmissionDomProjection, {
       userTurnSelector: CHATGPT_USER_TURN_SELECTOR,
       assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
       stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR,
-      knownKey: cache?.key,
+      knownKey: purpose === "submission" ? cache?.key : undefined,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
+      purpose,
     }), signal), chatGptPageObservationTimeoutMs(page));
     recordChatGptPageObservationSize(page, observed.bodyTextChars);
     const snapshot = observed.snapshot ?? cache?.snapshot;
     if (!snapshot) throw new Error("ChatGPT turn DOM revision cache has no baseline snapshot");
-    if (observed.snapshot && cache) {
+    if (purpose === "submission" && observed.snapshot && cache) {
       cache.key = observed.key;
       cache.snapshot = observed.snapshot;
       cache.fullScans = (cache.fullScans ?? 0) + 1;
@@ -3279,7 +3281,7 @@ export class ChatGptBrowserWorker {
     completionTracker?: ChatGptCompletionTracker,
   ): Promise<string> {
     const state = await this.observeResponseProbe(page, baseline, signal, undefined, completionTracker,
-      ownedSignal => this.submissionDomState(page, baseline.domCache, ownedSignal), undefined, "boundary_turn_state");
+      ownedSignal => this.submissionDomState(page, undefined, ownedSignal, "tool_boundary"), undefined, "boundary_turn_state");
     await this.reconcileMultipartHistory(page, baseline, state, signal);
     const identity = chatGptNewTurnIdentity(
       baseline.initialTurnIdentities,

@@ -1,8 +1,12 @@
-export function chatGptSubmissionDomProjection(options: { userTurnSelector: string; assistantTurnSelector: string; stopButtonSelector: string; knownKey?: string; attributeFilter: string[]; renderBudget?: { history?: boolean; multipart?: boolean; motion?: boolean; sidebar?: boolean } }) {
+export function chatGptSubmissionDomProjection(options: { userTurnSelector: string; assistantTurnSelector: string; stopButtonSelector: string; knownKey?: string; attributeFilter: string[]; purpose?: "submission" | "tool_boundary"; renderBudget?: { history?: boolean; multipart?: boolean; motion?: boolean; sidebar?: boolean } }) {
   const projectionStarted = performance.now();
+  // Boundary capture needs turn identities only. Layout of a megabyte-sized input can
+  // stall its read before the small assistant answer is even inspected. Acceptance,
+  // failure alerts and completion continue to use the complete submission projection.
+  const boundary = options.purpose === "tool_boundary";
   // Preserve every DOM identity and text node. Only older offscreen layout can be skipped.
   // Keep the latest user/assistant pair fully rendered for acceptance and tool boundaries.
-  const renderRoots = [...document.querySelectorAll('[data-turn-key], [data-turn-id-container]')]
+  const renderRoots = (boundary ? [] : [...document.querySelectorAll('[data-turn-key], [data-turn-id-container]')])
     .filter(element => !element.parentElement?.closest('[data-turn-key], [data-turn-id-container]'));
   let deferredHistoryNodes = 0, deferredInputNodes = 0, reducedMotionNodes = 0;
   const budget = options.renderBudget;
@@ -10,7 +14,7 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
   const multipart = budget?.multipart !== false;
   const motion = budget?.motion !== false;
   const sidebar = budget?.sidebar !== false;
-  if (typeof CSS !== "undefined" && CSS.supports("content-visibility", "auto")) {
+  if (!boundary && typeof CSS !== "undefined" && CSS.supports("content-visibility", "auto")) {
     let style = document.getElementById("codex-history-render-budget");
     if (!style) {
       style = document.createElement("style"); style.id = "codex-history-render-budget";
@@ -70,7 +74,7 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
     return state;
   })();
   const observerKey = `${observerState.id}:${observerState.revision}`;
-  if (options.knownKey === observerKey) return { key: observerKey, bodyTextChars, deferredHistoryNodes, deferredInputNodes, reducedMotionNodes, projectionElapsedMs: performance.now() - projectionStarted };
+  if (!boundary && options.knownKey === observerKey) return { key: observerKey, bodyTextChars, deferredHistoryNodes, deferredInputNodes, reducedMotionNodes, projectionElapsedMs: performance.now() - projectionStarted };
   const identities = (elements: Element[], attribute: string): string[] => {
     const values = elements.map(element => element.getAttribute(attribute));
     if (values.some(value => typeof value !== "string" || value.trim().length === 0)) {
@@ -119,7 +123,7 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
   const groups = [...document.querySelectorAll("[data-turn-key]")];
   const groupKeys = identities(groups, "data-turn-key");
   const failedUserIdentities = containers.flatMap((container, index) => (
-    userIdentities.includes(turnIdentities[index]!) && hasSubmissionError(container)
+    !boundary && userIdentities.includes(turnIdentities[index]!) && hasSubmissionError(container)
       ? [turnIdentities[index]!] : []
   ));
   groups.forEach((group, index) => {
@@ -130,7 +134,7 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
     turnIdentities.push(user, assistant);
     if (group.querySelector("[data-user-message-bubble]")) userIdentities.push(user);
     if (group.querySelector('[data-conversation-role="assistant"], [data-chatgpt-agent-turn-start]')) responseIdentities.push(assistant);
-    if (group.querySelector("[data-user-message-bubble]") && hasSubmissionError(group)) failedUserIdentities.push(user);
+    if (!boundary && group.querySelector("[data-user-message-bubble]") && hasSubmissionError(group)) failedUserIdentities.push(user);
   });
   return {
     key: observerKey,
@@ -138,7 +142,7 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
     snapshot: {
       userTurnCount: userIdentities.length,
       assistantTurnCount: responseIdentities.length,
-      visibleStopButtonCount: [...document.querySelectorAll(options.stopButtonSelector)].filter(visible).length,
+      visibleStopButtonCount: boundary ? 0 : [...document.querySelectorAll(options.stopButtonSelector)].filter(visible).length,
       turnIdentities,
       userIdentities,
       responseIdentities,
