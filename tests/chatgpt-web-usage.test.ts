@@ -5,6 +5,7 @@ import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateComp
 import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
 import { estimateTokens } from "../src/lib/token-estimate";
 import type { CodexParsedRequest } from "../src/types";
+import { resolveChatGptWebMessageTokenBudget, resolveChatGptWebStagingTokenBudget } from "../src/chatgpt-web-models";
 
 const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
 
@@ -118,6 +119,31 @@ test("inline compaction planning checks UTF-8 JSON bytes before choosing one mes
   expect(compiled.multipart!.parts.flatMap(part => JSON.parse(part).records).map(record => record.message.content))
     .toEqual([parsed.context.messages[0]!.content]);
 });
+test("Plus history is rebalanced into smaller Instant uploads and a larger selected-mode final message", () => {
+  const plus = { ...capabilities, proAvailable: false, extraHighAvailable: false };
+  const parsed = request("");
+  parsed.context.messages = Array.from({ length: 18 }, (_, index) => ({
+    // Expensive Unicode tokens exercise the new token headroom while preserving our
+    // conservative 60k-character server limit and complete semantic records.
+    role: "user", content: `record-${index}: ${"뷁".repeat(1500)}`, timestamp: index + 1,
+  }));
+  for (const compaction of [false, true]) {
+    parsed._compactionRequest = compaction;
+    const compiled = compileChatGptWebPrompt(parsed, plus, undefined, { experimentalMultipartParts: 6 });
+    const records = compiled.multipart!.parts.flatMap(part => JSON.parse(part).records);
+    expect(records.map(record => record.message.content)).toEqual(parsed.context.messages.map(message => message.content));
+    expect(compiled.trimmedCompactionMessages).toBeUndefined();
+    const messages = compiledChatGptWebMessages(compiled);
+    const stagingTokens = messages.slice(0, -1).map(text => estimateTokens(text));
+    const stagingBudget = resolveChatGptWebStagingTokenBudget("gpt-5.6-sol", "low", plus);
+    expect(Math.max(...stagingTokens)).toBeLessThanOrEqual(stagingBudget);
+    expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus,
+      Math.max(...stagingTokens), Math.max(...messages.slice(0, -1).map(text => text.length))).effort).toBe("low");
+    const finalTokens = estimateTokens(messages.at(-1)!);
+    expect(finalTokens).toBeGreaterThan(Math.max(...stagingTokens));
+    expect(finalTokens).toBeLessThanOrEqual(resolveChatGptWebMessageTokenBudget("gpt-5.6-sol", "high", plus));
+  }
+}, 30_000);
 
 test("multipart planning leaves room for final attachments and execution instructions without losing history", () => {
   for (const scenario of [

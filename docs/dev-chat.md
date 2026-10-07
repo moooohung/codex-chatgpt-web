@@ -142,7 +142,9 @@ with one final execution request and the preceding parts sent as inert staging r
 compaction starts at six parts and adds parts when needed. Plus messages use a conservative
 60,000-character server transport bound; adding parts does not enlarge the total context ceiling.
 Inert stages use the fastest available mode that fits their complete messages; the final
-part uses the selected execution effort. Large turns may increase the probability of
+part uses the selected execution effort. Plus Instant uploads also reserve the ordinary
+pre-compaction input headroom; the selected final mode can receive a larger share.
+Large turns may increase the probability of
 rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
 Luna's later requests still include the accumulated transcript inside the same measured
 28,000-token browser transport budget.

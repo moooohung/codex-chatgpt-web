@@ -18,8 +18,11 @@ if(process.env.CHATGPT_RENDER_CANDIDATE_ROOT){
  const ts=require("typescript");
  for(const relative of ["app/cli.js","app/browser-helper.cjs"]){
   const file=ts.createSourceFile(relative,readFileSync(join(process.env.CHATGPT_RENDER_CANDIDATE_ROOT,relative),"utf8"),ts.ScriptTarget.Latest,true);
-  const fn=file.statements.find((node:any)=>ts.isFunctionDeclaration(node)&&node.name?.text==="__codexSubmissionUi20261007");
-  if(!fn)throw Error("Compiled rendering projection missing");
+  const matches=file.statements.filter((node:any)=>ts.isFunctionDeclaration(node)
+    && (node.name?.text==="__codexSubmissionUi20261007"
+      || node.getText(file).includes('codex-history-render-budget') && node.getText(file).includes('contain-intrinsic-size')));
+  if(matches.length!==1)throw Error("Exactly one compiled rendering projection is required");
+  const fn=matches[0];
   projections.push({name:relative,project:vm.runInNewContext("("+fn.getText(file)+")")});
  }
 }

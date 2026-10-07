@@ -81,6 +81,12 @@ function abortError(signal?: AbortSignal): Error {
   return new DOMException("ChatGPT web turn aborted", "AbortError");
 }
 
+class ChatGptObserverDisconnected extends DOMException {
+  constructor(readonly cause: unknown) {
+    super("The Codex response stream disconnected", "AbortError");
+  }
+}
+
 function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return promise;
   if (signal.aborted) {
@@ -894,12 +900,13 @@ export function createChatGptWebAdapter(
       incoming = { ...incoming, abortSignal: incoming.abortSignal
         ? AbortSignal.any([incoming.abortSignal, observerAbort.signal]) : observerAbort.signal };
       emit = event => {
+        if (observerAbort.signal.aborted) throw observerAbort.signal.reason;
         try {
           emitChatGptRoundEvent(rawEmit, event);
         } catch (error) {
           // A failed stream write also ends an observer whose transport has not signalled close.
           // This controller belongs to the HTTP observer, never to the owned browser execution.
-          observerAbort.abort();
+          observerAbort.abort(error);
           throw error;
         }
       };
@@ -1294,6 +1301,7 @@ export function createChatGptWebAdapter(
         const emitRoundEvent = (event: AdapterEvent): void => emitRoundEvents([event]);
         const releaseObserver = chatGptTurnSessions.observe(executionKey, session, incoming.abortSignal);
         let observerDisconnected = false;
+        let awaitingRuntime = false;
         try {
           await withAbort(session.runExclusive(async () => {
             if (incoming.abortSignal?.aborted) throw abortError(incoming.abortSignal);
@@ -1492,6 +1500,7 @@ export function createChatGptWebAdapter(
               let nextTrace = waitForTrace();
               let nextText = waitForText();
               for (;;) {
+                awaitingRuntime = true;
                 const next = await withAbort(
                   Promise.race([
                     ...(nextTools ? [nextTools] : []),
@@ -1501,6 +1510,7 @@ export function createChatGptWebAdapter(
                   ]),
                   incoming.abortSignal,
                 );
+                awaitingRuntime = false;
                 if (next.type === "trace") {
                   emitNewTrace(session.runtime.trace.drain());
                   nextTrace = waitForTrace();
@@ -1564,7 +1574,7 @@ export function createChatGptWebAdapter(
           // Once that same browser has failed, preserve its cause rather than reporting a cleanup
           // race as an invalid token. Validation and result-delivery errors are separate stages.
           const settled = session.settledOutcome();
-          if (roundStage === "browser_or_tool_wait" && settled?.type === "error") error = settled.error;
+          if (awaitingRuntime && roundStage === "browser_or_tool_wait" && settled?.type === "error") error = settled.error;
           if (error instanceof ChatGptWebAdapterError && error.code.startsWith("chatgpt_tool_boundary_")) roundStage = "tool_boundary_observation";
           console.warn(`[chatgpt-web] response_round_failed ${JSON.stringify({ traceId, stage: roundStage,
             submission: session.runtime.submission?.phase ?? "unknown", outstandingTools: session.outstanding().length,

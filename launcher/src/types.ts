@@ -37,6 +37,7 @@ export interface LauncherState {
   autoApproveToolCalls: boolean;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
+  biggerContextAvailable?: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
   useSavedChats: boolean;

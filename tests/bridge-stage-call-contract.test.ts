@@ -65,15 +65,19 @@ test.skipIf(!process.env.CHATGPT_STAGE_CALL_RUNTIME_ROOT)("every runStage call i
     const visit = (node: any) => { if (predicate(node)) found.push(node); ts.forEachChild(node, visit); };
     visit(root); return found;
   };
+  const sourceAudit = assertRunStageCalls(readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8"), "browser-worker.ts");
   for (const relative of ["app/cli.js", "app/browser-helper.cjs"]) {
     const audit = assertRunStageCalls(readFileSync(join(process.env.CHATGPT_STAGE_CALL_RUNTIME_ROOT!, relative), "utf8"), relative);
-    expect(audit.calls).toHaveLength(17);
-    expect(audit.calls.filter((call: any) => call.argc === 4)).toHaveLength(12);
-    expect(audit.calls.filter((call: any) => call.argc === 5)).toHaveLength(1);
-    expect(audit.calls.filter((call: any) => call.argc === 6)).toHaveLength(4);
+    expect(audit.calls).toHaveLength(sourceAudit.calls.length);
+    for (const argc of [4, 5, 6]) expect(audit.calls.filter((call: any) => call.argc === argc))
+      .toHaveLength(sourceAudit.calls.filter((call: any) => call.argc === argc).length);
     const budget = nodes(audit.method, (node: any) => ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.arguments.length === 3);
     expect(budget).toHaveLength(1);
-    const annotation = nodes(audit.source, (node: any) => ts.isFunctionDeclaration(node) && node.name?.text === "chatGptModelSelectionStageError");
+    const annotationCalls = nodes(audit.method, (node: any) => ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && node.arguments.length === 2).map((node: any) => node.expression.text);
+    const annotation = nodes(audit.source, (node: any) => ts.isFunctionDeclaration(node)
+      && (node.name?.text === "chatGptModelSelectionStageError"
+        || annotationCalls.includes(node.name?.text) && node.getText(audit.source).includes("chatgpt_model_")));
     expect(annotation).toHaveLength(1);
     const adapter = nodes(annotation[0], (node: any) => ts.isNewExpression(node))[0].expression.getText(audit.source);
     const adapterClass = nodes(audit.source, (node: any) => ts.isClassDeclaration(node) && node.name?.text === adapter);
