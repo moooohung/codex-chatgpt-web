@@ -23,6 +23,7 @@ import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { PreparedChatGptTurnStore } from "./prepared-turn";
+import { planLargeContextCompaction, runLargeContextCompaction } from "./large-context-compaction";
 import { emitChatGptRoundEvent, isChatGptObserverAbort, chatGptRoundFailureEvidence } from "./round-observer";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds, verifiedNativeRetrySourceTurnId } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -427,7 +428,7 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
-    hooks: { onCompactionProgress?: () => void } = {},
+    hooks: { onCompactionProgress?: () => void; boundedCompactionStage?: boolean } = {},
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -464,6 +465,7 @@ export function createChatGptWebAdapter(
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};
       const preparation = createChatGptWebPromptPreparation(input);
+      if (hooks.boundedCompactionStage) return { preparation, preserveCompactionHistory: true };
       const experimentalMultipartParts = experimentalBiggerContext
         ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments, preparation, minimalTransport)
         : undefined;
@@ -740,15 +742,20 @@ export function createChatGptWebAdapter(
         reasoning: parsed.options.reasoning,
         ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
         capabilities: turnCapabilities,
-        prepare: async () => ({
-          ...compileChatGptWebPrompt(
+        prepare: async () => {
+          const compiled = compileChatGptWebPrompt(
             checkpointInput.parsed,
             turnCapabilities,
             undefined,
             compileOptionsFor(checkpointInput.parsed),
-          ),
-          release: () => {},
-        }),
+          );
+          if (hooks.boundedCompactionStage && Buffer.byteLength(JSON.stringify(compiled.text), "utf8") > 110_000) {
+            throw new ChatGptWebAdapterError("The staged compaction prompt exceeds the bounded browser budget; no history was truncated or submitted", {
+              status: 409, errorType: "invalid_request_error", code: "compaction_stage_too_large", retryable: false,
+            });
+          }
+          return { ...compiled, release: () => {} };
+        },
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
@@ -1028,6 +1035,7 @@ export function createChatGptWebAdapter(
                   armHandoffDeadline();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
                   const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
+                  const largeCompaction = manualRequest ? undefined : planLargeContextCompaction(parsed);
                   const runFreshCompaction = async (reason: string): Promise<string> => {
                     handoffPhase = "fresh_compaction";
                     if (freshConversationPerTurn) console.info("[chatgpt-web] compaction uses configured fresh conversation mode");
@@ -1036,29 +1044,37 @@ export function createChatGptWebAdapter(
                     // and the final accepted compact prompt re-arms the five-minute liveness budget;
                     // transport time cannot consume the model-generation window.
                     armHandoffDeadline();
-                    const fallbackRuntime = startRuntime(
-                      parsed,
-                      manualRequest ? environment : undefined,
-                      freshCompactionTraceId,
-                      turnCapabilities,
-                      { onCompactionProgress: armHandoffDeadline },
-                    );
-                    retainOwnershipUntil(fallbackRuntime.physicalSettlement);
-                    try {
-                      const rawSummary = await withAbort(fallbackRuntime.browser, operationSignal);
-                      await withAbort(fallbackRuntime.physicalSettlement, operationSignal);
-                      return canonicalizeCompactionHandoff(parsed, rawSummary);
-                    } catch (error) {
-                      fallbackRuntime.cancel(error instanceof Error ? error : new Error(String(error)));
-                      // The shared owner retains physical settlement independently of this error.
-                      // Neither a timeout nor operator cancellation can open a competing trace.
-                      throw error;
-                    }
+                    let stageNumber = 0;
+                    const runStage = async (input: CodexParsedRequest): Promise<string> => {
+                      const fallbackRuntime = startRuntime(
+                        input,
+                        manualRequest ? environment : undefined,
+                        largeCompaction ? `${freshCompactionTraceId}_stage${++stageNumber}` : freshCompactionTraceId,
+                        turnCapabilities,
+                        { onCompactionProgress: armHandoffDeadline, ...(largeCompaction ? { boundedCompactionStage: true } : {}) },
+                      );
+                      retainOwnershipUntil(fallbackRuntime.physicalSettlement);
+                      try {
+                        const rawSummary = await withAbort(fallbackRuntime.browser, operationSignal);
+                        await withAbort(fallbackRuntime.physicalSettlement, operationSignal);
+                        return rawSummary;
+                      } catch (error) {
+                        fallbackRuntime.cancel(error instanceof Error ? error : new Error(String(error)));
+                        // The shared owner retains physical settlement independently of this error.
+                        // Neither a timeout nor operator cancellation can open a competing trace.
+                        throw error;
+                      }
+                    };
+                    const rawSummary = largeCompaction ? await runLargeContextCompaction({
+                      parsed, plan: largeCompaction, signal: operationSignal, run: runStage,
+                      onProgress: event => { armHandoffDeadline(); console.info(`[chatgpt-web] compaction_stage ${JSON.stringify({ traceId: compactionTraceId, ...event })}`); },
+                    }) : await runStage(parsed);
+                    return canonicalizeCompactionHandoff(parsed, rawSummary);
                   };
                   let source: ChatGptTurnSession | undefined;
                   let preserveFinalResponse = false;
                   try {
-                    if (freshConversationPerTurn) {
+                    if (freshConversationPerTurn || largeCompaction) {
                       // Full native history is the compaction input. Release an unfinished
                       // browser/tool owner before rebuilding it, but keep a committed final
                       // replayable if it won the native compaction race.
@@ -1068,7 +1084,7 @@ export function createChatGptWebAdapter(
                         : chatGptTurnSessions.retireAndWait(compactedSourceExecutionKey).then(() => {});
                       retainOwnershipUntil(settlement);
                       await withAbort(settlement, operationSignal);
-                      return await runFreshCompaction("configured_fresh_conversation");
+                      return await runFreshCompaction(largeCompaction ? "large_context_bounded_stages" : "configured_fresh_conversation");
                     }
                     // The previous compaction may already have detached the retained head while
                     // its browser/helper is still unwinding. Do not inspect that old epoch or

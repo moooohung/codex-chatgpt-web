@@ -26,6 +26,7 @@ test.each([
   const actions: string[] = [];
   const sendBudgets: number[] = [];
   let stage = "";
+  const finalSend = () => stage === "send" || stage === "multipart_commit_send";
   let released = false;
   let activated = 0;
   let freshChatPreparations = 0;
@@ -59,9 +60,10 @@ test.each([
     attachFiles: async () => { actions.push("files"); },
     sendAttachedPrompt: async (...args: unknown[]) => {
       // Context ingestion cannot mistake tool activity for acknowledgement of a part.
-      expect(args[4]).toBe(stage === "send" ? progress : undefined);
+      expect(args[4]).toBe(finalSend() ? progress : undefined);
       const lifecycle = args[5] as { onSendActivated(): Promise<void>; onSubmitted?: () => void };
-      if (stage !== "send") expect(lifecycle.onSubmitted).toBeUndefined();
+      if (!finalSend()) expect(lifecycle.onSubmitted).toBeUndefined();
+      else expect(typeof lifecycle.onSubmitted).toBe("function");
       await lifecycle.onSendActivated();
       if (cancellationCase || (sizeRejected && stage === "multipart_stage_2_send")) {
         // An observed size rejection must not replace the user's explicit tab-close verdict.
@@ -77,10 +79,10 @@ test.each([
       return "user_turn";
     },
     waitForNewAssistantTurn: async (...args: unknown[]) => {
-      expect(args[4]).toBe(stage === "send" ? progress : undefined);
+      expect(args[4]).toBe(finalSend() ? progress : undefined);
       recoveryCallbacks.push(args[7]);
       actions.push("observe");
-      if (stage === "send") throw finalResponse;
+      if (finalSend()) throw finalResponse;
       if (sizeRejected && stage === "multipart_stage_2_acknowledgement") {
         const signal = args[3] as AbortSignal;
         await new Promise((_resolve, reject) => {

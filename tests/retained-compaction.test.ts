@@ -30,6 +30,7 @@ import {
   createChatGptWebAdapter,
 } from "../src/adapters/chatgpt-web/index";
 import { SUMMARY_PREFIX } from "../src/responses/compaction";
+import { planLargeContextCompaction } from "../src/adapters/chatgpt-web/large-context-compaction";
 import {
   ChatGptTextFeed,
   ChatGptTraceFeed,
@@ -1321,13 +1322,14 @@ test.each([false, true])("structured compact rebuilds canonical context when its
     expect(turn.compaction).toBeTrue();
     const prepared = await turn.prepare();
     const contextText = prepared.multipart?.parts.join("\n") ?? prepared.text;
-    expect(contextText).toContain("Original task");
-    expect(contextText).toContain("Continue with the next step");
     if (experimentalBiggerContext) {
-      expect(prepared.multipart!.parts).toHaveLength(2);
+      expect(prepared.multipart).toBeUndefined();
       expect(prepared.trimmedCompactionMessages).toBeUndefined();
-      const lastRecord = prepared.multipart!.parts.flatMap(part => JSON.parse(part).records).at(-1);
-      expect(lastRecord.message.content).toBe(compact.context.messages.at(-1)!.content);
+      expect(contextText).toContain("codex_compaction_stage_json");
+      expect(Buffer.byteLength(JSON.stringify(contextText))).toBeLessThan(110_000);
+    } else {
+      expect(contextText).toContain("Original task");
+      expect(contextText).toContain("Continue with the next step");
     }
     prepared.release();
     return "Fallback checkpoint from canonical Codex context";
@@ -1341,7 +1343,7 @@ test.each([false, true])("structured compact rebuilds canonical context when its
       { headers: new Headers() },
       event => events.push(event),
     );
-    expect(browserStarts).toBe(1);
+    expect(browserStarts).toBe(planLargeContextCompaction(compact)?.fragments.length ?? 1);
     expect(events.some(event => event.type === "text_delta"
       && event.text.includes("Fallback checkpoint from canonical Codex context"))).toBeTrue();
     expect(events.some(event => event.type === "text_delta"
@@ -1354,7 +1356,7 @@ test.each([false, true])("structured compact rebuilds canonical context when its
   }
 });
 
-test("lost retained browser rebuilds Plus compaction beyond twelve parts without dropping history", async () => {
+test("large Plus compaction bypasses an oversized retained page and stages every historical record", async () => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-large-fallback-compact-"));
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web", baseUrl: `browser://large-fallback-${root}`,
@@ -1388,27 +1390,17 @@ test("lost retained browser rebuilds Plus compaction beyond twelve parts without
     expect(turn.compaction).toBeTrue();
     const prepared = await turn.prepare();
     try {
-      const parts = prepared.multipart!.parts;
-      expect(parts.length).toBeGreaterThan(12);
+      expect(prepared.multipart).toBeUndefined();
       expect(prepared.trimmedCompactionMessages).toBeUndefined();
-      const records = parts.flatMap(part => JSON.parse(part).records).filter(record => record.kind === "message");
-      expect(records.map(record => record.message.content)).toEqual(compact.context.messages.map(message => message.content));
-      const messages = compiledChatGptWebMessages(prepared);
-      const chars = Math.max(...messages.map(message => message.length));
-      expect(chars).toBeLessThanOrEqual(60_000);
-      assertChatGptWebMultipartInputWithinLimits(
-        estimateCompiledChatGptWebInputTokens(prepared, compact.modelId),
-        Math.max(...messages.map(message => estimateTokens(message))), compact.modelId, "high",
-        { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
-        chars, parts.length,
-      );
+      expect(prepared.text).toContain("codex_compaction_stage_json");
+      expect(Buffer.byteLength(JSON.stringify(prepared.text))).toBeLessThan(110_000);
     } finally { prepared.release(); }
     return "Checkpoint after large retained browser loss";
   };
   const events: AdapterEvent[] = [];
   try {
     await createChatGptWebAdapter(provider).runTurn!(compact, { headers: new Headers() }, event => events.push(event));
-    expect(browserStarts).toBe(2);
+    expect(browserStarts).toBe(planLargeContextCompaction(compact)!.fragments.length);
     expect(events.some(event => event.type === "text_delta" && event.text.includes("Checkpoint after large retained browser loss"))).toBeTrue();
     expect(events.some(event => event.type === "text_delta" && event.text.includes("CODEX_LATEST_USER_PROMPT_JSON"))).toBeTrue();
     expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
@@ -1465,6 +1457,48 @@ test.each([false, true])("configured fresh compaction waits for cleanup and pres
     await pending;
     worker.run = originalRun;
     chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.each([false, true])("1.2 million character compaction uses sequential bounded pages and one final handoff (fresh=%s)", async freshConversation => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-staged-compact-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web", baseUrl: `browser://staged-compact-${root}`,
+    chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true, solAvailable: true,
+      extraHighAvailable: true, proAvailable: false, experimentalBiggerContext: true,
+      experimentalFreshConversationPerTurn: freshConversation },
+  };
+  const compact = request(true);
+  compact.context.messages.splice(1, 0, { role: "assistant", timestamp: 1.5,
+    content: [{ type: "text", text: "historical evidence\n".repeat(60_000).slice(0, 1_200_000) }] });
+  const plan = planLargeContextCompaction(compact)!;
+  const worker = ChatGptBrowserWorker.forProvider(provider), originalRun = worker.run;
+  let starts = 0, active = 0, maxActive = 0;
+  worker.run = async turn => {
+    starts++; maxActive = Math.max(maxActive, ++active);
+    expect(turn.modelId).toBe(compact.modelId); expect(turn.reasoning).toBe("high");
+    expect(turn.capabilities.localToolsEnabled).toBeFalse();
+    expect(turn.requireRetainedConversation).toBeUndefined(); expect(turn.conversationKey).toBeUndefined();
+    const prepared = await turn.prepare();
+    expect(prepared.multipart).toBeUndefined(); expect(prepared.trimmedCompactionMessages).toBeUndefined();
+    expect(Buffer.byteLength(JSON.stringify(prepared.text))).toBeLessThan(110_000);
+    expect(prepared.text).toContain("codex_compaction_stage_json");
+    prepared.release(); active--;
+    return "Cumulative evidence checkpoint";
+  };
+  const events: AdapterEvent[] = [];
+  try {
+    await createChatGptWebAdapter(provider).runTurn!(compact, { headers: new Headers() }, event => events.push(event));
+    expect(starts).toBe(plan.fragments.length); expect(starts).toBeGreaterThan(20); expect(maxActive).toBe(1);
+    const outputs = events.filter((e): e is Extract<AdapterEvent, { type: "text_delta" }> => e.type === "text_delta");
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0]!.text).toContain('CODEX_LATEST_USER_PROMPT_JSON\n"Continue with the next step"');
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+  } finally {
+    worker.run = originalRun; chatGptTurnSessions.clear();
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });
   }
