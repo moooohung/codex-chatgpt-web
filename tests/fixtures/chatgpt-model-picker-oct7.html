@@ -1,0 +1,52 @@
+<!-- Minimal offline reproduction of the readonly CDP picker component/props on 2026-10-07.
+     The view action omits aria-hidden; the enclosing view owns it. Latest omits the version
+     at lower effort. Model rows stay attached in the inert advanced view. No network or Send. -->
+<form><div id="prompt-textarea" contenteditable="true">Unsent draft</div>
+  <button type="button" data-codex-intelligence-trigger="true" data-composer-navigation-target="reasoning"
+    aria-label="Select ChatGPT model" aria-haspopup="menu" aria-controls="picker" aria-expanded="false">Medium</button>
+  <button type="submit">Send</button></form>
+<div id="picker" role="menu" hidden>
+  <div data-model-picker-view="simple">
+    <div id="simple" aria-hidden="false" data-active="true">
+      <div role="menuitem" data-model-picker-view-toggle="true" data-interactive="true" tabindex="0" aria-label="Select model">
+        <span data-menu-row-content><span id="model-version"></span><span id="effort-header" data-effort-only="true"></span></span>
+      </div>
+      <span id="announcement" role="status"></span>
+      <div role="menuitem" aria-describedby="announcement" tabindex="0" data-reasoning-slider>
+        <div data-model-picker-power-slider style="width:250px;height:30px"></div>
+      </div>
+    </div>
+    <div id="advanced" aria-hidden="true" data-active="false" inert>
+      <div role="menuitemradio" aria-checked="true" data-family="latest">Latest</div>
+      <div role="menuitemradio" aria-checked="false" data-family="5.6">GPT-5.6 Sol</div>
+      <div role="menuitemradio" aria-checked="false" data-family="5.5">GPT-5.5 Leaving on October 14</div>
+    </div>
+  </div>
+</div>
+<div id="other-picker" role="menu" hidden><div role="menuitemradio" aria-checked="true">GPT-5.6 Sol</div></div>
+<script>
+  const control=document.querySelector('button'), menu=document.querySelector('#picker'), view=menu.firstElementChild;
+  const efforts=['Instant','Medium','High','Extra High','Pro'];
+  let family='latest',value=1;
+  window.sends=0;window.familySelections=[];
+  document.querySelector('form').onsubmit=event=>{event.preventDefault();window.sends++;};
+  function setView(name){view.setAttribute('data-model-picker-view',name);
+    for(const id of ['simple','advanced']){const el=document.getElementById(id),active=id===name;el.setAttribute('aria-hidden',String(!active));el.inert=!active;}}
+  function render(){
+    menu.querySelector('[data-model-picker-power-slider]').innerHTML='<span data-orientation="horizontal" aria-disabled="false">'
+      +efforts.map((_,i)=>'<span data-selected="'+(i<=value)+'"></span>').join('')
+      +'<span role="slider" aria-hidden="true" aria-valuemin="0" aria-valuemax="4" aria-valuenow="'+value+'"></span></span>';
+    const version=document.getElementById('model-version'),header=document.getElementById('effort-header');
+    version.textContent=value===4?(family==='latest'?'6':'5.6'):'';
+    header.textContent=efforts[value];header.setAttribute('data-effort-only',String(value!==4));
+    document.getElementById('announcement').textContent=efforts[value]+', '+(value+1)+' of 5.';
+    for(const row of menu.querySelectorAll('[data-family]'))row.setAttribute('aria-checked',String(row.dataset.family===family));
+  }
+  control.onclick=()=>{menu.hidden=false;control.setAttribute('aria-expanded','true');control.textContent='Thinking effort';render();};
+  menu.querySelector('[data-model-picker-view-toggle]').onclick=()=>setView('advanced');
+  for(const row of menu.querySelectorAll('[data-family]'))row.onclick=()=>{family=row.dataset.family;window.familySelections.push(family);setView('simple');render();};
+  document.addEventListener('keydown',event=>{
+    if(event.key==='Escape'){menu.hidden=true;control.setAttribute('aria-expanded','false');control.textContent=efforts[value];setView('simple');}
+    else if(event.key==='ArrowLeft'||event.key==='ArrowRight'){value=Math.max(0,Math.min(4,value+(event.key==='ArrowRight'?1:-1)));render();event.preventDefault();}
+  });render();
+</script>

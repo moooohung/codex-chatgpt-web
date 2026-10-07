@@ -38,7 +38,7 @@ test("ambiguous family controls remain a terminal rejection", async () => {
   let clicks = 0;
   const menu: any = { menu: { getByRole: () => ({ count: async () => 2, click: async () => { clicks++; } }) } };
   await expect(selectChatGptModelFamily(menu, "5.6", async () => menu, 100))
-    .rejects.toMatchObject({ code: "model_version_unavailable", retryable: false });
+    .rejects.toMatchObject({ code: "chatgpt_model_family_selection_failed", retryable: false });
   expect(clicks).toBe(0);
 });
 

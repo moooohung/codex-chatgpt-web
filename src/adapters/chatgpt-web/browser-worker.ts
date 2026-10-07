@@ -91,7 +91,7 @@ import {
 } from "./page-observation-budget";
 import { ChatGptDeliveryRecovery, chatGptMessageDeliveryTimeoutVisible } from "./delivery-recovery";
 import { createChatGptSubmissionAudit, recoverChatGptSubmission } from "./submission-recovery";
-import { CHATGPT_MODEL_SELECTION_SETTLE_MS, assertChatGptModelFamily, readClosedChatGptEffortLabel, selectChatGptModelFamily } from "./model-selection";
+import { CHATGPT_MODEL_SELECTION_SETTLE_MS, assertChatGptModelFamily, chatGptModelSelectionStageError, chatGptSelectionFamily, readClosedChatGptEffortLabel, selectChatGptModelFamily } from "./model-selection";
 import { ChatGptBrowserRunQueue, MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
   ChatGptCompactionHandoffAccepted,
@@ -2496,6 +2496,7 @@ export class ChatGptBrowserWorker {
           }
         }
       }
+      surfacedError = chatGptModelSelectionStageError(surfacedError, stage);
       console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${surfacedError instanceof Error ? surfacedError.message : String(surfacedError)}`);
       throw surfacedError;
     } finally {
@@ -2640,7 +2641,7 @@ export class ChatGptBrowserWorker {
     if (modelFamily) {
       try {
         activation = await selectChatGptModelFamily(
-          activation, modelFamily, () => activateChatGptEffortMenu(page, currentEffort),
+          activation, chatGptSelectionFamily(modelFamily, mode.effort), () => activateChatGptEffortMenu(page, currentEffort),
         );
       } catch (error) {
         // Capture the owned picker before outer cleanup closes it; preserve the requested family.
@@ -5414,7 +5415,7 @@ export class ChatGptBrowserWorker {
           reuseConversation,
         )
       );
-      let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, selectStagingMode);
+      let mode = await this.runStage(turn.traceId, multipartStages ? "multipart_staging_effort_selection" : "effort_selection", browserStageTimeouts.effortSelection, selectStagingMode);
       await diagnostics.capture(page, "effort-selection-complete");
 
       // One receipt per physical Send, not per native tool call or stream attachment.
@@ -5641,7 +5642,7 @@ export class ChatGptBrowserWorker {
       const recordFinalUsage = await usageSubmission();
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
-        "send",
+        prepared.multipart ? "multipart_commit_send" : "send",
         // A multipart commit lands on a conversation already carrying every staged part, so it
         // needs the same acceptance headroom the stages themselves get.
         prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,

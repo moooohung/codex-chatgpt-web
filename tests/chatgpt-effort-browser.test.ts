@@ -73,7 +73,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot h
     await page.evaluate(() => { (window as any).selectedValue = 1; });
     let changed: any;
     try { await worker.assertSelectedEffort(page, reused); } catch (error) { changed = error; }
-    expect(changed).toMatchObject({ code: "model_version_unavailable" });
+    expect(changed).toMatchObject({ code: "chatgpt_effort_verification_failed" });
     await page.evaluate(() => { (window as any).selectedValue = 2; (window as any).locked = true; });
     let locked: any;
     try { await worker.assertSelectedEffort(page, reused); } catch (error) { locked = error; }
