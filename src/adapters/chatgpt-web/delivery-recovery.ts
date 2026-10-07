@@ -7,12 +7,10 @@ export async function chatGptMessageDeliveryTimeoutVisible(scope: Locator): Prom
       const bounds = node.getBoundingClientRect(), style = getComputedStyle(node);
       return node.isConnected && style.display !== "none" && style.visibility !== "hidden" && (bounds.width > 0 || bounds.height > 0);
     };
-    if (!visible(element)) return false;
-    let container: Element | null = element;
-    for (let depth = 0; container && depth < 3; depth++, container = container.parentElement) {
-      if (Array.from(container.querySelectorAll("button")).some(button => visible(button) && button.textContent?.trim() === "Retry")) return true;
-    }
-    return false;
+    // The caller scopes this to the current bound assistant response. ChatGPT
+    // also renders this exact UI error without a Retry control; quoted prose
+    // and user bubbles are excluded above, regardless of nearby buttons.
+    return visible(element);
   }));
 }
 

@@ -24,6 +24,9 @@ import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { PreparedChatGptTurnStore } from "./prepared-turn";
 import { planLargeContextCompaction, runLargeContextCompaction } from "./large-context-compaction";
+import { prepareCompactionStageTransport } from "./compaction-stage-transport";
+import { compiledChatGptWebMessages } from "./input-tokens";
+import type { CompiledChatGptWebPrompt } from "./prompt";
 import { emitChatGptRoundEvent, isChatGptObserverAbort, chatGptRoundFailureEvidence } from "./round-observer";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds, verifiedNativeRetrySourceTurnId } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -43,6 +46,7 @@ import { logChatGptToolBoundary, waitForChatGptToolBoundaryAck } from "./tool-bo
 import { ChatGptResponseProgressTracker } from "./response-progress";
 import {
   canonicalizeCompactionHandoff,
+  cancelStructuredCompactionNativeTurn,
   existingStructuredCompactionRun,
   MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
   requestRetainedCompactionHandoff,
@@ -434,7 +438,7 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
-    hooks: { onCompactionProgress?: () => void; boundedCompactionStage?: boolean } = {},
+    hooks: { onCompactionProgress?: () => void; boundedCompactionStage?: boolean; compactionStagePrompt?: CompiledChatGptWebPrompt } = {},
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -749,13 +753,13 @@ export function createChatGptWebAdapter(
         ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
         capabilities: turnCapabilities,
         prepare: async () => {
-          const compiled = compileChatGptWebPrompt(
+          const compiled = hooks.compactionStagePrompt ?? compileChatGptWebPrompt(
             checkpointInput.parsed,
             turnCapabilities,
             undefined,
             compileOptionsFor(checkpointInput.parsed),
           );
-          if (hooks.boundedCompactionStage && Buffer.byteLength(JSON.stringify(compiled.text), "utf8") > 110_000) {
+          if (hooks.boundedCompactionStage && compiledChatGptWebMessages(compiled).some(text => Buffer.byteLength(JSON.stringify(text), "utf8") > 110_000)) {
             throw new ChatGptWebAdapterError("The staged compaction prompt exceeds the bounded browser budget; no history was truncated or submitted", {
               status: 409, errorType: "invalid_request_error", code: "compaction_stage_too_large", retryable: false,
             });
@@ -978,6 +982,19 @@ export function createChatGptWebAdapter(
             return;
           }
           if (structuredCompactionRequired) {
+            const nativeIdentity = extractChatGptTurnIdentity(parsed);
+            if (nativeIdentity.threadId) for (const abortedTurnId of priorChatGptAbortedTurnIds(parsed, { requireNativeKind: true })) {
+              const cancellation = cancelStructuredCompactionNativeTurn(nativeIdentity.threadId, abortedTurnId,
+                new ChatGptWebAdapterError("Native Codex interrupted the owning turn; its unfinished compaction was cancelled", {
+                  status: 409, errorType: "invalid_request_error", code: "compaction_native_turn_aborted", retryable: false,
+                }));
+              if (cancellation.cancelled) console.info(`[chatgpt-web] compaction_native_abort ${JSON.stringify({
+                nativeThreadId: nativeIdentity.threadId, nativeTurnId: abortedTurnId, cancelled: cancellation.cancelled,
+              })}`);
+              // An HTTP reconnect is still just an observer. Only Codex's exact
+              // native interruption record revokes an old owner; cleanup gates its successor.
+              await withAbort(cancellation.settlement, incoming.abortSignal);
+            }
             const compactionExecutionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
             const compactedSourceExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
             const handoffTraceId = createHash("sha256")
@@ -1052,13 +1069,14 @@ export function createChatGptWebAdapter(
                     // transport time cannot consume the model-generation window.
                     armHandoffDeadline();
                     let stageNumber = 0;
-                    const runStage = async (input: CodexParsedRequest): Promise<string> => {
+                    const runStage = async (input: CodexParsedRequest, prepared?: CompiledChatGptWebPrompt): Promise<string> => {
                       const fallbackRuntime = startRuntime(
                         input,
                         manualRequest ? environment : undefined,
                         largeCompaction ? `${freshCompactionTraceId}_stage${++stageNumber}` : freshCompactionTraceId,
                         turnCapabilities,
-                        { onCompactionProgress: armHandoffDeadline, ...(largeCompaction ? { boundedCompactionStage: true } : {}) },
+                        { onCompactionProgress: armHandoffDeadline, ...(largeCompaction ? { boundedCompactionStage: true } : {}),
+                          ...(prepared ? { compactionStagePrompt: prepared } : {}) },
                       );
                       retainOwnershipUntil(fallbackRuntime.physicalSettlement);
                       try {
@@ -1074,6 +1092,10 @@ export function createChatGptWebAdapter(
                     };
                     const rawSummary = largeCompaction ? await runLargeContextCompaction({
                       parsed, plan: largeCompaction, signal: operationSignal, run: runStage,
+                      prepare: (stage, options) => prepareCompactionStageTransport(stage, turnCapabilities, { ...options, multipart: experimentalBiggerContext === true }),
+                      onPlan: event => console.info(`[chatgpt-web] compaction_plan ${JSON.stringify({ traceId: compactionTraceId,
+                        nativeThreadId: compactionNativeIdentity.threadId, nativeTurnId: compactionNativeIdentity.turnId,
+                        responseFormat: parsed._compactionResponseFormat ?? "compaction", ...event })}`),
                       onProgress: event => { armHandoffDeadline(); console.info(`[chatgpt-web] compaction_stage ${JSON.stringify({ traceId: compactionTraceId, ...event })}`); },
                     }) : await runStage(parsed);
                     return canonicalizeCompactionHandoff(parsed, rawSummary);
@@ -1222,6 +1244,9 @@ export function createChatGptWebAdapter(
             let summary: string;
             try {
               summary = await withAbort(sharedSummary, incoming.abortSignal);
+              console.info(`[chatgpt-web] compaction_handoff_returned ${JSON.stringify({ traceId: compactionTraceId,
+                nativeThreadId: compactionNativeIdentity.threadId, nativeTurnId: compactionNativeIdentity.turnId,
+                responseFormat: parsed._compactionResponseFormat ?? "compaction", summaryBytes: Buffer.byteLength(summary, "utf8") })}`);
             } catch (error) {
               if (incoming.abortSignal?.aborted
                 && error instanceof DOMException

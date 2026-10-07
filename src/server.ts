@@ -582,6 +582,10 @@ export async function responseRequest(
       _rawBody: { ...body, input: buildCompactV1Output(extractCompactUserMessages(body.input), summary) },
     });
     rememberCompactionContinuation(parsed, identity, [source, v1Source], summary);
+    console.info(`[chatgpt-web] compaction_response_prepared ${JSON.stringify({
+      nativeThreadId: identity.threadId, nativeTurnId: identity.turnId,
+      responseFormat: compactionItem ? "compaction" : "message", summaryBytes: Buffer.byteLength(summary, "utf8"),
+    })}`);
   };
   // Native checkpoint + current turn_context are the durable control plane. Reconstruct their
   // exact authority before transcript-derived trace/revision validation can reject a reconnect.

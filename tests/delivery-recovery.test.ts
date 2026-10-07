@@ -95,5 +95,10 @@ test("delivery-timeout UI detection ignores quoted and historical error text", a
     expect(await chatGptMessageDeliveryTimeoutVisible(scope("current"))).toBe(false);
     document.getElementById("current")!.firstElementChild!.className = "error-banner";
     expect(await chatGptMessageDeliveryTimeoutVisible(scope("current"))).toBe(true);
+    document.getElementById("current")!.querySelector("button")!.remove();
+    expect(await chatGptMessageDeliveryTimeoutVisible(scope("current"))).toBe(true);
+    const currentError = document.getElementById("current")!.querySelector("[data-error-text]")!;
+    (currentError as any).getBoundingClientRect = () => ({ width: 0, height: 0 });
+    expect(await chatGptMessageDeliveryTimeoutVisible(scope("current"))).toBe(false);
   } finally { globalThis.getComputedStyle = original; }
 });

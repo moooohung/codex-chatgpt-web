@@ -241,7 +241,7 @@ function isTurnAbortedNotice(value: Record<string, unknown>): boolean {
 }
 
 /** Native turn ids that Codex has authoritatively marked as interrupted in this thread. */
-export function priorChatGptAbortedTurnIds(parsed: CodexParsedRequest): string[] {
+export function priorChatGptAbortedTurnIds(parsed: CodexParsedRequest, options: { requireNativeKind?: boolean } = {}): string[] {
   const currentTurnId = extractChatGptTurnIdentity(parsed).turnId;
   if (!currentTurnId) return [];
   const body = record(parsed._rawBody);
@@ -252,6 +252,8 @@ export function priorChatGptAbortedTurnIds(parsed: CodexParsedRequest): string[]
     return item?.type === "message"
       && item.role === "user"
       && isTurnAbortedNotice(item)
+      && (!options.requireNativeKind || (Array.isArray(record(item.internal_chat_message_metadata_passthrough)?.content_item_kinds)
+        && (record(item.internal_chat_message_metadata_passthrough)!.content_item_kinds as unknown[]).includes("generic.turn_aborted")))
       && abortedTurnId !== undefined
       && abortedTurnId !== currentTurnId
       ? [abortedTurnId]
