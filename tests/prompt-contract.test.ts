@@ -76,6 +76,11 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(transportOnly).toContain("The Codex Native bridge is attached to this tool-capable response.");
   expect(transportOnly).toContain("use codex_tool_inventory with a focused query and include_schema=true");
   expect(transportOnly).toContain("invoke the exact returned wire_name through codex_tool_call");
+  expect(transportOnly).toContain("For Windows Computer Use, read the installed computer-use skill");
+  expect(transportOnly).toContain("codex_tool_inventory(query=node_repl, include_schema=true)");
+  expect(transportOnly).toContain("@oai/sky");
+  expect(transportOnly).toContain("advertised deferred loader once");
+  expect(transportOnly).toContain("do not replace the installed Computer Use runtime with PowerShell/Python mouse injection");
   expect(transportOnly).toContain(`<codex_native_binding_json>\n${JSON.stringify({ turn_token: token, token_chars: token.length })}\n</codex_native_binding_json>`);
   expect(transportOnly.split(token)).toHaveLength(2);
   expect(transportOnly).toContain("Use only the exact turn_token from codex_native_binding_json for every Codex Native call in this response");

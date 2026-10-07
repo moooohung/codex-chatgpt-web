@@ -3332,7 +3332,12 @@ describe("ChatGPT outer-native harness v4", () => {
           if (direct) {
             const inventory = call("codex_tool_inventory", { turn_token: token, query: "write_stdin" });
             const [catalogRequest] = await broker.nextToolBatch(token);
-            broker.completeTool(token, catalogRequest!.callId, { content: [{ type: "text", text: JSON.stringify({ tools: [], total: 0 }) }] });
+            const catalogCalls: GatewayProgramCall[] = [];
+            const catalogContent = await executeGatewayProgram(catalogRequest!.input!, [], catalogCalls);
+            expect(catalogCalls).toEqual([]);
+            broker.completeTool(token, catalogRequest!.callId, { content: catalogContent.map(item => ({
+              ...item, text: `Script completed\nWall time 0.0 seconds\nOutput:\n${item.text}`,
+            })) });
             expect(JSON.stringify((await inventory).structuredContent)).toContain("30000");
           }
           // A returned poll remains an active session; no retry, stop or capability retirement.

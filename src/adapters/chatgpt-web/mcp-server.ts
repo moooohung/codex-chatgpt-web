@@ -40,6 +40,9 @@ const GATEWAY_AGENT_WAIT_TOOL_NAMES = new Set([
   "collaboration__wait_agent",
 ]);
 
+const COMPUTER_USE_REPL_WIRES = new Set(["mcp__node_repl__js", "node_repl__js"]);
+const COMPUTER_USE_REPL_DESCRIPTION = "Computer Use (computer-use) skill entry point: the node_repl JavaScript session can import the installed @oai/sky package. Read the skill before Windows actions. Registration alone does not verify the Windows helper connection.";
+
 const turnTokenSchema = z.string().min(20).max(256);
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
@@ -184,6 +187,7 @@ function isGatewayAgentWaitTool(name: string): boolean {
 }
 
 function browserToolDescription(tool: CodexTool): string {
+  if (COMPUTER_USE_REPL_WIRES.has(wireName(tool))) return `${tool.description}\n\n${COMPUTER_USE_REPL_DESCRIPTION}`;
   if (isAgentWaitTool(tool)) return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
   if (["write_stdin", "wait"].includes(wireName(tool))) return `${tool.description}\n\n${NATIVE_POLL_TRANSPORT_RULE}`;
   if (!tool.namespace && tool.name === "exec") {
@@ -286,6 +290,7 @@ interface GatewayToolCatalogPage {
 }
 
 function gatewayToolDescription(tool: GatewayToolDescriptor): string {
+  if (COMPUTER_USE_REPL_WIRES.has(tool.name)) return `${tool.description}\n\n${COMPUTER_USE_REPL_DESCRIPTION}`;
   if (["write_stdin", "wait"].includes(tool.name)) return `${tool.description}\n\n${NATIVE_POLL_TRANSPORT_RULE}`;
   if (!isGatewayAgentWaitTool(tool.name)) return tool.description;
   return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
@@ -296,28 +301,31 @@ function gatewayToolCatalogProgram(options: {
   offset: number;
   limit: number;
   excludedNames: string[];
+  catalogNonce: string;
 }): string {
   const needle = options.query?.trim().toLowerCase() ?? "";
   return [
     "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native nested tool registry is unavailable\");",
     `const excludedNames = new Set(${JSON.stringify(options.excludedNames)});`,
     `const needle = ${JSON.stringify(needle)};`,
+    `const computerUseReplWires = new Set(${JSON.stringify([...COMPUTER_USE_REPL_WIRES])});`,
+    `const computerUseReplDescription = ${JSON.stringify(COMPUTER_USE_REPL_DESCRIPTION)};`,
     "const visibleName = name => {",
     "  return typeof name === \"string\" && /^[A-Za-z0-9_$]+$/.test(name) && !excludedNames.has(name);",
     "};",
     "const matches = ALL_TOOLS",
     "  .filter(tool => visibleName(tool?.name))",
     "  .map(tool => ({ name: tool.name, description: typeof tool.description === \"string\" ? tool.description : \"\" }))",
-    "  .filter(tool => !needle || (tool.name + \"\\n\" + tool.description).toLowerCase().includes(needle));",
+    "  .filter(tool => !needle || (tool.name + \"\\n\" + tool.description + (computerUseReplWires.has(tool.name) ? \"\\n\" + computerUseReplDescription : \"\")).toLowerCase().includes(needle));",
     `const page = matches.slice(${options.offset}, ${options.offset + options.limit});`,
-    "text(JSON.stringify({ tools: page, total: matches.length }));",
+    `text(${JSON.stringify(`<codex_native_tool_catalog_${options.catalogNonce}>`)} + "\\n" + JSON.stringify({ tools: page, total: matches.length }) + "\\n" + ${JSON.stringify(`</codex_native_tool_catalog_${options.catalogNonce}>`)});`,
   ].join("\n");
 }
 
 function gatewayToolCatalogPage(response: {
   content: unknown[];
   isError?: boolean;
-}, excludedNames: ReadonlySet<string>): GatewayToolCatalogPage {
+}, excludedNames: ReadonlySet<string>, catalogNonce: string): GatewayToolCatalogPage {
   const textBlocks = response.content
     .map(item => item && typeof item === "object" && !Array.isArray(item)
       ? item as Record<string, unknown>
@@ -331,8 +339,18 @@ function gatewayToolCatalogPage(response: {
     throw new Error("Native nested tool inventory returned an invalid text response");
   }
   let parsed: unknown;
+  // The native exec handler prepends timing/output labels. Frame only our own catalog,
+  // using a fresh nonce so a stale response or unrelated JSON cannot register tools.
+  const open = `<codex_native_tool_catalog_${catalogNonce}>`;
+  const close = `</codex_native_tool_catalog_${catalogNonce}>`;
+  const text = textBlocks[0]!;
+  const start = text.indexOf(open);
+  const end = text.indexOf(close, start + open.length);
+  if (start < 0 || end < 0 || text.indexOf(open, start + open.length) >= 0 || text.indexOf(close, end + close.length) >= 0) {
+    throw new Error("Native nested tool inventory returned an invalid catalog frame");
+  }
   try {
-    parsed = JSON.parse(textBlocks[0]!);
+    parsed = JSON.parse(text.slice(start + open.length, end).trim());
   } catch {
     throw new Error("Native nested tool inventory returned invalid JSON");
   }
@@ -875,7 +893,7 @@ export async function runChatGptMcpServer(options: {
           wireName(tool),
           tool.name,
           tool.namespace ?? "",
-          tool.description,
+          browserToolDescription(tool),
         ].join("\n").toLowerCase().includes(needle));
         const directPage = directMatches.slice(offset, offset + limit).map(tool => ({
           wire_name: wireName(tool),
@@ -890,6 +908,7 @@ export async function runChatGptMcpServer(options: {
         const gateway = execGateway(bound);
         if (gateway) {
           const excludedGatewayNames = bound.tools.map(wireName);
+          const catalogNonce = randomBytes(16).toString("hex");
           const nestedOffset = Math.max(0, offset - directMatches.length);
           const nestedLimit = Math.max(0, limit - directPage.length);
           const response = await invoke(claimed.bindingId, bound, gateway, {
@@ -901,9 +920,10 @@ export async function runChatGptMcpServer(options: {
               // duplicate or reopen an outer tool that this contract deliberately hid (including
               // our own MCP namespace in Zero Risk).
               excludedNames: excludedGatewayNames,
+              catalogNonce,
             }),
           }, extra.signal);
-          const catalog = gatewayToolCatalogPage(response, new Set(excludedGatewayNames));
+          const catalog = gatewayToolCatalogPage(response, new Set(excludedGatewayNames), catalogNonce);
           nestedTotal = catalog.total;
           nestedPage = catalog.tools.map(tool => ({
             wire_name: tool.name,

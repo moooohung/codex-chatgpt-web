@@ -51,6 +51,20 @@ const reportSpec = {
   }],
 };
 
+const replSchema = {
+  type: "object", properties: { code: { type: "string" }, timeout_ms: { type: "integer" }, title: { type: "string" } },
+  required: ["code"], additionalProperties: false,
+};
+const replSpec = {
+  type: "namespace", name: "mcp__node_repl", tools: [{
+    type: "function", name: "js", description: "Execute JavaScript in a persistent node_repl session", parameters: replSchema,
+  }],
+};
+const fixtureImage = {
+  type: "image" as const, mimeType: "image/png",
+  data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/2uQAAAAASUVORK5CYII=",
+};
+
 function environment(tools: CodexTool[]): ChatGptTurnEnvironment {
   return { cwd: testRoot, roots: [testRoot], writableRoots: [testRoot], sandboxPolicy: { type: "dangerFullAccess" }, tools };
 }
@@ -182,7 +196,7 @@ test("an advertised JavaScript gateway dispatches only its registered nested goa
       await new AsyncFunction("tools", "ALL_TOOLS", "text", program)(implementations,
         wires.map((name, index) => ({ name, description: `${name} fixture only; input schema: ${JSON.stringify(index < 3 ? goalSpecs[index]!.parameters : reportSchema)}` })),
         (value: unknown) => content.push({ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }));
-      return { content };
+      return { content: content.map(item => ({ ...item, text: `Script completed\nWall time 0.0 seconds\nOutput:\n${item.text}` })) };
     };
     const pending = f.call("codex_tool_inventory", { turn_token: token, query: "goal", include_schema: true });
     const [catalogRequest] = await f.broker.nextToolBatch(token);
@@ -207,5 +221,97 @@ test("an advertised JavaScript gateway dispatches only its registered nested goa
     f.broker.completeTool(token, missingRequest!.callId, { content: [{ type: "text", text: "not available" }], isError: true });
     expect((await missing).isError).toBe(true);
     expect(calls).toHaveLength(wires.length);
+  } finally { await f.close(); }
+}, 15_000);
+
+test("Computer Use discovery returns only registered node_repl wires and preserves schemas and screenshots", async () => {
+  const f = await fixture("computer-use-direct");
+  try {
+    const parsed = parseRequest({ model: "chatgpt-web/gpt-5.6-sol", tools: [replSpec], input: [] });
+    const token = await f.register(parsed.context.tools ?? []);
+    for (const query of ["computer use", "computer-use", "node_repl", "@oai/sky"]) {
+      const inventory = await f.call("codex_tool_inventory", { turn_token: token, query, include_schema: true });
+      expect(inventory.structuredContent).toMatchObject({ total: 1, tools: [{
+        wire_name: "mcp__node_repl__js", kind: "function", parameters: replSchema,
+      }] });
+    }
+    const arguments_ = { code: "await sky.get_window_state({ window: globalThis.fixtureWindow });", title: "fixture capture" };
+    const pending = f.call("codex_tool_call", { turn_token: token, wire_name: "mcp__node_repl__js", arguments: arguments_ });
+    const [request] = await f.broker.nextToolBatch(token);
+    expect(request).toMatchObject({ wireName: "mcp__node_repl__js", arguments: arguments_ });
+    f.broker.completeTool(token, request!.callId, { content: [{ type: "text", text: "fixture capture" }, fixtureImage] });
+    expect((await pending).content).toContainEqual(fixtureImage);
+
+    const missingToken = await f.register(commandTools);
+    const missing = await f.call("codex_tool_inventory", { turn_token: missingToken, query: "computer use", include_schema: true });
+    expect(missing.structuredContent).toMatchObject({ total: 0, tools: [], discovery_tools: [{ wire_name: "tool_search" }] });
+    const unavailable = await f.call("codex_tool_call", { turn_token: missingToken,
+      wire_name: "mcp__node_repl__js", arguments: arguments_ });
+    expect(unavailable.isError).toBe(true);
+  } finally { await f.close(); }
+}, 15_000);
+
+test("Computer Use through the nested exec gateway retains observation, input and image results", async () => {
+  const f = await fixture("computer-use-gateway");
+  try {
+    const token = await f.register([{ name: "exec", description: "Run JavaScript with ALL_TOOLS", parameters: {}, freeform: true }]);
+    const wire = "mcp__node_repl__js";
+    const calls: unknown[] = [];
+    const execute = async (program: string) => {
+      const content: Array<{ type: "text"; text: string } | typeof fixtureImage> = [];
+      const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+      await new AsyncFunction("tools", "ALL_TOOLS", "text", "image", "audio", "generatedImage", program)(
+        { [wire]: async (args: unknown) => {
+          calls.push(args);
+          return { content: [{ type: "text", text: "fixture receipt" }, fixtureImage] };
+        } },
+        [{ name: wire, description: `Execute JavaScript in a persistent node_repl session. Input schema: ${JSON.stringify(replSchema)}` }],
+        (value: unknown) => content.push({ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }),
+        (value: typeof fixtureImage) => content.push(value),
+        () => { throw new Error("Unexpected audio"); }, () => { throw new Error("Unexpected generated image"); },
+      );
+      return { content };
+    };
+    const inventoryPending = f.call("codex_tool_inventory", { turn_token: token, query: "computer use", include_schema: true });
+    const [catalog] = await f.broker.nextToolBatch(token);
+    f.broker.completeTool(token, catalog!.callId, await execute(catalog!.input!));
+    expect((await inventoryPending).structuredContent).toMatchObject({ total: 1, tools: [{ wire_name: wire, kind: "gateway" }] });
+    expect(calls).toHaveLength(0);
+    for (const code of [
+      "await sky.list_windows();",
+      "await sky.get_window_state({ window: globalThis.fixtureWindow });",
+      "await sky.click({ window: globalThis.fixtureWindow, element_index: 3 });",
+      "await sky.type_text({ window: globalThis.fixtureWindow, text: 'fixture only' });",
+    ]) {
+      const args = { code, timeout_ms: 10_000, title: "Computer Use fixture" };
+      const pending = f.call("codex_tool_call", { turn_token: token, wire_name: wire, arguments: args });
+      const [request] = await f.broker.nextToolBatch(token);
+      f.broker.completeTool(token, request!.callId, await execute(request!.input!));
+      expect((await pending).content).toContainEqual(fixtureImage);
+      expect(calls.at(-1)).toEqual(args);
+    }
+  } finally { await f.close(); }
+}, 15_000);
+
+test("a prior native exec catalog frame cannot register tools for a subsequent inventory call", async () => {
+  const f = await fixture("computer-use-stale-catalog");
+  try {
+    const token = await f.register([{ name: "exec", description: "Run JavaScript with ALL_TOOLS", parameters: {}, freeform: true }]);
+    const first = f.call("codex_tool_inventory", { turn_token: token, query: "computer use", include_schema: true });
+    const [request] = await f.broker.nextToolBatch(token);
+    const content: Array<{ type: "text"; text: string }> = [];
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+    await new AsyncFunction("ALL_TOOLS", "text", request!.input!)(
+      [{ name: "mcp__node_repl__js", description: "Execute JavaScript in node_repl" }],
+      (value: string) => content.push({ type: "text", text: `Script completed\nWall time 0.0 seconds\nOutput:\n${value}` }),
+    );
+    f.broker.completeTool(token, request!.callId, { content });
+    expect((await first).structuredContent).toMatchObject({ total: 1, tools: [{ wire_name: "mcp__node_repl__js" }] });
+    const second = f.call("codex_tool_inventory", { turn_token: token, query: "computer use", include_schema: true });
+    const [next] = await f.broker.nextToolBatch(token);
+    f.broker.completeTool(token, next!.callId, { content });
+    const stale = await second;
+    expect(stale.isError).toBe(true);
+    expect(JSON.stringify(stale.content)).toContain("invalid catalog frame");
   } finally { await f.close(); }
 }, 15_000);
