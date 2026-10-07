@@ -4973,12 +4973,40 @@ export class ChatGptBrowserWorker {
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
     let originalError: unknown;
+    let failedTabRelease: ReturnType<typeof notifyLauncherTurn> | undefined;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     let heartbeatInFlight = false;
     let heartbeatPending = false;
     let activityFinished = false;
     let lastHeartbeatFailureAt = 0;
     let activityStage: "preparing" | "sending" | "chatgpt" = "preparing";
+    const describeTerminal = (error: unknown): {
+      status: "completed" | "failed" | "aborted"; message: string;
+    } => ({
+      status: error instanceof ChatGptCompactionHandoffAccepted
+        ? "completed"
+        : (error instanceof DOMException && error.name === "AbortError")
+        || (error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")
+        ? "aborted" : "failed",
+      message: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+    });
+    const releaseFailedTab = async (error: unknown) => {
+      // A fatal browser verdict no longer needs its live document. Release this exact lease
+      // through the normal control API before diagnostics or transport cleanup can stall.
+      // Accepted compaction is successful control flow and keeps its existing retention contract.
+      if (error instanceof ChatGptCompactionHandoffAccepted) return;
+      if (!failedTabRelease) {
+        ({ status: terminal, message: terminalMessage } = describeTerminal(error));
+        activityFinished = true;
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        failedTabRelease = notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+          phase: "end", traceId: turn.traceId, helperPid: process.pid, status: terminal,
+          ...(terminalMessage ? { message: terminalMessage } : {}),
+        });
+      }
+      // The outer finally still owns this result and the existing control-error policy.
+      await failedTabRelease.catch(() => {});
+    };
     const sendHeartbeat = () => {
       if (activityFinished) return;
       if (heartbeatInFlight) { heartbeatPending = true; return; }
@@ -5025,22 +5053,16 @@ export class ChatGptBrowserWorker {
           sendHeartbeat();
           await turn.onSubmitted?.();
         },
-      }, surfaceId, undefined, reused, lease.trackUsage === true);
+      }, surfaceId, undefined, reused, lease.trackUsage === true, releaseFailedTab);
     } catch (error) {
       originalError = error;
-      terminal = error instanceof ChatGptCompactionHandoffAccepted
-        ? "completed"
-        : (error instanceof DOMException && error.name === "AbortError")
-        || (error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")
-        ? "aborted"
-        : "failed";
-      terminalMessage = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+      ({ status: terminal, message: terminalMessage } = describeTerminal(error));
       throw error;
     } finally {
       activityFinished = true;
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       try {
-        const release = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+        const release = await (failedTabRelease ?? notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
           phase: "end",
           traceId: turn.traceId,
           helperPid: process.pid,
@@ -5050,7 +5072,7 @@ export class ChatGptBrowserWorker {
           ...(terminal === "completed" && (turn.nativeConnector || turn.capabilities.localToolsEnabled)
             ? { connectorBound: true }
             : {}),
-        });
+        }));
         if (release.cancelledByUser) throw chatGptBrowserTabClosedError();
         if (release.authenticationRequired && terminal !== "aborted") {
           throw new ChatGptWebAdapterError(
@@ -5077,6 +5099,7 @@ export class ChatGptBrowserWorker {
     maintenancePage?: Page,
     reuseConversation = false,
     trackUsage = false,
+    onFailure?: (error: unknown) => Promise<void>,
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
@@ -6030,6 +6053,7 @@ export class ChatGptBrowserWorker {
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
       );
+      await onFailure?.(error);
       if (diagnosticPage && !diagnosticPage.isClosed()) {
         await diagnostics.capture(diagnosticPage, "turn-failed", error);
       }

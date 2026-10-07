@@ -3148,6 +3148,52 @@ test("failed and aborted browser turns release their tab slots", async () => {
   }
 });
 
+test("terminal release closes only the exact failed owner even when retention is requested", async () => {
+  const closed = [], logged = [];
+  const makeTab = (id, helperPid, rendererPid) => ({
+    id, traceId: `trace_${id}`, helperPid, status: "running", loading: true,
+    conversationKey: "a".repeat(64), connectorIdentity: "Codex Native2",
+    view: { webContents: {
+      isDestroyed: () => closed.includes(id), getOSProcessId: () => rendererPid,
+      setBackgroundThrottling() {}, close: () => closed.push(id),
+    } },
+  });
+  const failed = makeTab("failed-large", 777, 42364);
+  const protectedTabs = [makeTab("dashboard", 778, 42400), makeTab("review", 779, 42404), makeTab("pro", 780, 42408)];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([failed, ...protectedTabs].map(tab => [tab.id, tab])),
+    closedTurnOwners: new Map(), userCancelledTurnOwners: new Map(), selectedTabId: "dashboard",
+    window: { contentView: { removeChildView() {} } }, syncViewVisibility() {}, writeDescriptor() {}, publishState() {},
+    snapshot: () => ({ tabs: [] }), logger: { info: (event, detail) => logged.push({ event, detail }) },
+  });
+  await assert.rejects(fixture.endTurn(failed.traceId, 778, "failed", false), /ownership mismatch/);
+  assert.deepEqual(closed, []);
+  assert.deepEqual(await fixture.endTurn(failed.traceId, 777, "failed", false, "observation failed", true, true),
+    { cancelledByUser: false });
+  assert.deepEqual(closed, [failed.id]);
+  assert.deepEqual([...fixture.turnTabs.keys()], protectedTabs.map(tab => tab.id));
+  assert.equal(fixture.selectedTabId, "dashboard");
+  assert.ok(protectedTabs.every(tab => tab.status === "running"));
+  assert.deepEqual(logged.at(-1), { event: "browser.tab_released",
+    detail: { tabId: failed.id, traceId: failed.traceId, rendererPid: 42364, status: "error" } });
+});
+
+test("tab snapshots expose native renderer ownership without a DOM probe", () => {
+  const fixture = Object.create(BrowserHost.prototype);
+  const contents = { isDestroyed: () => false, getOSProcessId: () => 42364,
+    executeJavaScript: () => { throw new Error("must not inspect DOM"); } };
+  const tab = { id: "large", traceId: "trace_large", status: "running", label: "ChatGPT", view: { webContents: contents } };
+  assert.equal(fixture.tabSnapshot(tab).rendererPid, 42364);
+  for (const pid of [0, -1, undefined, "42364", NaN]) {
+    contents.getOSProcessId = () => pid;
+    assert.equal(fixture.tabSnapshot(tab).rendererPid, null);
+  }
+  contents.getOSProcessId = () => { throw new Error("renderer exiting"); };
+  assert.equal(fixture.tabSnapshot(tab).rendererPid, null);
+  contents.isDestroyed = () => true;
+  assert.equal(fixture.tabSnapshot(tab).rendererPid, null);
+});
+
 function manualTurnFixture() {
   const clipboardWrites = [];
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {

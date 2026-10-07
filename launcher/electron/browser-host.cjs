@@ -53,6 +53,16 @@ const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
 const TURN_MEMORY_PROBE_TIMEOUT_MS = 1_000;
 
+function rendererPidFor(contents) {
+  try {
+    if (!contents || contents.isDestroyed?.()) return null;
+    const pid = contents.getOSProcessId?.();
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 function recordTurnActivity(tab, now = Date.now()) {
   const state = tab.approvalPending ? "approval"
     : tab.turnProgress?.activeToolCalls > 0 ? "tools" : tab.turnProgress?.stage ?? "unknown";
@@ -610,6 +620,7 @@ class BrowserHost {
     const snapshot = {
       id: tab.id,
       traceId: tab.traceId,
+      rendererPid: rendererPidFor(tab.view?.webContents),
       title: accountNameForTab(tab) ? `${accountNameForTab(tab)} - ${tab.label}` : tab.label,
       status: tab.status,
       loading: tab.loading === true,
@@ -1856,6 +1867,7 @@ class BrowserHost {
     const homeTab = {
       id: "home",
       traceId: null,
+      rendererPid: rendererPidFor(this.view?.webContents),
       title: manualInteraction ? "ChatGPT" : this.state.title || "ChatGPT",
       status: this.state.status,
       loading: this.state.loading === true,
@@ -3019,7 +3031,9 @@ class BrowserHost {
       }
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
-      this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
+      this.logger.info("browser.tab_reused", {
+        tabId: existing.id, traceId, rendererPid: rendererPidFor(existing.view?.webContents),
+      });
       return {
         surfaceId: existing.surfaceId,
         tabId: existing.id,
@@ -3043,7 +3057,9 @@ class BrowserHost {
       this.presentTurnView(tab, false);
     }
     this.publishState?.(this.snapshot());
-    this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
+    this.logger.info("browser.tab_created", {
+      tabId: tab.id, traceId, rendererPid: rendererPidFor(tab.view?.webContents), tabCount: this.turnTabs.size,
+    });
     this.writeDescriptor();
     return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
   }
@@ -3112,9 +3128,10 @@ class BrowserHost {
     }
     // A browser tab represents an active Codex turn, not durable task history. The result already
     // lives in Codex, so release the terminal browser document without touching concurrent turns.
+    const rendererPid = rendererPidFor(tab.view?.webContents);
     this.removeTurnTab(tab, false);
     if (hideAfterTurn && !this.activeTraceId) this.hide();
-    this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
+    this.logger.info("browser.tab_released", { tabId: tab.id, traceId, rendererPid, status: tab.status });
     return { cancelledByUser, ...(authenticationRequired ? { authenticationRequired: true } : {}) };
   }
 

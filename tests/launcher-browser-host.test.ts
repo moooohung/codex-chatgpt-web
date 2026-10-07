@@ -22,7 +22,9 @@ import {
   waitForLauncherManualTerminal,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
+import { EventEmitter } from "node:events";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptCompactionHandoffAccepted, chatGptBrowserTabClosedError } from "../src/adapters/chatgpt-web/adapter-error";
 
 const roots: string[] = [];
 
@@ -84,6 +86,83 @@ test("launcher activity follows actual send callbacks and current-turn tool coun
     expect([activated, submitted]).toEqual([1, 1]);
   } finally { server.stop(true); }
 });
+
+test.each(["failed", "cancelled", "handoff", "release-error"])(
+  "terminal tab release preserves failure, cancellation and accepted handoff while diagnostics stall (%s)", async kind => {
+    const root = mkdtempSync(join(tmpdir(), "failed-tab-diagnostic-"));
+    roots.push(root);
+    let diagnosticStarted!: () => void, finishDiagnostic!: () => void;
+    const diagnosticReached = new Promise<void>(resolve => { diagnosticStarted = resolve; });
+    const diagnosticGate = new Promise<void>(resolve => { finishDiagnostic = resolve; });
+    const controller = new AbortController();
+    const verdict = kind === "handoff" ? new ChatGptCompactionHandoffAccepted()
+      : kind === "cancelled" ? chatGptBrowserTabClosedError() : new Error("fixture DOM observation failed");
+    const messages: Array<Record<string, unknown>> = [];
+    let failed = false, promptReleased = false, physicalSettled = false;
+    const page = Object.assign(new EventEmitter(), {
+      isClosed: () => false,
+      evaluate: async () => {
+        if (failed) { diagnosticStarted(); await diagnosticGate; }
+        return { bodyTextChars: 1_200_000 };
+      },
+    });
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      const message = await request.json() as Record<string, unknown>;
+      messages.push(message);
+      if (message.phase === "end" && kind === "release-error") {
+        return Response.json({ error: "fixture control unavailable" }, { status: 503 });
+      }
+      return Response.json(message.phase === "start"
+        ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+        : { cancelledByUser: false });
+    } });
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", appName: "Codex Native2", browserDiagnosticsPath: root,
+        browserHostDescriptorPath: descriptorFile(`http://127.0.0.1:${server.port}`) },
+      runStage: async (_trace: string, _name: string, _budget: number, action: (signal: AbortSignal) => Promise<unknown>) =>
+        action(controller.signal),
+      prepareChatSurface: async () => {
+        failed = true;
+        if (kind === "handoff") {
+          controller.abort(verdict);
+          throw new DOMException("observation aborted", "AbortError");
+        }
+        throw verdict;
+      },
+      runBrowserTurn: function (...args: unknown[]) {
+        // Keep the actual browser catch/diagnostics/finally, substituting only its owned page.
+        args[2] = page;
+        return (ChatGptBrowserWorker.prototype as any).runBrowserTurn.apply(this, args);
+      },
+    });
+    const outcome = worker.runExclusive({
+      traceId: `large_failed_tab_${kind.replace("-", "_")}`, modelId: "gpt-5.6-sol", modelFamily: "5.6", reasoning: "high",
+      capabilities: { localToolsEnabled: false, solAvailable: true }, abortSignal: controller.signal,
+      conversationKey: "b".repeat(64), retainConversation: true,
+      prepare: async () => ({ text: "fixture input", images: [], release: () => { promptReleased = true; } }),
+    }).then(() => { physicalSettled = true; return undefined; }, (error: unknown) => { physicalSettled = true; return error; });
+    try {
+      await Promise.race([diagnosticReached, outcome.then((error: unknown) => { throw error ?? new Error("diagnostic was skipped"); })]);
+      const earlyEnds = messages.filter(message => message.phase === "end");
+      expect(earlyEnds).toHaveLength(kind === "handoff" ? 0 : 1);
+      if (kind !== "handoff") expect(earlyEnds[0]).toMatchObject({
+        helperPid: process.pid, status: kind === "cancelled" ? "aborted" : "failed",
+      });
+      expect(earlyEnds[0]?.retain).toBeUndefined();
+      expect(promptReleased).toBeFalse();
+      expect(physicalSettled).toBeFalse();
+      finishDiagnostic();
+      expect(await outcome).toBe(verdict);
+      expect(promptReleased).toBeTrue();
+      expect(messages.filter(message => message.phase === "end")).toHaveLength(1);
+      if (kind === "handoff") expect(messages.at(-1)).toMatchObject({ status: "completed", retain: true });
+    } finally {
+      finishDiagnostic();
+      await outcome;
+      server.stop(true);
+    }
+  },
+);
 
 test("a blocked sign-in replaces an opaque navigation abort with a non-retryable session error", async () => {
   let needsSignIn: unknown = true;
