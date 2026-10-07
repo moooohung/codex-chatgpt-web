@@ -86,6 +86,36 @@ window before acting. Closed-source helper behavior, a genuinely missing
 runtime registration, and future runtime envelope changes remain separate
 failure possibilities.
 
+## Production worker follow-up: safety-review reports
+
+The resumed Web Sol RouteCompass packet 99 continuation run 3 registered real
+`mcp__node_repl__js` calls. At 2026-10-07 20:50:52Z, the outer runtime returned
+`clicked route 02`. At 20:52:35Z, the assistant clarified that this click had
+succeeded and that the following screenshot observation was refused before
+execution. The user's dashboard screenshot corroborates that clarification.
+
+An audit at 21:07:53Z found 30 node_repl calls and 30 returned results, including
+click, drag and key-input calls. It found no corresponding explicit safety error
+in the outer tool outputs. This does not disprove a refusal before dispatch:
+such a request never reaches the outer tool runtime. The browser checkpoints
+record structural counts rather than conversation contents, so they do not
+preserve the historical refusal card either. A later read-only CDP probe found
+no matching error card in the currently open tabs; it is not a historical trace
+of the reported refusal.
+
+Keep the failed stage precise: the second click succeeded; the subsequent
+capture refusal is an assistant report whose original review response has not
+been recovered. Do not classify this as a missing helper, a proven bridge
+timeout, a fabricated refusal, or a confirmed upstream defect.
+
+The generic `codex_tool_call` can execute arbitrary registered tools and
+JavaScript, so its conservative write/destructive annotations cannot truthfully
+be weakened for all calls. A separate bounded observation operation with clear
+inputs and accurate annotations is a possible interface improvement, subject
+to the normal tool review and approval contract. Its effect on this particular
+refusal remains unverified. Do not replay a denied action through another input
+mechanism or treat an input's missing refresh as proof that the input failed.
+
 ## Deferred installation guard
 
 The previous capacity reservation completed without invoking the installer or
