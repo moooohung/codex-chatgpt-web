@@ -11,6 +11,22 @@ interface BoundaryTracker {
 const captures = new WeakMap<BoundaryTracker, Map<number, Promise<void>>>();
 const traces = new WeakMap<BoundaryTracker, string>();
 
+export type ChatGptBrowserProbe = "response_probe" | "session_alert" | "rate_limit_dialog"
+  | "terminal_error" | "turn_state" | "response_projection" | "delivery_timeout"
+  | "tool_confirmation" | "diagnostic_capture" | "boundary_turn_state" | "boundary_response_projection";
+
+/** Slow/failing observations carry only the operation name and timing, never DOM content. */
+export function logChatGptBrowserObservation(
+  tracker: BoundaryTracker | undefined,
+  probe: ChatGptBrowserProbe,
+  details: { elapsedMs: number; timeoutMs: number; failed: boolean; errorCode?: string },
+): void {
+  if (!details.failed && details.elapsedMs < 1_000) return;
+  const traceId = tracker ? traces.get(tracker) : undefined;
+  const shortId = /^[a-f0-9]{12,}$/i.test(traceId ?? "") ? traceId!.slice(0, 12) : "untracked";
+  console.info(`[chatgpt-web] browser_observation ${JSON.stringify({ traceId: shortId, probe, ...details })}`);
+}
+
 export function setChatGptToolBoundaryTrace(tracker: BoundaryTracker, traceId: string): void {
   traces.set(tracker, traceId);
 }

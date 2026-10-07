@@ -2706,6 +2706,15 @@ function dialogPage(text: string, buttonText = "Got it", errorActionVisible = fa
       },
       last: () => dialog,
       isVisible: async () => matches,
+      evaluateAll: async (projection: (elements: Element[]) => boolean) => {
+        const { createWindow } = require("@mixmark-io/domino");
+        const window = createWindow('<div id="alert"></div>');
+        const element = window.document.getElementById("alert");
+        element.textContent = text;
+        Object.defineProperty(element, "isConnected", { value: true });
+        element.getBoundingClientRect = () => ({ width: 1, height: 1 });
+        return projection([element]);
+      },
       getByRole: (_role: string, options?: { name?: string | RegExp }) => {
         const name = options?.name;
         buttonMatches = name === undefined

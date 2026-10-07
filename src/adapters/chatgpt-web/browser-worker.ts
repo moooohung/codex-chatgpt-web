@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { observeChatGptToolBoundaryDuring, captureChatGptToolBoundary, chatGptToolBoundaryError, setChatGptToolBoundaryTrace } from "./tool-boundary";
+import { observeChatGptToolBoundaryDuring, captureChatGptToolBoundary, chatGptToolBoundaryError, setChatGptToolBoundaryTrace, logChatGptBrowserObservation, type ChatGptBrowserProbe } from "./tool-boundary";
+import { chatGptTerminalErrorUiVisible } from "./terminal-ui";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
@@ -821,7 +822,7 @@ export async function dismissChatGptTemporaryChatOnboarding(page: Page): Promise
   return true;
 }
 
-type ChatGptTextScope = Pick<Locator, "getByText" | "getByTestId">;
+type ChatGptTextScope = Pick<Locator, "locator" | "getByTestId">;
 
 const chatGptSubscriptionFailureAlert = (page: Page): Locator => page
   .locator('[role="alert"]')
@@ -847,11 +848,9 @@ export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<voi
   );
 }
 
-const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
-  // A grouped response can include a large user prompt. Bound the known short error copy so
-  // repeated prefixes without a help link cannot backtrack across that whole prompt per match.
-  .getByText(/Something went wrong[\s\S]{0,512}help\.openai\.com/i)
-  .last();
+const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Pick<Locator, "isVisible"> => ({
+  isVisible: () => scope.locator(":scope").evaluateAll(chatGptTerminalErrorUiVisible),
+});
 
 // The current UI renders message_length_exceeds_limit as an ordinary response error.
 // Observe only browser-issued submissions from this owned page after Send is activated;
@@ -939,7 +938,7 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
       { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
     );
   }
-  if (!await chatGptTerminalErrorAlert(scope).isVisible().catch(() => false)) return;
+  if (!await chatGptTerminalErrorAlert(scope).isVisible()) return;
   throw new ChatGptWebAdapterError(
     "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
     { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
@@ -3240,12 +3239,28 @@ export class ChatGptBrowserWorker {
     completionTracker: ChatGptCompletionTracker | undefined,
     observe: (signal: AbortSignal) => Promise<T>,
     timeoutMs = chatGptPageObservationTimeoutMs(page),
+    probe: ChatGptBrowserProbe = "response_probe",
   ): Promise<T> {
-    return await observeChatGptToolBoundaryDuring({
-      progress: externalProgress, signal,
-      capture: ownedSignal => this.observeSubmissionToolBoundary(page, baseline, ownedSignal, externalProgress, completionTracker),
-      observe: ownedSignal => withChatGptBrowserObservationTimeout(withBrowserTurnAbort(observe(ownedSignal), ownedSignal), timeoutMs),
-    });
+    const started = Date.now();
+    let failed = false;
+    let failure: unknown;
+    try {
+      return await observeChatGptToolBoundaryDuring({
+        progress: externalProgress, signal,
+        capture: ownedSignal => this.observeSubmissionToolBoundary(page, baseline, ownedSignal, externalProgress, completionTracker),
+        observe: ownedSignal => withChatGptBrowserObservationTimeout(withBrowserTurnAbort(observe(ownedSignal), ownedSignal), timeoutMs),
+      });
+    } catch (error) {
+      failed = true;
+      failure = error;
+      throw error;
+    } finally {
+      logChatGptBrowserObservation(completionTracker, probe, {
+        elapsedMs: Date.now() - started, timeoutMs, failed,
+        ...(failed ? { errorCode: failure instanceof ChatGptWebAdapterError ? failure.code
+          : failure instanceof ChatGptBrowserObservationTimeoutError ? "browser_observation_timeout" : "observation_failed" } : {}),
+      });
+    }
   }
 
   private async observeSubmissionToolBoundary(
@@ -3262,7 +3277,7 @@ export class ChatGptBrowserWorker {
     await captureChatGptToolBoundary({
       tracker: completionTracker, revision, signal,
       timeoutMs: chatGptPageObservationTimeoutMs(page),
-      capture: capture ?? (ownedSignal => this.currentSubmissionAnswerText(page, baseline, ownedSignal)),
+      capture: capture ?? (ownedSignal => this.currentSubmissionAnswerText(page, baseline, ownedSignal, completionTracker)),
       acknowledge: () => externalProgress.acknowledgeToolBatch(revision),
     });
   }
@@ -3271,16 +3286,20 @@ export class ChatGptBrowserWorker {
     page: Page,
     baseline: ChatGptSubmissionBaseline,
     signal?: AbortSignal,
+    completionTracker?: ChatGptCompletionTracker,
   ): Promise<string> {
-    const state = await this.submissionDomState(page, baseline.domCache, signal);
+    const state = await this.observeResponseProbe(page, baseline, signal, undefined, completionTracker,
+      ownedSignal => this.submissionDomState(page, baseline.domCache, ownedSignal), undefined, "boundary_turn_state");
     const identity = chatGptNewTurnIdentity(
       baseline.initialTurnIdentities,
       state.responseIdentities,
     );
     if (!identity) return "";
     const locator = page.locator(chatGptAssistantTurnSelector(identity));
-    const snapshot = await this.responseDomSnapshot(locator, {});
+    const snapshot = await this.observeResponseProbe(page, baseline, signal, undefined, completionTracker,
+      ownedSignal => this.boundedResponseDomSnapshot(page, locator, {}, ownedSignal), undefined, "boundary_response_projection");
     if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
+    if (snapshot.responsePresent === false) throw chatGptToolBoundaryError("chatgpt_tool_boundary_observation_failed");
     return snapshot.visibleText;
   }
 
@@ -3331,12 +3350,12 @@ export class ChatGptBrowserWorker {
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT web turn timed out");
       }
-      await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptSessionFailureAlert(observationPage));
-      await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptRateLimitDialog(observationPage));
+      await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptSessionFailureAlert(observationPage), undefined, "session_alert");
+      await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptRateLimitDialog(observationPage), undefined, "rate_limit_dialog");
       let state: ChatGptSubmissionDomState;
       try {
         state = await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker,
-          ownedSignal => this.submissionDomState(observationPage, observationBaseline.domCache, ownedSignal));
+          ownedSignal => this.submissionDomState(observationPage, observationBaseline.domCache, ownedSignal), undefined, "turn_state");
       } catch (error) {
         const latestProgress = externalProgress?.snapshot();
         if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
@@ -3389,6 +3408,7 @@ export class ChatGptBrowserWorker {
           if (!identity) return ""; // A successful DOM read can prove an empty pre-tool boundary.
           const snapshot = await this.responseDomSnapshot(observationPage.locator(chatGptAssistantTurnSelector(identity)), {});
           if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
+          if (snapshot.responsePresent === false) throw chatGptToolBoundaryError("chatgpt_tool_boundary_observation_failed");
           return snapshot.visibleText;
         },
       );
@@ -4075,8 +4095,8 @@ export class ChatGptBrowserWorker {
       CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
     );
     const responseDomCache: ChatGptResponseDomCache = {};
-    const observeProbe = <T>(observe: (signal: AbortSignal) => Promise<T>) =>
-      this.observeResponseProbe(page, submissionBaseline, abortSignal, externalProgress, completionTracker, observe);
+    const observeProbe = <T>(observe: (signal: AbortSignal) => Promise<T>, timeoutMs?: number, probe?: ChatGptBrowserProbe) =>
+      this.observeResponseProbe(page, submissionBaseline, abortSignal, externalProgress, completionTracker, observe, timeoutMs, probe);
     let responseTurn = initialResponseTurn;
     for (;;) {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
@@ -4088,9 +4108,9 @@ export class ChatGptBrowserWorker {
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
       }
-      await observeProbe(() => throwIfChatGptSessionFailureAlert(page));
-      await observeProbe(() => throwIfChatGptTerminalErrorAlert(responseTurn.locator));
-      let snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal));
+      await observeProbe(() => throwIfChatGptSessionFailureAlert(page), undefined, "session_alert");
+      await observeProbe(() => throwIfChatGptTerminalErrorAlert(responseTurn.locator), undefined, "terminal_error");
+      let snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal), undefined, "response_projection");
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         const rebound = await this.reconcileAssistantTurnBinding(
           page,
@@ -4102,7 +4122,7 @@ export class ChatGptBrowserWorker {
           responseTurn = rebound;
           responseDomCache.key = undefined;
           responseDomCache.snapshot = undefined;
-          snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal));
+          snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal), undefined, "response_projection");
         }
       }
       if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
@@ -5673,8 +5693,8 @@ export class ChatGptBrowserWorker {
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
-      const observeProbe = <T>(observe: (signal: AbortSignal) => Promise<T>, timeoutMs?: number) =>
-        this.observeResponseProbe(page, submissionBaseline, turn.abortSignal, turn.externalProgress, completionTracker, observe, timeoutMs);
+      const observeProbe = <T>(observe: (signal: AbortSignal) => Promise<T>, timeoutMs?: number, probe?: ChatGptBrowserProbe) =>
+        this.observeResponseProbe(page, submissionBaseline, turn.abortSignal, turn.externalProgress, completionTracker, observe, timeoutMs, probe);
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,
@@ -5691,7 +5711,7 @@ export class ChatGptBrowserWorker {
           }
           : undefined,
       );
-      await observeProbe(() => diagnostics.capture(page, "send-accepted"));
+      await observeProbe(() => diagnostics.capture(page, "send-accepted"), undefined, "diagnostic_capture");
 
       let lastHeartbeat = 0;
       let finalText = "";
@@ -5750,10 +5770,10 @@ export class ChatGptBrowserWorker {
         if (deadline !== undefined && Date.now() >= deadline) {
           throw new Error("ChatGPT web turn timed out");
         }
-        await observeProbe(() => throwIfChatGptSessionFailureAlert(page));
+        await observeProbe(() => throwIfChatGptSessionFailureAlert(page), undefined, "session_alert");
         let checkedDeliveryIdentity = responseTurn.identity;
-        let deliveryTimedOut = await observeProbe(() => chatGptMessageDeliveryTimeoutVisible(responseTurn.locator));
-        if (!deliveryTimedOut) await observeProbe(() => throwIfChatGptTerminalErrorAlert(responseTurn.locator));
+        let deliveryTimedOut = await observeProbe(() => chatGptMessageDeliveryTimeoutVisible(responseTurn.locator), undefined, "delivery_timeout");
+        if (!deliveryTimedOut) await observeProbe(() => throwIfChatGptTerminalErrorAlert(responseTurn.locator), undefined, "terminal_error");
 
         if (mode.localTools && await observeProbe(ownedSignal => resolveChatGptToolConfirmation(
           page,
@@ -5777,7 +5797,7 @@ export class ChatGptBrowserWorker {
           continue;
         }
 
-        let snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal));
+        let snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal), undefined, "response_projection");
         if (!snapshot.responsePresent) {
           try {
             const rebound = await withChatGptBrowserObservationTimeout(
@@ -5793,7 +5813,7 @@ export class ChatGptBrowserWorker {
               responseTurn = rebound;
               responseDomCache.key = undefined;
               responseDomCache.snapshot = undefined;
-              snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal));
+              snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal), undefined, "response_projection");
             }
           } catch (error) {
             if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
@@ -5824,7 +5844,7 @@ export class ChatGptBrowserWorker {
         if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
         if (checkedDeliveryIdentity !== responseTurn.identity) {
           checkedDeliveryIdentity = responseTurn.identity;
-          deliveryTimedOut = await observeProbe(() => chatGptMessageDeliveryTimeoutVisible(responseTurn.locator));
+          deliveryTimedOut = await observeProbe(() => chatGptMessageDeliveryTimeoutVisible(responseTurn.locator), undefined, "delivery_timeout");
         }
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
         // The page was read successfully, so the fault budget is genuinely consecutive even when
