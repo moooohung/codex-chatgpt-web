@@ -38,6 +38,7 @@ import {
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
 import { ChatGptExternalTurnProgress } from "./turn-progress";
+import { logChatGptToolBoundary, waitForChatGptToolBoundaryAck } from "./tool-boundary";
 import { ChatGptResponseProgressTracker } from "./response-progress";
 import {
   canonicalizeCompactionHandoff,
@@ -1406,22 +1407,20 @@ export function createChatGptWebAdapter(
                   if (!externalProgress) {
                     throw new Error("ChatGPT broker returned tools for a read-only browser turn");
                   }
+                  let boundaryRevision = 0;
                   if (requests.length > 0) {
-                    const revision = externalProgress.recordToolBatch(requests.length);
+                    const revision = boundaryRevision = externalProgress.recordToolBatch(requests.length);
                     if (!session.runtime.manualControl) {
-                      // The browser outcome is in the same race below and owns the semantic DOM and
-                      // renderer deadlines. A second fixed timer here can retire an accepted turn
-                      // while its same-tab observer is still recovering. Keep the causal barrier —
-                      // tools are not emitted until the browser captures their text boundary — but
-                      // let browser settlement or request cancellation end the wait.
-                      await externalProgress.waitForToolBatchObservation(
-                        revision,
-                        toolWaitAbort.signal,
-                      );
+                      // The 30s receipt budget exceeds the largest 20s capture budget. A lost ACK
+                      // is a boundary failure, never permission to emit tools or wait for MCP retirement.
+                      await waitForChatGptToolBoundaryAck({
+                        traceId, revision, signal: toolWaitAbort.signal,
+                        wait: signal => externalProgress!.waitForToolBatchObservation(revision, signal),
+                      });
                     }
                     externalProgress.assertToolBatchActive(revision);
                   }
-                  return { type: "tools" as const, requests };
+                  return { type: "tools" as const, requests, boundaryRevision };
                 }).catch(error => toolWaitAbort.signal.aborted
                   ? new Promise<never>(() => {})
                   : Promise.reject(error))
@@ -1515,11 +1514,13 @@ export function createChatGptWebAdapter(
                 validateBatchTools(parsed, next.requests);
                 roundStage = "tool_batch_emission";
                 session.setOutstanding(next.requests, roundReasoning, session.roundEvents(roundKey));
+                logChatGptToolBoundary("emission_begin", traceId, next.boundaryRevision, { toolCount: next.requests.length });
                 emitRoundBatch(buffer => emitToolBatch(
                   next.requests,
                   estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments, minimalTransport),
                   buffer,
                 ));
+                logChatGptToolBoundary("emission_complete", traceId, next.boundaryRevision, { toolCount: next.requests.length });
                 session.completeRound(roundKey);
                 return;
               }
@@ -1548,6 +1549,7 @@ export function createChatGptWebAdapter(
           // race as an invalid token. Validation and result-delivery errors are separate stages.
           const settled = session.settledOutcome();
           if (roundStage === "browser_or_tool_wait" && settled?.type === "error") error = settled.error;
+          if (error instanceof ChatGptWebAdapterError && error.code.startsWith("chatgpt_tool_boundary_")) roundStage = "tool_boundary_observation";
           console.warn(`[chatgpt-web] response_round_failed ${JSON.stringify({ traceId, stage: roundStage,
             submission: session.runtime.submission?.phase ?? "unknown", outstandingTools: session.outstanding().length,
             observerAborted: incoming.abortSignal?.aborted === true, ...chatGptRoundFailureEvidence(error) })}`);

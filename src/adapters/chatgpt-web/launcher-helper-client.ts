@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { chatGptToolBoundaryError, logChatGptToolBoundary } from "./tool-boundary";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -413,24 +414,29 @@ export class LauncherBrowserHelperClient {
       return;
     }
     const pending = this.pending.get(message.id);
-    if (!pending) return;
+    if (!pending) {
+      if (message.type === "event" && message.event === "tool_batch_observed") logChatGptToolBoundary("ack_orphaned", message.id, message.revision);
+      return;
+    }
     if (message.type === "event") {
       if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
       else if (message.event === "tool_batch_observed") {
+        logChatGptToolBoundary("ack_received", pending.turn.traceId, message.revision);
         const progress = pending.turn.externalProgress;
         if (!progress) {
           this.abortWithLocalFailure(
             message.id,
-            new Error("Launcher browser helper observed a tool boundary for a turn without progress transport"),
+            chatGptToolBoundaryError("chatgpt_tool_boundary_ack_context_missing"),
             pending,
           );
           return;
         }
-        void progress.acknowledgeToolBatch(message.revision).catch(error => this.abortWithLocalFailure(
-          message.id,
-          error instanceof Error ? error : new Error(String(error)),
-          pending,
-        ));
+        void progress.acknowledgeToolBatch(message.revision).then(() => {
+          logChatGptToolBoundary("ack_accepted", pending.turn.traceId, message.revision);
+        }).catch(error => {
+          logChatGptToolBoundary("ack_rejected", pending.turn.traceId, message.revision);
+          this.abortWithLocalFailure(message.id, chatGptToolBoundaryError("chatgpt_tool_boundary_ack_rejected", error), pending);
+        });
       }
       else if (message.event === "completion_fence_begin") {
         const fence = pending.turn.completionFence;

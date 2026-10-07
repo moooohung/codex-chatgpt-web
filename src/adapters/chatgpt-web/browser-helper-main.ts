@@ -9,6 +9,7 @@ import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
 import { isChatGptWebMultipartPartCount, type CompiledChatGptWebPrompt } from "./prompt";
 import { ChatGptMirroredTurnProgress } from "./turn-progress";
+import { chatGptToolBoundaryError, logChatGptToolBoundary } from "./tool-boundary";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
 
 interface RunMessage {
@@ -207,9 +208,12 @@ async function run(message: RunMessage): Promise<void> {
   // inheriting revisions recorded for an earlier turn that happened to share the id.
   const progress = message.turn.externalProgress
     ? new ChatGptMirroredTurnProgress(revision => {
+      logChatGptToolBoundary("ack_send_begin", message.turn.traceId, revision);
       if (!writeProtocol({ type: "event", id: message.id, event: "tool_batch_observed", revision })) {
-        throw new Error("Browser helper could not acknowledge the observed Codex tool boundary");
+        logChatGptToolBoundary("ack_send_failed", message.turn.traceId, revision);
+        throw chatGptToolBoundaryError("chatgpt_tool_boundary_ack_send_failed");
       }
+      logChatGptToolBoundary("ack_sent", message.turn.traceId, revision);
     })
     : undefined;
   if (progress) turnProgress.set(message.id, progress);

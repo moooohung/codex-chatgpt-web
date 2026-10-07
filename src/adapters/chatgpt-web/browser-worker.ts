@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { captureChatGptToolBoundary, chatGptToolBoundaryError, setChatGptToolBoundaryTrace } from "./tool-boundary";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
@@ -3043,13 +3044,7 @@ export class ChatGptBrowserWorker {
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const progress = externalProgress?.snapshot();
-      if (progress
-        && externalProgress
-        && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
-        const boundaryText = await this.currentSubmissionAnswerText(page, baseline, signal);
-        completionTracker.observeToolBatch(progress.lastToolBatchRevision, boundaryText);
-        await externalProgress.acknowledgeToolBatch(progress.lastToolBatchRevision);
-      }
+      if (externalProgress) await this.observeSubmissionToolBoundary(page, baseline, signal, externalProgress, completionTracker);
       if (progress && progress.lastToolBatchRevision > initialToolBatchRevision) return "mcp_tool_call";
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptRateLimitDialog(page);
@@ -3232,6 +3227,25 @@ export class ChatGptBrowserWorker {
     return evidence;
   }
 
+  private async observeSubmissionToolBoundary(
+    page: Page,
+    baseline: ChatGptSubmissionBaseline,
+    signal?: AbortSignal,
+    externalProgress?: ChatGptTurnProgressReader,
+    completionTracker?: ChatGptCompletionTracker,
+    capture?: (signal: AbortSignal) => Promise<string>,
+  ): Promise<void> {
+    const revision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
+    if (!externalProgress || revision === 0) return;
+    if (!completionTracker) throw chatGptToolBoundaryError("chatgpt_tool_boundary_context_missing");
+    await captureChatGptToolBoundary({
+      tracker: completionTracker, revision, signal,
+      timeoutMs: chatGptPageObservationTimeoutMs(page),
+      capture: capture ?? (ownedSignal => this.currentSubmissionAnswerText(page, baseline, ownedSignal)),
+      acknowledge: () => externalProgress.acknowledgeToolBatch(revision),
+    });
+  }
+
   private async currentSubmissionAnswerText(
     page: Page,
     baseline: ChatGptSubmissionBaseline,
@@ -3244,7 +3258,9 @@ export class ChatGptBrowserWorker {
     );
     if (!identity) return "";
     const locator = page.locator(chatGptAssistantTurnSelector(identity));
-    return (await this.responseDomSnapshot(locator, {})).visibleText;
+    const snapshot = await this.responseDomSnapshot(locator, {});
+    if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
+    return snapshot.visibleText;
   }
 
   private async captureSubmissionBaseline(page: Page, submittedText?: string): Promise<ChatGptSubmissionBaseline> {
@@ -3282,6 +3298,8 @@ export class ChatGptBrowserWorker {
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       if (observationPage.isClosed()) throw chatGptBrowserTabClosedError();
+      // Release only a captured boundary, before alert probes which can stall in a busy renderer.
+      await this.observeSubmissionToolBoundary(observationPage, observationBaseline, signal, externalProgress, completionTracker);
       let progress = externalProgress?.snapshot();
       if (progress?.lastProgressAt !== undefined) {
         responseDeadline = Math.min(
@@ -3292,8 +3310,8 @@ export class ChatGptBrowserWorker {
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT web turn timed out");
       }
-      await throwIfChatGptSessionFailureAlert(observationPage);
-      await throwIfChatGptRateLimitDialog(observationPage);
+      await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(throwIfChatGptSessionFailureAlert(observationPage), signal), chatGptPageObservationTimeoutMs(observationPage));
+      await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(throwIfChatGptRateLimitDialog(observationPage), signal), chatGptPageObservationTimeoutMs(observationPage));
       let state: ChatGptSubmissionDomState;
       try {
         state = await this.submissionDomState(
@@ -3347,18 +3365,15 @@ export class ChatGptBrowserWorker {
           { status: 502, errorType: "server_error", code: "chatgpt_submission_failed", retryable: false },
         );
       }
-      if (progress
-        && externalProgress
-        && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
-        const boundaryText = identity
-          ? (await this.responseDomSnapshot(
-            observationPage.locator(chatGptAssistantTurnSelector(identity)),
-            {},
-          )).visibleText
-          : "";
-        completionTracker.observeToolBatch(progress.lastToolBatchRevision, boundaryText);
-        await externalProgress.acknowledgeToolBatch(progress.lastToolBatchRevision);
-      }
+      await this.observeSubmissionToolBoundary(
+        observationPage, observationBaseline, signal, externalProgress, completionTracker,
+        async () => {
+          if (!identity) return ""; // A successful DOM read can prove an empty pre-tool boundary.
+          const snapshot = await this.responseDomSnapshot(observationPage.locator(chatGptAssistantTurnSelector(identity)), {});
+          if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
+          return snapshot.visibleText;
+        },
+      );
       if (identity) return {
         identity,
         locator: observationPage.locator(chatGptAssistantTurnSelector(identity)),
@@ -3923,6 +3938,7 @@ export class ChatGptBrowserWorker {
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
   ): Promise<ChatGptSubmissionEvidence> {
+    if (completionTracker && submissionLifecycle?.traceId) setChatGptToolBoundaryTrace(completionTracker, submissionLifecycle.traceId);
     const composer = await this.activeComposer(page);
     const sendButton = composer
       .locator("xpath=ancestor::form[1]")
@@ -3970,6 +3986,7 @@ export class ChatGptBrowserWorker {
           ),
           reconcile: async signal => {
             if ((externalProgress?.snapshot().lastToolBatchRevision ?? 0) > initialToolBatchRevision) {
+              await this.observeSubmissionToolBoundary(page, baseline, signal, externalProgress, completionTracker);
               return { state: "accepted", evidence: "mcp_tool_call" as ChatGptSubmissionEvidence };
             }
             const evidence = await this.currentSubmissionEvidence(page, baseline, signal);
@@ -4053,7 +4070,7 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
-      let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+      let snapshot = await this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, abortSignal);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         const rebound = await this.reconcileAssistantTurnBinding(
           page,
@@ -4065,7 +4082,7 @@ export class ChatGptBrowserWorker {
           responseTurn = rebound;
           responseDomCache.key = undefined;
           responseDomCache.snapshot = undefined;
-          snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+          snapshot = await this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, abortSignal);
         }
       }
       if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
@@ -4073,11 +4090,12 @@ export class ChatGptBrowserWorker {
       if (externalProgress
         && externalProgressSnapshot
         && completionTracker.needsToolBatchObservation(externalProgressSnapshot.lastToolBatchRevision)) {
-        completionTracker.observeToolBatch(
-          externalProgressSnapshot.lastToolBatchRevision,
-          snapshot.visibleText,
-        );
-        await externalProgress.acknowledgeToolBatch(externalProgressSnapshot.lastToolBatchRevision);
+        await captureChatGptToolBoundary({
+          tracker: completionTracker, revision: externalProgressSnapshot.lastToolBatchRevision,
+          signal: abortSignal, timeoutMs: chatGptPageObservationTimeoutMs(page),
+          capture: async () => snapshot.visibleText,
+          acknowledge: () => externalProgress.acknowledgeToolBatch(externalProgressSnapshot.lastToolBatchRevision),
+        });
       }
       const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
         externalProgressSnapshot,
@@ -4332,6 +4350,18 @@ export class ChatGptBrowserWorker {
       await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
     }
     throw new Error("ChatGPT accepted the prompt attachments but did not make the message ready to send");
+  }
+
+  private async boundedResponseDomSnapshot(
+    page: Page,
+    responseTurn: Locator,
+    cache?: ChatGptResponseDomCache,
+    signal?: AbortSignal,
+  ): Promise<ChatGptResponseDomSnapshot> {
+    return withChatGptBrowserObservationTimeout(
+      withBrowserTurnAbort(this.responseDomSnapshot(responseTurn, cache), signal),
+      chatGptPageObservationTimeoutMs(page),
+    );
   }
 
   private async responseDomSnapshot(
@@ -5590,6 +5620,7 @@ export class ChatGptBrowserWorker {
       ));
       await diagnostics.capture(page, "file-attachment-complete");
       let completionTracker = new ChatGptCompletionTracker();
+      setChatGptToolBoundaryTrace(completionTracker, turn.traceId);
       const recordFinalUsage = await usageSubmission();
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
@@ -5724,7 +5755,7 @@ export class ChatGptBrowserWorker {
           continue;
         }
 
-        let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+        let snapshot = await this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, turn.abortSignal);
         if (!snapshot.responsePresent) {
           try {
             const rebound = await withChatGptBrowserObservationTimeout(
@@ -5740,7 +5771,7 @@ export class ChatGptBrowserWorker {
               responseTurn = rebound;
               responseDomCache.key = undefined;
               responseDomCache.snapshot = undefined;
-              snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+              snapshot = await this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, turn.abortSignal);
             }
           } catch (error) {
             if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
@@ -5784,11 +5815,12 @@ export class ChatGptBrowserWorker {
         if (turn.externalProgress
           && externalProgressSnapshot
           && completionTracker.needsToolBatchObservation(externalProgressSnapshot.lastToolBatchRevision)) {
-          completionTracker.observeToolBatch(
-            externalProgressSnapshot.lastToolBatchRevision,
-            snapshot.visibleText,
-          );
-          await turn.externalProgress.acknowledgeToolBatch(externalProgressSnapshot.lastToolBatchRevision);
+          await captureChatGptToolBoundary({
+            tracker: completionTracker, revision: externalProgressSnapshot.lastToolBatchRevision,
+            signal: turn.abortSignal, timeoutMs: chatGptPageObservationTimeoutMs(page),
+            capture: async () => snapshot.visibleText,
+            acknowledge: () => turn.externalProgress!.acknowledgeToolBatch(externalProgressSnapshot.lastToolBatchRevision),
+          });
         }
         const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
           externalProgressSnapshot,
@@ -5867,7 +5899,7 @@ export class ChatGptBrowserWorker {
             if (partial.delta) emitMarkdownDelta(partial.delta);
             if (partial.markdown) deliveryRecoveryText += `${deliveryRecoveryText ? "\n\n" : ""}${partial.markdown}`;
             markdownBuffer = new ChatGptMarkdownBuffer(); turn.onTextDelta("\n\n");
-            completionTracker = new ChatGptCompletionTracker(); domHealthTracker = new ChatGptTurnDomHealthTracker();
+            completionTracker = new ChatGptCompletionTracker(); setChatGptToolBoundaryTrace(completionTracker, turn.traceId); domHealthTracker = new ChatGptTurnDomHealthTracker();
             responseDomCache.key = undefined; responseDomCache.snapshot = undefined;
             capturedResponse = false; sawRunning = false; loggedCompletionWait = false; completionFenceRevision = undefined;
             continue;

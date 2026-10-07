@@ -1086,7 +1086,8 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
 
   expect(binding.identity).toBe("conversation-turn-assistant");
   expect(binding.locator).toBe(assistantLocator);
-  expect(observedPages).toEqual([firstPage, reboundPage]);
+  // Capture the pending boundary before alert probes, then bind the current assistant identity.
+  expect(observedPages).toEqual([firstPage, reboundPage, reboundPage]);
   const acknowledgementDeadline = new AbortController();
   const timer = setTimeout(() => acknowledgementDeadline.abort(), 100);
   try {
@@ -3229,18 +3230,22 @@ test("proven current-turn MCP activity is conclusive submission evidence", async
       signal?: AbortSignal,
       externalProgress?: ChatGptExternalTurnProgress,
       initialToolBatchRevision?: number,
+      completionTracker?: ChatGptCompletionTracker,
     ): Promise<unknown>;
   }).waitForSubmissionAccepted;
   const progress = new ChatGptExternalTurnProgress();
   progress.recordToolBatch(1);
+  const worker = Object.create(ChatGptBrowserWorker.prototype);
+  worker.currentSubmissionAnswerText = async () => "";
 
   await expect(waitForSubmissionAccepted.call(
-    {},
+    worker,
     {} as Page,
     {},
     undefined,
     progress,
     0,
+    new ChatGptCompletionTracker(),
   )).resolves.toBe("mcp_tool_call");
 
 });
@@ -4258,7 +4263,9 @@ test("multipart observation surfaces Stopped thinking on its first observation e
     acknowledgeToolBatch: async () => { acknowledged = true; },
   };
   const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
-  await expect(observe.call({ responseDomSnapshot: async () => { observations += 1; return snapshot; } },
+  const worker = Object.create(ChatGptBrowserWorker.prototype);
+  worker.responseDomSnapshot = async () => { observations += 1; return snapshot; };
+  await expect(observe.call(worker,
     page, binding, {}, {}, Date.now() + 1_000, undefined, progress,
   )).rejects.toMatchObject({ code: "chatgpt_stopped_thinking", retryable: false });
   expect(observations).toBe(1);
