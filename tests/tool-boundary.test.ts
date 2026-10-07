@@ -21,7 +21,7 @@ test("reconcile after accepted MCP captures and ACKs before the daemon can emit,
     let emitted = false, revision = 0, sends = 0;
     let emission!: Promise<void>;
     const hidden: any = { filter: () => hidden, last: () => hidden, getByText: () => hidden,
-      isVisible: async () => false, count: async () => 0 };
+      isVisible: async () => false, count: async () => 0, evaluateAll: async () => undefined };
     let auditIdentity: string | undefined;
     const page = Object.assign(new EventEmitter(), {
       isClosed: () => false, locator: () => hidden,
@@ -164,7 +164,7 @@ test("pending MCP boundary is ACKed before a blocked assistant alert probe, whic
   const worker: any = Object.create(ChatGptBrowserWorker.prototype);
   const progress = new ChatGptExternalTurnProgress(), tracker = new ChatGptCompletionTracker(), controller = new AbortController();
   const revision = progress.recordToolBatch(1);
-  const hidden: any = { filter: () => hidden, last: () => hidden, isVisible: () => new Promise(() => {}) };
+  const hidden: any = { filter: () => hidden, last: () => hidden, isVisible: () => new Promise(() => {}), evaluateAll: () => new Promise(() => {}) };
   const page = { isClosed: () => false, locator: () => hidden };
   worker.submissionDomState = async () => ({ responseIdentities: [] });
   const observed = worker.waitForNewAssistantTurn(page, { initialTurnIdentities: [], domCache: {} }, undefined,

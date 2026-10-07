@@ -2,6 +2,7 @@ import { chatGptSubmissionDomProjection } from "./submission-ui";
 import { randomUUID } from "node:crypto";
 import { observeChatGptToolBoundaryDuring, captureChatGptToolBoundary, chatGptToolBoundaryError, setChatGptToolBoundaryTrace, logChatGptBrowserObservation, type ChatGptBrowserProbe } from "./tool-boundary";
 import { chatGptTerminalErrorUiVisible } from "./terminal-ui";
+import { chatGptSessionFailureUiState } from "./session-ui";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
@@ -827,24 +828,20 @@ export async function dismissChatGptTemporaryChatOnboarding(page: Page): Promise
 
 type ChatGptTextScope = Pick<Locator, "locator" | "getByTestId">;
 
-const chatGptSubscriptionFailureAlert = (page: Page): Locator => page
-  .locator('[role="alert"]')
-  .filter({ hasText: /Failed to load subscription/i })
-  .last();
-
 const chatGptExpiredSessionAlert = (page: Page): Locator => page
   .locator('[role="alert"], [role="dialog"]')
   .filter({ hasText: /Your session has expired|你的工作階段已過期|您的工作階段已過期|你的会话已过期|您的会话已过期/i })
   .last();
 
 export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<void> {
-  if (await chatGptExpiredSessionAlert(page).isVisible().catch(() => false)) {
+  const state = await page.locator('[role="alert"], [role="dialog"]').evaluateAll(chatGptSessionFailureUiState);
+  if (state === "expired") {
     throw new ChatGptWebAdapterError(
       "The ChatGPT session has expired. Sign in again in Codex Web GPT.",
       { status: 401, errorType: "authentication_error", code: "chatgpt_session_expired", retryable: false },
     );
   }
-  if (!await chatGptSubscriptionFailureAlert(page).isVisible().catch(() => false)) return;
+  if (state !== "subscription") return;
   throw new ChatGptWebAdapterError(
     "ChatGPT could not load the account subscription. Reload ChatGPT inside the launcher and retry; sign out only if the error persists.",
     { status: 503, errorType: "server_error", code: "chatgpt_subscription_unavailable", retryable: true },
@@ -1313,8 +1310,10 @@ export const CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS = 5_000;
 export const MAX_CHATGPT_BROWSER_PAGE_REBINDS = 2;
 
 export class ChatGptBrowserObservationTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`ChatGPT browser DOM observation did not respond within ${timeoutMs}ms`);
+  readonly code = "browser_observation_timeout";
+  constructor(readonly timeoutMs: number, readonly probe?: ChatGptBrowserProbe, cause?: unknown) {
+    super(`ChatGPT browser DOM observation did not respond within ${timeoutMs}ms`
+      + (probe ? ` (probe=${probe})` : ""), cause === undefined ? undefined : { cause });
     this.name = "ChatGptBrowserObservationTimeoutError";
   }
 }
@@ -3235,8 +3234,9 @@ export class ChatGptBrowserWorker {
       });
     } catch (error) {
       failed = true;
-      failure = error;
-      throw error;
+      failure = error instanceof ChatGptBrowserObservationTimeoutError && !error.probe
+        ? new ChatGptBrowserObservationTimeoutError(error.timeoutMs, probe, error) : error;
+      throw failure;
     } finally {
       logChatGptBrowserObservation(completionTracker, probe, {
         elapsedMs: Date.now() - started, timeoutMs, failed,
@@ -3427,10 +3427,10 @@ export class ChatGptBrowserWorker {
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT web turn timed out");
       }
-      await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptSessionFailureAlert(observationPage), undefined, "session_alert");
-      await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptRateLimitDialog(observationPage), undefined, "rate_limit_dialog");
       let state: ChatGptSubmissionDomState;
       try {
+        await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptSessionFailureAlert(observationPage), undefined, "session_alert");
+        await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptRateLimitDialog(observationPage), undefined, "rate_limit_dialog");
         state = await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker,
           async ownedSignal => {
             const observed = await this.submissionDomState(observationPage, observationBaseline.domCache, ownedSignal);
@@ -3438,6 +3438,8 @@ export class ChatGptBrowserWorker {
             return observed;
           }, undefined, "turn_state");
       } catch (error) {
+        signal?.throwIfAborted();
+        if (error instanceof ChatGptWebAdapterError || error instanceof DOMException && error.name === "AbortError") throw error;
         const latestProgress = externalProgress?.snapshot();
         if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
           recoveryAttempts += 1;
@@ -5947,46 +5949,20 @@ export class ChatGptBrowserWorker {
 
         let snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal), undefined, "response_projection");
         if (!snapshot.responsePresent) {
-          try {
-            const rebound = await withChatGptBrowserObservationTimeout(
-              this.reconcileAssistantTurnBinding(
-                page,
-                submissionBaseline,
-                responseTurn,
-                turn.abortSignal,
-              ),
-              chatGptPageObservationTimeoutMs(page),
-            );
-            if (rebound.identity !== responseTurn.identity) {
-              responseTurn = rebound;
-              responseDomCache.key = undefined;
-              responseDomCache.snapshot = undefined;
-              snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal), undefined, "response_projection");
-            }
-          } catch (error) {
-            if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
-            consecutiveObservationRebinds += 1;
-            if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
-              throw new Error(
-                `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
-                { cause: error },
-              );
-            }
-            await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
-            submissionBaseline = {
-              ...submissionBaseline,
-              userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
-              responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
-              domCache: {},
-            };
-            responseTurn = {
-              ...responseTurn,
-              locator: page.locator(chatGptAssistantTurnSelector(responseTurn.identity)),
-            };
+          const rebound = await withChatGptBrowserObservationTimeout(
+            this.reconcileAssistantTurnBinding(
+              page,
+              submissionBaseline,
+              responseTurn,
+              turn.abortSignal,
+            ),
+            chatGptPageObservationTimeoutMs(page),
+          );
+          if (rebound.identity !== responseTurn.identity) {
+            responseTurn = rebound;
             responseDomCache.key = undefined;
             responseDomCache.snapshot = undefined;
-            await diagnostics.capture(page, "response-page-rebound");
-            continue;
+            snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal), undefined, "response_projection");
           }
         }
         if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
@@ -6216,6 +6192,34 @@ export class ChatGptBrowserWorker {
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
        } catch (error) {
+        // Every response probe can stall, including session alerts before the response projection.
+        // Reconnect only the same leased page; retain submission identity and the complete ACK tracker.
+        if (error instanceof ChatGptBrowserObservationTimeoutError && !observedThisIteration && launcherObservationRecovery) {
+          turn.abortSignal?.throwIfAborted();
+          consecutiveObservationRebinds += 1;
+          if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+            throw new ChatGptWebAdapterError(
+              `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`
+              + (error.probe ? ` (probe=${error.probe})` : ""),
+              { status: 502, errorType: "server_error", code: "browser_observation_recovery_exhausted", retryable: false, cause: error },
+            );
+          }
+          if (deadline !== undefined && Date.now() >= deadline) throw error;
+          await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
+          turn.abortSignal?.throwIfAborted();
+          submissionBaseline = {
+            ...submissionBaseline,
+            userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+            responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+            domCache: {},
+          };
+          responseTurn = { ...responseTurn, locator: page.locator(chatGptAssistantTurnSelector(responseTurn.identity)) };
+          responseDomCache.key = undefined;
+          responseDomCache.snapshot = undefined;
+          completionFenceRevision = undefined;
+          await diagnostics.capture(page, "response-page-rebound");
+          continue;
+        }
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
         // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.
         // Retry only faults raised while reading the page. Once observation succeeded, a

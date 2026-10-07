@@ -170,7 +170,7 @@ test("a current submission error without an assistant fails immediately and igno
     getComputedStyle: () => ({ visibility: "visible" }),
     MutationObserver: class { constructor(notify: () => void) { notifications.push(notify); } observe() {} },
   });
-  const hiddenLocator = { filter() { return this; }, last() { return this; }, isVisible: async () => false };
+  const hiddenLocator = { filter() { return this; }, last() { return this; }, isVisible: async () => false, evaluateAll: async () => undefined };
   const page = { isClosed: () => false, locator: () => hiddenLocator,
     evaluate: async (callback: Function, options: unknown) => runInContext(`(${callback.toString()})`, context)(options),
   } as unknown as Page;
@@ -719,6 +719,7 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
     last() { return this; },
     getByText() { return this; },
     isVisible: async () => false,
+    evaluateAll: async () => undefined,
   };
   const assistantLocator = { id: "assistant-turn" };
   const page = {
@@ -838,6 +839,7 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     filter() { return this; },
     last() { return this; },
     isVisible: async () => false,
+    evaluateAll: async () => undefined,
   };
   const page = {
     isClosed: () => false,
@@ -1040,6 +1042,7 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
     filter() { return this; },
     last() { return this; },
     isVisible: async () => false,
+    evaluateAll: async () => undefined,
   };
   const assistantLocator = { id: "assistant-turn" };
   const makePage = (name: string) => ({
@@ -1108,6 +1111,7 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
     filter() { return this; },
     last() { return this; },
     isVisible: async () => false,
+    evaluateAll: async () => undefined,
   };
   const assistantLocator = { id: "assistant" };
   const page = {
@@ -2963,7 +2967,7 @@ function documentChallengeFixture() {
   let url = "about:blank";
   const calls: string[] = [];
   const composer = {};
-  const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false };
+  const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false, evaluateAll: async () => undefined };
   const visible = { count: async () => 1, nth() { return this; }, isVisible: async () => true };
   const page = {
     url: () => url,
@@ -3187,6 +3191,7 @@ test("effort selection stops as soon as ChatGPT reports an expired session", asy
     last() { return this; },
     waitFor: async () => {},
     isVisible: async () => true,
+    evaluateAll: async () => "expired",
   };
   const hiddenDialog = {
     filter() { return this; },
@@ -3253,6 +3258,7 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
     last() { return this; },
     waitFor: async () => {},
     isVisible: async () => true,
+    evaluateAll: async () => "expired",
   };
   const hiddenDialog = {
     filter() { return this; },
@@ -4386,7 +4392,7 @@ test("the daemon prefers the browser helper that shipped beside its own entrypoi
 
 
 test("multipart observation surfaces Stopped thinking on its first observation even with live MCP work", async () => {
-  const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false };
+  const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false, evaluateAll: async () => undefined };
   const page = { isClosed: () => false, locator: () => absent };
   const binding = { locator: { getByText: () => absent, getByTestId: () => absent } };
   const snapshot = { responsePresent: true, stoppedThinkingVisible: true, visibleText: "", completionActionVisible: false };
