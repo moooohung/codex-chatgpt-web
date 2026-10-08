@@ -4,6 +4,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
+import { createOwnedTargetCdpTransport } from "./launcher-owned-cdp";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 export const LAUNCHER_BROWSER_IDLE_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
@@ -175,7 +176,7 @@ export function readLauncherBrowserHostDescriptor(configuredPath: string): Launc
   return descriptor;
 }
 
-async function assertCdpReady(descriptor: LauncherBrowserHostDescriptor, timeoutMs: number): Promise<void> {
+async function assertCdpReady(descriptor: LauncherBrowserHostDescriptor, timeoutMs: number): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -185,6 +186,7 @@ async function assertCdpReady(descriptor: LauncherBrowserHostDescriptor, timeout
     if (typeof body.webSocketDebuggerUrl !== "string" || !body.webSocketDebuggerUrl.startsWith("ws://127.0.0.1:")) {
       throw new Error("CDP metadata did not expose a loopback WebSocket endpoint");
     }
+    return body.webSocketDebuggerUrl;
   } catch (error) {
     throw new Error(`Launcher browser CDP endpoint is not ready: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
@@ -278,11 +280,15 @@ export async function connectLauncherBrowserHost(
     throw new DOMException("Launcher browser connection aborted", "AbortError");
   }
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
-  await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
+  const endpoint = await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
+  const targetId = descriptor.surfaceTargets[surfaceId ?? descriptor.surfaceId];
+  if (!targetId) throw new Error("Launcher browser surface is no longer registered with its native target");
+  const transport = createOwnedTargetCdpTransport(endpoint, targetId, abortSignal);
   let browser: Browser;
   try {
-    browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs, noDefaults: true });
+    browser = await chromium.connectOverCDP(transport, { timeout: timeoutMs, noDefaults: true });
   } catch (error) {
+    transport.close();
     throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
   }
   const closeOnAbort = () => { void browser.close().catch(() => {}); };
