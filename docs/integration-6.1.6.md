@@ -22,3 +22,9 @@ The earlier broad candidate run timed out and was not a complete pass. During fo
 Automated packaging and static fixtures do not establish authenticated GPT-6 availability, Pro quota behavior, or a real worker's successful completion. Stable release promotion still requires the documented manual gates; automatic fork builds are prereleases.
 
 The formal Windows integration passed `bun run verify` with pinned Bun 1.4.0: dependency audits, both typechecks, 1,154 bridge tests (120 optional/platform skips, zero failures), the complete launcher suite, renderer build, full runtime build, notices generation, and relocatable-runtime smoke. No production model message was sent by this verification.
+
+## Composer replacement follow-up
+
+The authenticated ChatGPT composer now uses ProseMirror. Clearing a multiline draft with `fill("")` can return before its editor model commits the deletion, allowing the old draft to be restored into the next multipart stage. The staging path now uses the existing verified keyboard cleanup transaction and resolves the settled composer again before inserting and checking the complete next prompt.
+
+An isolated controlled-editor fixture reproduces the stale draft on the previous implementation. In an owned ChatGPT diagnosis tab, the previous path produced 65,813 characters for a 64,144-character multipart draft. With the fix, the actual worker attachment method preserved 1,669-, 64,144-, and 347,644-character synthetic multipart drafts exactly, with Send enabled. These checks did not send a message. They establish draft replacement integrity, not resolution of every send-disabled, upstream-capacity, or tool-boundary failure.

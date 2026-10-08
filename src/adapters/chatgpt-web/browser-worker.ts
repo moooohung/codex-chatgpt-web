@@ -3977,12 +3977,14 @@ export class ChatGptBrowserWorker {
     let composerMutationStarted = false;
     try {
       if (!localTools) {
-        const composer = await this.activeComposer(page, 30_000, abortSignal);
-        // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
-        // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
-        // then transport the complete text through the browser's plain-text editing command.
         composerMutationStarted = true;
-        await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+        // The current ProseMirror composer can restore its old multiline draft after fill("")
+        // returns. A DOM-only empty read is not an editor transaction: the next stage can append
+        // to that draft or leave Send disabled. Use the verified keyboard cleanup transaction,
+        // then resolve the editor again after its model and DOM have both settled.
+        await this.clearChatGptComposerState(page);
+        throwIfPromptAttachmentAborted(abortSignal);
+        const composer = await this.activeComposer(page, 30_000, abortSignal);
         await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         if (requireThink) {
           await setChatGptThinkMode(composer, true, captureDiagnostic, abortSignal);

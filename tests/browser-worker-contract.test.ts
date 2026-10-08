@@ -1326,7 +1326,6 @@ test("large Markdown-rich context uses one plain-text editing command before exa
   const calls: Array<[string, unknown?]> = [];
   let asserted = "";
   const composer = {
-    fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
     evaluate: async (fn: unknown, value: string, options: unknown) => {
       calls.push(["evaluate", value]);
@@ -1343,12 +1342,13 @@ test("large Markdown-rich context uses one plain-text editing command before exa
   }).insertPromptText;
 
   await attachPrompt.call({
+    clearChatGptComposerState: async () => { calls.push(["clearEditorModel"]); },
     activeComposer: async () => composer,
     insertPromptText,
     assertPromptAttached: async (_page: unknown, value: string) => { asserted = value; },
   }, dialogPage("").page, prompt, false);
 
-  expect(calls[0]).toEqual(["fill", ""]);
+  expect(calls[0]).toEqual(["clearEditorModel"]);
   expect(calls.filter(call => call[0] === "evaluate")).toEqual([["evaluate", prompt]]);
   expect(calls.filter(call => call[0] === "evaluateOptions")).toEqual([
     ["evaluateOptions", { timeout: 20_000 }],
