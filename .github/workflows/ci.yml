@@ -89,13 +89,11 @@ jobs:
         run: bun run launcher/scripts/prepare-linux-appimage-tools.cjs
       - run: bun run verify
       - run: bun run app:package
-        env:
-          # package.cjs uses an ad-hoc identity when signing credentials are absent.
-          # electron-builder otherwise skips this signing on PRs, invalidating the archive.
-          CSC_FOR_PULL_REQUEST: 'true'
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-          CSC_LINK: ''
-          CSC_NAME: ''
+        if: runner.os != 'macOS'
+      - name: Package macOS with credential-free ad-hoc signing
+        if: runner.os == 'macOS'
+        # Empty CSC_LINK is still a certificate path to electron-builder; remove it.
+        run: env -u CSC_LINK -u CSC_NAME -u CSC_KEY_PASSWORD -u CSC_INSTALLER_LINK -u CSC_INSTALLER_KEY_PASSWORD -u CSC_KEYCHAIN CSC_FOR_PULL_REQUEST=true CSC_IDENTITY_AUTO_DISCOVERY=false bun run app:package
       - name: Verify Linux AppImage ABI on current Arch
         if: runner.os == 'Linux'
         run: |
@@ -106,7 +104,8 @@ jobs:
       - name: Ensure virtual display is available
         if: runner.os == 'Linux'
         run: command -v xvfb-run || (sudo apt-get update && sudo apt-get install -y xvfb)
-      - run: bun run app:smoke
+      - name: Run packaged launcher smoke with Node.js
+        run: node launcher/scripts/smoke-package.cjs
 
   actionlint:
     needs: changes
