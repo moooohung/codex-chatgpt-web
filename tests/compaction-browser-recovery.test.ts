@@ -9,15 +9,16 @@ import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 
 test.each([
-  [true, false, true, false, false, false, false],
-  [false, false, true, false, false, false, false],
-  [true, true, true, false, false, false, false],
-  [true, false, false, false, false, false, false],
-  [true, false, true, true, false, false, false],
-  [true, true, false, false, true, false, false],
-  [true, false, true, true, false, true, false],
-  [true, false, true, false, false, false, true],
-])("browser turns preserve recovery, ordering and final-only tools (owned=%s, tools=%s, multipart=%s, size rejected=%s, retained=%s, SSE=%s, GPT-6 Pro=%s)", async (owned, tools, multipart, sizeRejected, retained, sseRejection, gpt6Pro) => {
+  [true, false, true, false, false, false, false, false],
+  [false, false, true, false, false, false, false, false],
+  [true, true, true, false, false, false, false, false],
+  [true, false, false, false, false, false, false, false],
+  [true, false, true, true, false, false, false, false],
+  [true, true, false, false, true, false, false, false],
+  [true, false, true, true, false, true, false, false],
+  [true, false, true, false, false, false, true, false],
+  [true, false, true, false, false, false, true, true],
+])("browser turns preserve recovery, ordering and final-only tools (owned=%s, tools=%s, multipart=%s, size rejected=%s, retained=%s, SSE=%s, GPT-6 Pro=%s, large stage=%s)", async (owned, tools, multipart, sizeRejected, retained, sseRejection, gpt6Pro, largeStage) => {
   const diagnostics = mkdtempSync(join(tmpdir(), "compaction-observation-"));
   const cancellationCase = owned && !tools && !multipart;
   const effort = gpt6Pro ? "max" : tools ? "xhigh" : "high";
@@ -124,7 +125,7 @@ test.each([
       clearChatGptComposerState: async () => { connectorSelected = false; },
     });
   }
-  const prepare = async () => ({ text: "Summarize the context", images: [], multipart: multipart ? { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "Summarize" } : undefined, release: () => { released = true; } });
+  const prepare = async () => ({ text: "Summarize the context", images: [], multipart: multipart ? { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1, ...(largeStage && index === 0 ? { content: "x ".repeat(80_000) } : {}) })), commit: "Summarize" } : undefined, release: () => { released = true; } });
   try {
     const run = worker.runBrowserTurn({
       traceId: "compaction_recovery_fixture",
@@ -161,9 +162,9 @@ test.each([
     );
     expect(actions).toEqual([
       ...(multipart ? [
-        "effort:low",
+        largeStage ? "effort:medium" : "effort:low",
         ...Array.from({ length: 5 }, (_, index) => [
-          ...(index > 0 ? ["effort:low"] : []), "attach:plain", "send", "observe", "ack",
+          ...(index > 0 ? [largeStage ? "effort:medium" : "effort:low"] : []), "attach:plain", "send", "observe", "ack",
         ]).flat(),
       ] : []),
       `effort:${effort}`,

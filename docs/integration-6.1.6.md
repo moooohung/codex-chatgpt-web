@@ -6,7 +6,7 @@ This is an integration of the upstream source into the maintained fork; installi
 
 ## Resolved behavior
 
-- GPT-6 Sol and Instant use the literal requested family. Existing GPT-5.6 routes remain GPT-5.6. Pro multipart staging explicitly uses GPT-5.6 at low effort before restoring the requested Pro family.
+- GPT-6 Sol and Instant use the literal requested family. Existing GPT-5.6 routes remain GPT-5.6. Pro multipart staging explicitly uses GPT-5.6 before restoring the requested Pro family. Large inert drafts prefer Medium when it fits the existing account budget.
 - Keep bounded model/effort probes, stage-specific errors, cancellation clocks, and the capture/observe/ACK tool boundary. Upstream response-node identities coexist with observer cleanup and active-root tracking.
 - Keep the measured Plus composer limit at 60,000 characters. Pro reasoning has a separate 500,000-character limit; upstream's larger limit is not applied to Plus without account-specific validation.
 - Preserve minimal compaction transport while enforcing upstream's total context budget and Bigger Context eligibility.
@@ -27,4 +27,6 @@ The formal Windows integration passed `bun run verify` with pinned Bun 1.4.0: de
 
 The authenticated ChatGPT composer now uses ProseMirror. Clearing a multiline draft with `fill("")` can return before its editor model commits the deletion, allowing the old draft to be restored into the next multipart stage. The staging path now uses the existing verified keyboard cleanup transaction and resolves the settled composer again before inserting and checking the complete next prompt.
 
-An isolated controlled-editor fixture reproduces the stale draft on the previous implementation. In an owned ChatGPT diagnosis tab, the previous path produced 65,813 characters for a 64,144-character multipart draft. With the fix, the actual worker attachment method preserved 1,669-, 64,144-, and 347,644-character synthetic multipart drafts exactly, with Send enabled. These checks did not send a message. They establish draft replacement integrity, not resolution of every send-disabled, upstream-capacity, or tool-boundary failure.
+An isolated controlled-editor fixture reproduces the stale draft on the previous implementation. In an owned ChatGPT diagnosis tab, the previous path produced 65,813 characters for a 64,144-character multipart draft. With the fix, the actual worker attachment method preserved 1,669-, 64,144-, and 347,644-character synthetic multipart drafts exactly. This initial probe read only the HTML disabled flag, which does not establish accessibility-aware readiness.
+
+The subsequent readiness probe checked both `isEnabled()` and `aria-disabled`. The same 337,140-character synthetic multipart draft remained disabled in 5.6 Instant for ten seconds and became enabled in 5.6 Medium within 470 ms, with exact readback in both cases. Staging now prefers Medium above the conservative 60,000-character Instant bound when the existing account budgets permit it. Small stages keep Instant; final model/effort selection and submission/ACK checks remain required. These probes sent no messages and do not establish server acceptance or resolution of unrelated capacity and tool-boundary failures.

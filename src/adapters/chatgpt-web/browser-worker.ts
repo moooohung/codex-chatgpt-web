@@ -82,6 +82,7 @@ import {
 } from "../../launcher-browser-host";
 import {
   CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_ERROR,
+  CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebStagingTokenBudget,
@@ -1232,8 +1233,13 @@ export function resolveChatGptWebMultipartStagingMode(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
   }
+  // The current legacy Instant UI can keep aria-disabled=true on large drafts
+  // even when the account's advertised transport limit fits. The same intact
+  // draft becomes ready in Medium. Prefer that existing staging mode for large
+  // inert uploads; the final submission still restores the requested mode.
   const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable
-    ? ["low", "medium", "max"]
+    ? maxStageChars > CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT
+      ? ["medium", "low", "max"] : ["low", "medium", "max"]
     : ["low", "medium"];
   for (const effort of efforts) {
     const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
