@@ -1299,6 +1299,7 @@ test("a compact HTTP observer can reconnect without sending a second retained-ch
   }
 });
 
+// Cold tokenization of the 160k-character fixture can exceed five seconds on shared runners.
 test.each([false, true])("structured compact rebuilds canonical context when its retained source is absent (Bigger Context=%s)", async experimentalBiggerContext => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-missing-retained-compact-"));
   const provider: CodexProviderConfig = {
@@ -1356,7 +1357,7 @@ test.each([false, true])("structured compact rebuilds canonical context when its
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 test("large Plus compaction bypasses an oversized retained page and stages every historical record", async () => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-large-fallback-compact-"));
