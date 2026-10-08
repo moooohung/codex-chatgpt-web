@@ -7,9 +7,40 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          base: 'main'
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'scripts/**'
+              - 'launcher/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'tsconfig*.json'
+              - 'LICENSE*'
+              - '.github/**'
+
   verify:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +66,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'launcher/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-${{ runner.arch }}-
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: launcher
@@ -66,6 +102,9 @@ jobs:
       - run: bun run app:smoke
 
   actionlint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 35
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -75,3 +114,24 @@ jobs:
           cache: false
       - name: Lint GitHub Actions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -config-file .github/actionlint.yaml .github/workflows/*.yml
+
+  packet131-ci:
+    name: Packet 131 CI
+    if: always()
+    needs: [changes, verify, actionlint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require successful selected checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os
+          jobs = json.loads(os.environ['RESULTS'])
+          assert jobs['changes']['result'] == 'success', 'Path selection failed'
+          selected = jobs['changes']['outputs']['code'] == 'true'
+          for name, job in jobs.items():
+              if name != 'changes':
+                  assert job['result'] == 'success' or (not selected and job['result'] == 'skipped'), name + ': ' + job['result']
+          PY
