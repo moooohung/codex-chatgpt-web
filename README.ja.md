@@ -1,3 +1,5 @@
+> ローカルパッチを含む fork ビルド：[リリースをダウンロード](https://github.com/moooohung/codex-chatgpt-web/releases)。`main` へのプッシュごとに検証済みのプレリリースを公開します。[fork 自動リリースの説明](docs/fork-releases.md)をご覧ください。
+
 <p align="center">
   <img src="assets/readme/hero.svg" width="960" alt="Web モデルに切り替えても、Codex はそのまま。ChatGPT のプラン。いつものワークフロー。モデルの力を最大限に。">
 </p>

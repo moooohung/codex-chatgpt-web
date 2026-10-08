@@ -218,7 +218,8 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
   assert.match(release, /Codex Web GPT\.app/);
-  assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);
+  assert.match(release, /gh release create[\s\S]*?--draft\s/);
+  assert.match(release, /test "sha256:\$local_manifest_digest" = "\$remote_manifest_digest"\s+gh release edit[\s\S]*?--draft=false/);
 });
 
 test("Linux AppImage fallback uses one owned extraction and removes it on exit", {

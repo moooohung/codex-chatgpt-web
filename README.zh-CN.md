@@ -1,3 +1,5 @@
+> 包含本地补丁的 fork 构建：[下载发布版本](https://github.com/moooohung/codex-chatgpt-web/releases)。每次推送到 `main` 后都会发布通过验证的预发布版本；请参阅 [fork 自动发布说明](docs/fork-releases.md)。
+
 <p align="center">
   <img src="assets/readme/hero.svg" width="960" alt="切换到网页版模型，继续使用 Codex。你的 ChatGPT 订阅。你的工作流。充分发挥模型能力。">
 </p>
