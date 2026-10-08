@@ -89,6 +89,13 @@ jobs:
         run: bun run launcher/scripts/prepare-linux-appimage-tools.cjs
       - run: bun run verify
       - run: bun run app:package
+        env:
+          # package.cjs uses an ad-hoc identity when signing credentials are absent.
+          # electron-builder otherwise skips this signing on PRs, invalidating the archive.
+          CSC_FOR_PULL_REQUEST: 'true'
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CSC_LINK: ''
+          CSC_NAME: ''
       - name: Verify Linux AppImage ABI on current Arch
         if: runner.os == 'Linux'
         run: |
