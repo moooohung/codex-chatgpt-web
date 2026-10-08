@@ -8,9 +8,11 @@ async function fixture(run: (transport: ReturnType<typeof createOwnedTargetCdpTr
     fetch(request, server) { if (server.upgrade(request)) return; return new Response(null, { status: 400 }); },
     websocket: { message(socket, data) {
       const m = JSON.parse(String(data)); sent.push(m);
-      if (m.method === "Target.attachToTarget") {
-        socket.send(JSON.stringify({ method: "Target.attachedToTarget", params: { sessionId: "owned-session", targetInfo: { targetId: "owned", type: "page" }, waitingForDebugger: false } }));
-        socket.send(JSON.stringify({ id: m.id, result: { sessionId: "owned-session" } }));
+      if (m.method === "Target.attachToBrowserTarget") {
+        socket.send(JSON.stringify({ id: m.id, result: { sessionId: "browser-session" } }));
+      } else if (m.method === "Target.attachToTarget") {
+        socket.send(JSON.stringify({ method: "Target.attachedToTarget", sessionId: m.sessionId, params: { sessionId: "owned-session", targetInfo: { targetId: "owned", type: "page" }, waitingForDebugger: false } }));
+        socket.send(JSON.stringify({ id: m.id, sessionId: m.sessionId, result: { sessionId: "owned-session" } }));
       } else if (m.method === "Target.getTargets") {
         socket.send(JSON.stringify({ id: m.id, result: { targetInfos: [{ targetId: "owned" }, { targetId: "busy-other" }] } }));
       } else if (m.method === "Target.setAutoAttach" && m.sessionId) {
@@ -48,6 +50,20 @@ test("owned CDP retains child iframe and worker initialization", () => fixture(a
   transport.send({ id: 3, sessionId: "child-session", method: "Runtime.runIfWaitingForDebugger" });
   await until(() => received.some(m => m.id === 3));
   expect(sent.at(-1).sessionId).toBe("child-session");
+}));
+
+test("owned CDP permits Playwright newCDPSession through its intermediate browser target", () => fixture(async (transport, sent, received) => {
+  transport.send({ id: 1, method: "Target.attachToBrowserTarget" });
+  await until(() => received.some(m => m.id === 1));
+  transport.send({ id: 2, sessionId: "browser-session", method: "Target.attachToTarget", params: { targetId: "owned", flatten: true } });
+  await until(() => received.some(m => m.id === 2));
+  transport.send({ id: 3, sessionId: "owned-session", method: "Target.getTargetInfo" });
+  transport.send({ id: 4, sessionId: "browser-session", method: "Target.attachToTarget", params: { targetId: "foreign", flatten: true } });
+  await until(() => received.some(m => m.id === 3) && received.some(m => m.id === 4));
+  expect(sent.map(m => m.id)).toEqual([1, 2, 3]);
+  expect(received.find(m => m.id === 3).error).toBeUndefined();
+  expect(received.find(m => m.id === 4).error.message).toContain("outside the owned");
+  expect(received.find(m => m.id === 4).sessionId).toBe("browser-session");
 }));
 
 test("owned CDP hides other targets and rejects foreign sessions or tab creation", () => fixture(async (transport, sent, received) => {

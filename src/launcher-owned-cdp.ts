@@ -29,6 +29,8 @@ export function createOwnedTargetCdpTransport(
   const queued: Message[] = [];
   const autoAttachCommands = new Set<number>();
   const targetListCommands = new Set<number>();
+  const browserAttachCommands = new Set<number>();
+  const browserSessions = new Set<string>();
   const sessions = new Set<string>();
   const childTargets = new Set<string>();
   let attached = false;
@@ -56,7 +58,7 @@ export function createOwnedTargetCdpTransport(
     send(value) {
       const message = value as Message;
       if (closed) return;
-      if (message.sessionId) {
+      if (message.sessionId && !browserSessions.has(message.sessionId)) {
         if (!sessions.has(message.sessionId)) {
           reply(message, "CDP session is outside the owned browser surface");
           return;
@@ -68,7 +70,7 @@ export function createOwnedTargetCdpTransport(
         if (!message.params?.autoAttach || attached) { reply(message); return; }
         attached = true;
         autoAttachCommands.add(message.id!);
-        forward({ id: message.id, method: "Target.attachToTarget", params: { targetId, flatten: true } });
+        forward({ id: message.id, ...(message.sessionId ? { sessionId: message.sessionId } : {}), method: "Target.attachToTarget", params: { targetId, flatten: true } });
         return;
       }
       if (message.method === "Target.createTarget" || message.method === "Browser.close"
@@ -78,6 +80,7 @@ export function createOwnedTargetCdpTransport(
         return;
       }
       if (message.method === "Target.getTargets") targetListCommands.add(message.id!);
+      if (message.method === "Target.attachToBrowserTarget") browserAttachCommands.add(message.id!);
       forward(message);
     },
     close() {
@@ -102,14 +105,18 @@ export function createOwnedTargetCdpTransport(
     let message: Message;
     try { message = JSON.parse(String(event.data)) as Message; }
     catch { transport.close(); notifyClosed("Invalid CDP response"); return; }
+    if (message.id !== undefined && browserAttachCommands.delete(message.id) && !message.error && message.result?.sessionId) {
+      browserSessions.add(message.result.sessionId);
+    }
     if (message.method === "Target.attachedToTarget") {
-      if (message.sessionId ? !sessions.has(message.sessionId) : message.params?.targetInfo?.targetId !== targetId) return;
+      const browserEvent = !message.sessionId || browserSessions.has(message.sessionId);
+      if (browserEvent ? message.params?.targetInfo?.targetId !== targetId : !sessions.has(message.sessionId!)) return;
       sessions.add(message.params!.sessionId);
       childTargets.add(message.params!.targetInfo.targetId);
     } else if (message.method === "Target.detachedFromTarget") {
       if (!sessions.has(message.params?.sessionId)) return;
       sessions.delete(message.params!.sessionId);
-    } else if (message.sessionId && !sessions.has(message.sessionId)) {
+    } else if (message.sessionId && !sessions.has(message.sessionId) && !browserSessions.has(message.sessionId)) {
       return;
     } else if (message.method?.startsWith("Target.") && message.params?.targetInfo
       && message.params.targetInfo.targetId !== targetId && !childTargets.has(message.params.targetInfo.targetId)) {
