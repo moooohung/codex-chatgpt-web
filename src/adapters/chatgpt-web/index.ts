@@ -380,12 +380,14 @@ export function createChatGptWebAdapter(
     throw new Error("Skills as files is unavailable in Zero Risk mode");
   }
   const experimentalBiggerContext = provider.chatgptWeb?.experimentalBiggerContext;
-  for (const name of ["experimentalMinimalContextTransport", "experimentalReuseVerifiedEffort"] as const) {
+  for (const name of ["experimentalMinimalContextTransport", "experimentalReuseVerifiedEffort", "experimentalStagedCompaction"] as const) {
     if (provider.chatgptWeb?.[name] !== undefined && typeof provider.chatgptWeb[name] !== "boolean") {
       throw new Error(`ChatGPT ${name} preference must be a boolean`);
     }
   }
   const minimalTransport = provider.chatgptWeb?.experimentalMinimalContextTransport !== false;
+  const stagedCompaction = provider.chatgptWeb?.experimentalStagedCompaction === true;
+  const minimalTransportFor = (input: CodexParsedRequest) => minimalTransport && (!input._compactionRequest || stagedCompaction);
   if (experimentalBiggerContext !== undefined && typeof experimentalBiggerContext !== "boolean") {
     throw new Error("ChatGPT Bigger Context preference must be a boolean");
   }
@@ -476,14 +478,17 @@ export function createChatGptWebAdapter(
       if (manualRequest) return {};
       const preparation = createChatGptWebPromptPreparation(input);
       if (hooks.boundedCompactionStage) return { preparation, preserveCompactionHistory: true };
+      // Default compaction follows upstream's direct handoff and legacy history budget.
+      // Ordinary turns retain the minimal transport optimization.
+      const minimal = minimalTransportFor(input);
       const experimentalMultipartParts = experimentalBiggerContext
-        ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments, preparation, minimalTransport)
+        ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments, preparation, minimal)
         : undefined;
       return {
         preparation,
         captureLunaCheckpoint,
         experimentalSkillAttachments,
-        preserveCompactionHistory: experimentalBiggerContext && minimalTransport,
+        preserveCompactionHistory: experimentalBiggerContext && minimal,
         ...(experimentalMultipartParts !== undefined
           ? { experimentalMultipartParts }
           : {}),
@@ -1061,9 +1066,10 @@ export function createChatGptWebAdapter(
                   armHandoffDeadline();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
                   const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
-                  const largeCompaction = manualRequest ? undefined : planLargeContextCompaction(parsed);
+                  const largeCompaction = manualRequest || !stagedCompaction ? undefined : planLargeContextCompaction(parsed);
                   const runFreshCompaction = async (reason: string): Promise<string> => {
                     handoffPhase = "fresh_compaction";
+                    console.info(`[chatgpt-web] compaction_strategy ${JSON.stringify({ traceId: compactionTraceId, strategy: largeCompaction ? "staged" : "upstream_direct", reason })}`);
                     if (freshConversationPerTurn) console.info("[chatgpt-web] compaction uses configured fresh conversation mode");
                     else console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
                     // Fresh compaction is a bounded phase. Each exact multipart acknowledgement
@@ -1275,7 +1281,7 @@ export function createChatGptWebAdapter(
             emit({ type: "text_delta", text: summary, phase: "final_answer" });
             emitBrowserCompletion(
               { type: "final", answer: summary },
-              estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments, minimalTransport),
+              estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments, minimalTransportFor(parsed)),
               emit,
             );
             chatGptWebTurnRetryPolicy.clear(retryKey);

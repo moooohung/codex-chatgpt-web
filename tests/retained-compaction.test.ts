@@ -1300,13 +1300,14 @@ test("a compact HTTP observer can reconnect without sending a second retained-ch
 });
 
 // Cold tokenization of the 160k-character fixture can exceed five seconds on shared runners.
-test.each([false, true])("structured compact rebuilds canonical context when its retained source is absent (Bigger Context=%s)", async experimentalBiggerContext => {
+test.each([[false, undefined], [true, undefined], [true, false], [true, true]] as const)("structured compact rebuilds canonical context (Bigger Context=%s, staged=%s)", async (experimentalBiggerContext, experimentalStagedCompaction) => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-missing-retained-compact-"));
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://missing-retained-${Date.now()}`,
     chatgptWeb: {
       experimentalBiggerContext,
+      experimentalStagedCompaction,
       browserHost: "launcher",
       browserHostDescriptorPath: join(root, "launcher.json"),
       brokerSocketPath: defaultBrokerEndpoint(root),
@@ -1325,11 +1326,13 @@ test.each([false, true])("structured compact rebuilds canonical context when its
     expect(turn.compaction).toBeTrue();
     const prepared = await turn.prepare();
     const contextText = prepared.multipart?.parts.join("\n") ?? prepared.text;
-    if (experimentalBiggerContext) {
+    if (experimentalBiggerContext && experimentalStagedCompaction) {
       expect(prepared.trimmedCompactionMessages).toBeUndefined();
       expect(contextText).toContain("codex_compaction_stage_json");
       for (const text of compiledChatGptWebMessages(prepared)) expect(Buffer.byteLength(JSON.stringify(text))).toBeLessThan(110_000);
     } else {
+      expect(contextText).not.toContain("codex_compaction_stage_json");
+      if (experimentalBiggerContext) expect(prepared.multipart?.parts).toHaveLength(6);
       expect(contextText).toContain("Original task");
       expect(contextText).toContain("Continue with the next step");
     }
@@ -1347,6 +1350,7 @@ test.each([false, true])("structured compact rebuilds canonical context when its
     );
     expect(browserStarts).toBeGreaterThanOrEqual(1);
     expect(browserStarts).toBeLessThanOrEqual(planLargeContextCompaction(compact)?.fragments.length ?? 1);
+    if (!experimentalStagedCompaction) expect(browserStarts).toBe(1);
     expect(events.some(event => event.type === "text_delta"
       && event.text.includes("Fallback checkpoint from canonical Codex context"))).toBeTrue();
     expect(events.some(event => event.type === "text_delta"
@@ -1368,6 +1372,7 @@ test("large Plus compaction bypasses an oversized retained page and stages every
       brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true,
       solAvailable: true, extraHighAvailable: false, proAvailable: false,
       experimentalBiggerContext: true, experimentalSkillAttachments: true,
+      experimentalStagedCompaction: true,
     },
   };
   const compact = request(true);
@@ -1474,6 +1479,7 @@ test.each([false, true])("1.2 million character compaction uses sequential bound
     chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
       brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true, solAvailable: true,
       extraHighAvailable: true, proAvailable: false, experimentalBiggerContext: true,
+      experimentalStagedCompaction: true,
       experimentalFreshConversationPerTurn: freshConversation },
   };
   const compact = request(true);

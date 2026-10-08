@@ -315,6 +315,29 @@ test("conversation preferences survive reload; saved chats also apply to Zero Ri
   expect(() => loadConfig()).toThrow("useSavedChats");
 });
 
+test("compaction defaults to upstream direct handoff and staged summaries require explicit opt-in", () => {
+  const root = join(tmpdir(), `codex-compaction-config-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  mkdirSync(root, { recursive: true });
+  const config: Record<string, unknown> = { ...defaultConfig("browser-only") };
+  const persist = () => writeFileSync(join(root, "config.json"), JSON.stringify(config));
+  expect(config.experimentalStagedCompaction).toBe(false);
+  delete config.experimentalStagedCompaction;
+  persist();
+  expect(loadConfig()!.experimentalStagedCompaction).toBe(false);
+  expect(providerConfig(loadConfig()!).chatgptWeb!.experimentalStagedCompaction).toBe(false);
+  config.experimentalStagedCompaction = true;
+  persist();
+  const loaded = loadConfig()!;
+  expect(loaded.experimentalStagedCompaction).toBe(true);
+  expect(providerConfig(loaded).chatgptWeb!.experimentalStagedCompaction).toBe(true);
+  expect(providerConfig({ ...loaded, browserInteractionMode: "manual" }).chatgptWeb!.experimentalStagedCompaction).toBe(false);
+  config.experimentalStagedCompaction = "true";
+  persist();
+  expect(() => loadConfig()).toThrow("experimentalStagedCompaction");
+});
+
 test("skill attachments config defaults off, reaches the adapter, and rejects invalid/manual settings", () => {
   const root = join(tmpdir(), `codex-skills-config-${process.pid}-${Date.now()}`);
   roots.push(root);

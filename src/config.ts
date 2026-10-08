@@ -122,6 +122,7 @@ export interface AppConfig {
   experimentalFreshConversationPerTurn: boolean;
   /** Use the fewest context messages that fit the existing browser limits. False restores legacy planning. */
   experimentalMinimalContextTransport?: boolean;
+  experimentalStagedCompaction?: boolean;
   experimentalReuseVerifiedEffort?: boolean;
   useSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
@@ -257,6 +258,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
     experimentalMinimalContextTransport: true,
+    experimentalStagedCompaction: false,
     experimentalReuseVerifiedEffort: true,
     useSavedChats: false,
     zeroRiskProEnabled: false,
@@ -563,6 +565,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalMinimalContextTransport in ${path}`);
   }
   const experimentalMinimalContextTransport = parsed.experimentalMinimalContextTransport !== false;
+  if (parsed.experimentalStagedCompaction !== undefined && typeof parsed.experimentalStagedCompaction !== "boolean") {
+    throw new Error(`Invalid experimentalStagedCompaction in ${path}`);
+  }
+  const experimentalStagedCompaction = parsed.experimentalStagedCompaction === true;
   if (parsed.experimentalReuseVerifiedEffort !== undefined && typeof parsed.experimentalReuseVerifiedEffort !== "boolean") {
     throw new Error(`Invalid experimentalReuseVerifiedEffort in ${path}`);
   }
@@ -598,6 +604,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalSkillAttachments,
     experimentalFreshConversationPerTurn,
     experimentalMinimalContextTransport,
+    experimentalStagedCompaction,
     experimentalReuseVerifiedEffort,
     useSavedChats,
     zeroRiskProEnabled,
@@ -658,6 +665,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,
       experimentalMinimalContextTransport: config.experimentalMinimalContextTransport !== false,
+      experimentalStagedCompaction: !manual && config.experimentalStagedCompaction === true,
       experimentalReuseVerifiedEffort: config.experimentalReuseVerifiedEffort !== false,
       useSavedChats: config.useSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),

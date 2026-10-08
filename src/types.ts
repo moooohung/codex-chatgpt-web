@@ -313,6 +313,8 @@ export interface CodexProviderConfig {
     experimentalFreshConversationPerTurn?: boolean;
     /** False restores threshold-based multipart planning and six-part fresh compaction. */
     experimentalMinimalContextTransport?: boolean;
+    /** Opt in to cumulative large-history summaries instead of the upstream direct handoff. */
+    experimentalStagedCompaction?: boolean;
     /** Re-read a previously verified selection on the same page; every Send still checks the picker. */
     experimentalReuseVerifiedEffort?: boolean;
     /** Use ordinary ChatGPT history for task conversations. Default: Temporary Chat. */
