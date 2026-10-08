@@ -12,7 +12,8 @@ import type { CodexTool } from "../src/types";
 
 // Every capability in this fixture is minted by its own broker. No real account, goal,
 // message recipient, worker token, browser or deferred backend is contacted.
-const testRoot = mkdtempSync(join(tmpdir(), "native2-discovery-fixture-"));
+// macOS tmpdir() is already long; keep every owned Unix socket under sun_path.
+const testRoot = mkdtempSync(join(tmpdir(), "cgw-n2-"));
 afterAll(() => {
   if (dirname(resolve(testRoot)) !== resolve(tmpdir())) throw new Error("Unexpected fixture cleanup path");
   rmSync(testRoot, { recursive: true, force: true });
