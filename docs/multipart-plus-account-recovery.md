@@ -35,6 +35,9 @@ Send activation, a multipart ACK or cancellation prohibits that fresh preparatio
 Known unavailable efforts report the actual picker range. Other model-control failures
 write a bounded, redacted local reason. Failure diagnostics are captured before the
 launcher releases the tab, so cleanup no longer destroys the page before capture.
+Terminal capture has a 250 ms budget for both DOM and optional screenshot evidence;
+failure, cancellation and accepted handoff must still release/retain the owned tab
+correctly when the renderer never answers. Capture timeout preserves the original error.
 
 The second exported failure occurred after an ACK and a reused Medium proof, but its
 original inner observation cause was not retained. Cache invalidation and better

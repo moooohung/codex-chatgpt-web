@@ -2010,6 +2010,8 @@ function pruneBrowserDiagnostics(root: string): void {
   }
 }
 
+const CHATGPT_TERMINAL_DIAGNOSTIC_TIMEOUT_MS = 250;
+
 class ChatGptBrowserDiagnostics {
   private readonly directory: string;
   private sequence = 0;
@@ -2026,7 +2028,7 @@ class ChatGptBrowserDiagnostics {
     this.directory = join(this.root, `${traceId}-${randomUUID().slice(0, 8)}`);
   }
 
-  async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
+  async capture(page: Page, checkpoint: string, error?: unknown, timeoutMs?: number): Promise<void> {
     const observationStarted = Date.now();
     try {
       if (!this.initialized) {
@@ -2038,10 +2040,11 @@ class ChatGptBrowserDiagnostics {
       const sequence = String(++this.sequence).padStart(2, "0");
       const stem = `${sequence}-${browserDiagnosticCheckpoint(checkpoint)}`;
       const includeScreenshot = process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1";
-      const observationTimeoutMs = chatGptPageObservationTimeoutMs(page);
+      const observationTimeoutMs = Math.min(chatGptPageObservationTimeoutMs(page), timeoutMs ?? Infinity);
+      const screenshotTimeoutMs = Math.min(5_000, observationTimeoutMs);
       const [screenshotResult, stateResult] = await Promise.allSettled([
         includeScreenshot
-          ? page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" })
+          ? withChatGptBrowserObservationTimeout(page.screenshot({ animations: "disabled", caret: "hide", timeout: screenshotTimeoutMs, type: "png" }), screenshotTimeoutMs)
           : Promise.resolve(undefined),
         withChatGptBrowserObservationTimeout(page.evaluate(({
           composerSelector,
@@ -6489,7 +6492,7 @@ export class ChatGptBrowserWorker {
         && turn.abortSignal?.reason instanceof ChatGptCompactionHandoffAccepted) {
         console.info(`[chatgpt-web] browser turn ${turn.traceId} ended after accepted structured compaction handoff`);
         if (diagnosticPage && !diagnosticPage.isClosed()) {
-          await diagnostics.capture(diagnosticPage, "compaction-handoff-accepted");
+          await diagnostics.capture(diagnosticPage, "compaction-handoff-accepted", undefined, CHATGPT_TERMINAL_DIAGNOSTIC_TIMEOUT_MS);
         }
         throw turn.abortSignal.reason;
       }
@@ -6499,11 +6502,12 @@ export class ChatGptBrowserWorker {
       );
       try {
         if (diagnosticPage && !diagnosticPage.isClosed()) {
-          await diagnostics.capture(diagnosticPage, "turn-failed", error);
+          await diagnostics.capture(diagnosticPage, "turn-failed", error, CHATGPT_TERMINAL_DIAGNOSTIC_TIMEOUT_MS);
         }
       } finally {
         // The callback releases the launcher lease and closes its page. Capture
-        // failure evidence first; cleanup still runs if that observation fails.
+        // failure evidence first with a short terminal budget; a stalled renderer
+        // must not keep its large failed tab alive for the normal observation budget.
         await onFailure?.(error);
       }
       throw error;

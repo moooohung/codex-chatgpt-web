@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createServer } from "node:http";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -88,7 +88,7 @@ test("launcher activity follows actual send callbacks and current-turn tool coun
 });
 
 test.each(["failed", "cancelled", "handoff", "release-error"])(
-  "terminal tab release preserves failure, cancellation and accepted handoff while diagnostics stall (%s)", async kind => {
+  "terminal tab release preserves failure, cancellation and accepted handoff after bounded pre-release diagnostics (%s)", async kind => {
     const root = mkdtempSync(join(tmpdir(), "failed-tab-diagnostic-"));
     roots.push(root);
     let diagnosticStarted!: () => void, finishDiagnostic!: () => void;
@@ -144,18 +144,29 @@ test.each(["failed", "cancelled", "handoff", "release-error"])(
     try {
       await Promise.race([diagnosticReached, outcome.then((error: unknown) => { throw error ?? new Error("diagnostic was skipped"); })]);
       const earlyEnds = messages.filter(message => message.phase === "end");
-      expect(earlyEnds).toHaveLength(kind === "handoff" ? 0 : 1);
-      if (kind !== "handoff") expect(earlyEnds[0]).toMatchObject({
-        helperPid: process.pid, status: kind === "cancelled" ? "aborted" : "failed",
-      });
-      expect(earlyEnds[0]?.retain).toBeUndefined();
+      expect(earlyEnds).toHaveLength(0); // Fast capture gets the still-owned page.
       expect(promptReleased).toBeFalse();
       expect(physicalSettled).toBeFalse();
-      finishDiagnostic();
-      expect(await outcome).toBe(verdict);
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // Keep the DOM observation blocked: all terminal paths must release anyway.
+        expect(await Promise.race([outcome, new Promise((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("Terminal diagnostics blocked tab release")), 1500);
+        })])).toBe(verdict);
+      } finally { clearTimeout(deadline); }
       expect(promptReleased).toBeTrue();
+      const diagnosticDirectory = join(root, readdirSync(root)[0]!);
+      const terminalFile = readdirSync(diagnosticDirectory).find(file => /(?:turn-failed|compaction-handoff-accepted)\.json$/.test(file));
+      expect(terminalFile).toBeDefined();
+      const terminal = JSON.parse(readFileSync(join(diagnosticDirectory, terminalFile!), "utf8"));
+      expect(terminal.observationTimeoutMs).toBe(250);
+      expect(terminal.captureErrors.state).toContain("within 250ms");
       expect(messages.filter(message => message.phase === "end")).toHaveLength(1);
       if (kind === "handoff") expect(messages.at(-1)).toMatchObject({ status: "completed", retain: true });
+      else {
+        expect(messages.at(-1)).toMatchObject({ helperPid: process.pid, status: kind === "cancelled" ? "aborted" : "failed" });
+        expect(messages.at(-1)?.retain).toBeUndefined();
+      }
     } finally {
       finishDiagnostic();
       await outcome;
