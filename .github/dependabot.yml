@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      weekly-updates:
+        patterns: ["*"]
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      weekly-updates:
+        patterns: ["*"]
+  - package-ecosystem: "bun"
+    directory: "/launcher"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      weekly-updates:
+        patterns: ["*"]

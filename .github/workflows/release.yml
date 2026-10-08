@@ -4,6 +4,13 @@ run-name: Release ${{ github.ref_name }} at ${{ github.sha }}
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'launcher/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'LICENSE*'
     tags: ["v*"]
   workflow_dispatch:
 

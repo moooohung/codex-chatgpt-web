@@ -7,9 +7,40 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          base: 'main'
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'scripts/**'
+              - 'launcher/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'tsconfig*.json'
+              - 'LICENSE*'
+              - '.github/**'
+
   verify:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +66,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'launcher/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-${{ runner.arch }}-
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: launcher
@@ -53,6 +89,11 @@ jobs:
         run: bun run launcher/scripts/prepare-linux-appimage-tools.cjs
       - run: bun run verify
       - run: bun run app:package
+        if: runner.os != 'macOS'
+      - name: Package macOS with credential-free ad-hoc signing
+        if: runner.os == 'macOS'
+        # Empty CSC_LINK is still a certificate path to electron-builder; remove it.
+        run: env -u CSC_LINK -u CSC_NAME -u CSC_KEY_PASSWORD -u CSC_INSTALLER_LINK -u CSC_INSTALLER_KEY_PASSWORD -u CSC_KEYCHAIN CSC_FOR_PULL_REQUEST=true CSC_IDENTITY_AUTO_DISCOVERY=false bun run app:package
       - name: Verify Linux AppImage ABI on current Arch
         if: runner.os == 'Linux'
         run: |
@@ -64,8 +105,15 @@ jobs:
         if: runner.os == 'Linux'
         run: command -v xvfb-run || (sudo apt-get update && sudo apt-get install -y xvfb)
       - run: bun run app:smoke
+        if: runner.os != 'Windows'
+      - name: Run Windows packaged launcher smoke with Node.js
+        if: runner.os == 'Windows'
+        run: node launcher/scripts/smoke-package.cjs
 
   actionlint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 35
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -75,3 +123,24 @@ jobs:
           cache: false
       - name: Lint GitHub Actions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -config-file .github/actionlint.yaml .github/workflows/*.yml
+
+  packet131-ci:
+    name: Packet 131 CI
+    if: always()
+    needs: [changes, verify, actionlint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require successful selected checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os
+          jobs = json.loads(os.environ['RESULTS'])
+          assert jobs['changes']['result'] == 'success', 'Path selection failed'
+          selected = jobs['changes']['outputs']['code'] == 'true'
+          for name, job in jobs.items():
+              if name != 'changes':
+                  assert job['result'] == 'success' or (not selected and job['result'] == 'skipped'), name + ': ' + job['result']
+          PY
