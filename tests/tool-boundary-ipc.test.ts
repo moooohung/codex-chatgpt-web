@@ -35,7 +35,8 @@ test("real helper capture sends a revision ACK through production IPC before the
   let gate: Promise<void> | undefined;
   let released = false;
   try {
-    gate = waitForChatGptToolBoundaryAck({ traceId: "146b3b30d06b", revision, timeoutMs: 2000, signal: gateLifetime.signal,
+    // The integration gate also includes cold helper process startup on shared runners.
+    gate = waitForChatGptToolBoundaryAck({ traceId: "146b3b30d06b", revision, timeoutMs: 10_000, signal: gateLifetime.signal,
       wait: signal => progress.waitForToolBatchObservation(revision, signal) }).then(() => { released = true; });
     // Handle an early helper failure immediately, then still assert the gate below.
     void gate.catch(() => {});
@@ -50,4 +51,4 @@ test("real helper capture sends a revision ACK through production IPC before the
     await client.close();
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 15_000);

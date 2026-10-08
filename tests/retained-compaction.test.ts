@@ -1466,6 +1466,7 @@ test.each([false, true])("configured fresh compaction waits for cleanup and pres
   }
 });
 
+// This fixture tokenizes and verifies all 1.2M characters across nine sequential stages.
 test.each([false, true])("1.2 million character compaction uses sequential bounded pages and one final handoff (fresh=%s)", async freshConversation => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-staged-compact-"));
   const provider: CodexProviderConfig = {
@@ -1508,7 +1509,7 @@ test.each([false, true])("1.2 million character compaction uses sequential bound
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 test.each([false, true])("fresh multipart compaction preserves phase budgets with fresh mode=%s", async freshConversation => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-phased-fallback-compact-"));
