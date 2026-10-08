@@ -107,7 +107,14 @@ function runtimeFilePaths(runtimeRoot) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => comparePaths(left.name, right.name))) {
       const absolutePath = path.join(directory, entry.name);
       const relativePath = path.relative(runtimeRoot, absolutePath).split(path.sep).join("/");
-      const target = (fs.realpathSync.native ?? fs.realpathSync)(absolutePath);
+      let target;
+      try { target = (fs.realpathSync.native ?? fs.realpathSync)(absolutePath); }
+      catch (error) {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+          throw new Error(`Runtime bundle file is missing: ${absolutePath}`);
+        }
+        throw error;
+      }
       if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${path.sep}`)) {
         throw new Error(`Runtime bundle symlink escapes the bundle: ${absolutePath}`);
       }

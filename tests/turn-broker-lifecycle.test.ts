@@ -3,6 +3,7 @@ import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/a
 import { MAX_CHATGPT_REGISTERED_TURNS } from "../src/adapters/chatgpt-web/concurrency";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
@@ -327,35 +328,60 @@ test("an unbounded broker call fails when the broker closes without answering", 
 }, 10_000);
 
 test("bounded broker calls preserve server-owned closure before advancing the lifecycle", async () => {
-  let peer!: Socket;
-  let finishFrame!: () => void;
-  const frameWritten = new Promise<void>(resolve => { finishFrame = resolve; });
-  const broker = unansweredBrokerEndpoint("cgw-broker-frame-", socket => {
-    peer = socket;
-    socket.once("data", chunk => {
-      const request = JSON.parse(chunk.toString().trim());
-      const frame = JSON.stringify({ id: request.id, result: { ready: true } }) + "\n";
-      socket.write(frame.slice(0, -1));
-      setImmediate(() => { socket.write(frame.slice(-1)); finishFrame(); });
-    });
+  // Match production's process boundary. Colocated Bun Windows pipes can deadlock
+  // when a fixture deliberately leaves a fragmented response's server half open.
+  const root = mkdtempSync(join(tmpdir(), "cgw-frame-"));
+  const endpoint = defaultBrokerEndpoint(root);
+  if (!isWindowsPipeEndpoint(endpoint)) mkdirSync(dirname(endpoint), { recursive: true });
+  const peer = spawn("node", ["-e", `
+    const {createServer}=require('node:net'); let socket;
+    const server=createServer(s=>{socket=s; let request=''; s.on('data',b=>{
+      request+=b; if(!request.includes('\\n'))return;
+      const frame=JSON.stringify({id:JSON.parse(request.trim()).id,result:{ready:true}})+'\\n';
+      s.write(frame.slice(0,-1)); setImmediate(()=>s.write(frame.slice(-1),()=>console.log('frame')));
+    });});
+    server.listen(process.argv[1],()=>console.log('ready'));
+    process.stdin.on('data',()=>{socket.end();server.close(()=>process.exit(0));});
+  `, endpoint], { stdio: ["pipe", "pipe", "pipe"] });
+  let ready!: () => void, framed!: () => void, fail!: (error: Error) => void;
+  const listening = new Promise<void>(resolve => { ready = resolve; });
+  const frameWritten = new Promise<void>(resolve => { framed = resolve; });
+  const failed = new Promise<never>((_, reject) => { fail = reject; });
+  void failed.catch(() => {});
+  peer.on("error", fail);
+  let buffered = "", errors = "";
+  peer.stderr.on("data", data => { errors += data; });
+  peer.stdout.on("data", data => {
+    buffered += data;
+    if (buffered.includes("ready\n")) ready();
+    if (buffered.includes("frame\n")) framed();
   });
-  await broker.listen();
+  peer.once("exit", code => { if (code !== 0) fail(new Error(`Fixture peer exited ${code}: ${errors}`)); });
+  const deadline = setTimeout(() => fail(new Error("Fixture peer did not complete its frame")), 5000);
+  const lifetime = new AbortController();
   try {
+    await Promise.race([listening, failed]);
     let settled = false;
-    const call = callTurnBroker(broker.socketPath, { method: "owner_status" }).then(result => {
+    const call = callTurnBroker(endpoint, { method: "owner_status" }, 5000, lifetime.signal).then(result => {
       settled = true;
       return result;
     });
-    await frameWritten;
+    void call.catch(() => {});
+    await Promise.race([frameWritten, failed, call.then(() => { throw new Error("Broker settled before server closure"); })]);
     await Bun.sleep(25);
     expect(settled).toBeFalse();
-    peer.end();
+    peer.stdin.write("end\n");
     await expect(call).resolves.toEqual({ ready: true });
   } finally {
-    peer?.destroy();
-    await broker.close();
+    clearTimeout(deadline);
+    lifetime.abort();
+    if (peer.exitCode === null && peer.signalCode === null) {
+      const exited = new Promise<void>(resolve => peer.once("exit", () => resolve()));
+      peer.kill(); await exited;
+    }
+    rmSync(root, { recursive: true, force: true });
   }
-});
+}, 10_000);
 
 test("broker frame settlement still rejects errors, wrong identities and incomplete replies", async () => {
   for (const [reply, expected] of [
