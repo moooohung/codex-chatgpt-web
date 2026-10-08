@@ -32,6 +32,8 @@ const knownCodes = new Set([
   "chatgpt_response_incomplete", "thread_environment_state_invalid",
   "native_snapshot_not_ready", "trusted_environment_unavailable", "turn_preflight_changed",
   "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "ERR_STREAM_DESTROYED", "ABORT_ERR",
+  "chatgpt_tool_boundary_observation_timeout", "chatgpt_tool_boundary_observation_failed",
+  "chatgpt_tool_boundary_ack_timeout", "chatgpt_tool_boundary_ack_failed", "chatgpt_tool_boundary_ack_rejected",
 ]);
 
 export function chatGptRoundFailureEvidence(error: unknown): { errorName: string; errorCode: string } {

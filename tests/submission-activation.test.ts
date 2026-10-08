@@ -4,7 +4,8 @@ import { ChatGptBrowserWorker, ChatGptCompletionTracker } from "../src/adapters/
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 
 function fixture(press: (key: string, options: any) => Promise<void>) {
-  const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false };
+  const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false,
+    evaluateAll: async () => undefined };
   const page = { isClosed: () => false, locator: () => hidden } as unknown as Page;
   const send = { waitFor: async () => {}, isEnabled: async () => true, press };
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {

@@ -29,6 +29,15 @@ for (const chars of [320_000, 1_000_000]) test.skipIf(!process.env.CHATGPT_DOM_T
         userTurnSelector: CHATGPT_USER_TURN_SELECTOR, assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
         stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR, attributeFilter: [],
       })).rejects.toThrow("huge input layout would stall here");
+      // Reading the full transcript only to refresh the size hint also scales
+      // with old multipart input. The boundary must retain identities and answer
+      // text without touching this unrelated, expensive body serialization.
+      await page.evaluate(() => {
+        Object.defineProperty(document.body, "textContent", {
+          configurable: true,
+          get() { throw new Error("boundary serialized the full body"); },
+        });
+      });
       const worker: any = Object.create(ChatGptBrowserWorker.prototype);
       const tracker = new ChatGptCompletionTracker();
       const progress = new ChatGptExternalTurnProgress();

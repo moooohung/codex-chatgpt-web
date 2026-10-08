@@ -2,11 +2,49 @@ import { expect, test } from "bun:test";
 import {
   chatGptObservationBudgetForSize,
   chatGptPageObservationTimeoutMs,
+  chatGptPageBoundaryTimeoutMs,
   inheritChatGptPageObservationBudget,
   recordChatGptPageObservationSize,
 } from "../src/adapters/chatgpt-web/page-observation-budget";
 import { ChatGptBrowserWorker, withChatGptBrowserObservationTimeout } from "../src/adapters/chatgpt-web/browser-worker";
 import { recoverChatGptSubmission } from "../src/adapters/chatgpt-web/submission-recovery";
+import { CHATGPT_TOOL_BOUNDARY_ACK_TIMEOUT_MS } from "../src/adapters/chatgpt-web/tool-boundary";
+import { ChatGptCompletionTracker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
+
+test("large tool captures have bounded headroom without changing normal probes or the MCP deadline", () => {
+  const large = {}, small = {};
+  recordChatGptPageObservationSize(large, 1_200_000);
+  expect(chatGptPageObservationTimeoutMs(large)).toBe(20_000);
+  expect(chatGptPageBoundaryTimeoutMs(large)).toBe(60_000);
+  expect(chatGptPageBoundaryTimeoutMs(small)).toBe(5_000);
+  expect(CHATGPT_TOOL_BOUNDARY_ACK_TIMEOUT_MS).toBeGreaterThan(chatGptPageBoundaryTimeoutMs(large));
+  expect(CHATGPT_TOOL_BOUNDARY_ACK_TIMEOUT_MS).toBeLessThanOrEqual(75_000);
+});
+
+test("actual large-page boundary tolerates a 21s DOM read and captures before ACK/emission", async () => {
+  const order: string[] = [];
+  const page = { evaluate: async () => {
+    await Bun.sleep(21_000);
+    order.push("capture");
+    return { key: "busy-page:1", snapshot: { responseIdentities: [] } };
+  } };
+  recordChatGptPageObservationSize(page, 1_200_000);
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const tracker = new ChatGptCompletionTracker();
+  const observe = tracker.observeToolBatch.bind(tracker);
+  tracker.observeToolBatch = (revision, text) => {
+    expect(text).toBe(""); order.push("observe"); return observe(revision, text);
+  };
+  const progress = new ChatGptExternalTurnProgress();
+  const revision = progress.recordToolBatch(1);
+  const ack = progress.acknowledgeToolBatch.bind(progress);
+  progress.acknowledgeToolBatch = async batch => { order.push("ack"); return ack(batch); };
+  await worker.observeSubmissionToolBoundary(page, { initialTurnIdentities: [] }, undefined, progress, tracker);
+  await progress.waitForToolBatchObservation(revision);
+  order.push("emission");
+  expect(order).toEqual(["capture", "observe", "ack", "emission"]);
+}, 25_000);
 
 test("recorded large-page sizes get bounded observation headroom; ordinary and invalid hints keep 5s", () => {
   for (const chars of [0, 250_000, -1, NaN, Infinity]) expect(chatGptObservationBudgetForSize(chars)).toBe(5_000);

@@ -21,6 +21,13 @@ export function chatGptPageObservationTimeoutMs(page: object): number {
   return chatGptObservationBudgetForSize(observedPageSizes.get(page) ?? 0);
 }
 
+/** A broker-accepted tool needs one complete capture before ACK. Large renderers can
+ * remain busy beyond a normal probe; this bounded window stays below the MCP 90s deadline. */
+export function chatGptPageBoundaryTimeoutMs(page: object): number {
+  const normal = chatGptPageObservationTimeoutMs(page);
+  return normal === CHATGPT_PAGE_OBSERVATION_MAX_MS ? 60_000 : normal;
+}
+
 export function inheritChatGptPageObservationBudget(previousPage: object, nextPage: object): void {
   recordChatGptPageObservationSize(nextPage, observedPageSizes.get(previousPage) ?? 0);
 }

@@ -1,7 +1,9 @@
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptTurnProgressReader } from "./turn-progress";
 
-export const CHATGPT_TOOL_BOUNDARY_ACK_TIMEOUT_MS = 30_000;
+// Leave 15s of the Native2 MCP deadline for ACK propagation/emission after a
+// large-page capture (at most 60s). Capture failures still revoke the turn.
+export const CHATGPT_TOOL_BOUNDARY_ACK_TIMEOUT_MS = 75_000;
 
 interface BoundaryTracker {
   needsToolBatchObservation(revision: number): boolean;

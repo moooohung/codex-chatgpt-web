@@ -50,7 +50,9 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
     if (sidebar) document.documentElement.setAttribute("data-codex-sidebar-budget", "reduced");
     else document.documentElement.removeAttribute("data-codex-sidebar-budget");
   }
-  const bodyTextChars = document.body?.textContent?.length ?? 0;
+  // A boundary read must not serialize the full transcript/composer just to
+  // refresh a size hint. Ordinary diagnostics/submission reads keep that metric.
+  const bodyTextChars = boundary ? undefined : document.body?.textContent?.length ?? 0;
   type ObserverState = { id: string; revision: number; observer: MutationObserver };
   const scope = globalThis as typeof globalThis & {
     __CODEX_WEB_GPT_TURN_OBSERVER__?: ObserverState;

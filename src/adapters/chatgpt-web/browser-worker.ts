@@ -91,6 +91,7 @@ import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { observeSubmissionDuringActivation } from "./submission-activation";
 import {
   chatGptPageObservationTimeoutMs,
+  chatGptPageBoundaryTimeoutMs,
   inheritChatGptPageObservationBudget,
   recordChatGptPageObservationSize,
 } from "./page-observation-budget";
@@ -3183,8 +3184,8 @@ export class ChatGptBrowserWorker {
       knownKey: purpose === "submission" ? cache?.key : undefined,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
       purpose,
-    }), signal), chatGptPageObservationTimeoutMs(page));
-    recordChatGptPageObservationSize(page, observed.bodyTextChars);
+    }), signal), purpose === "tool_boundary" ? chatGptPageBoundaryTimeoutMs(page) : chatGptPageObservationTimeoutMs(page));
+    if (observed.bodyTextChars !== undefined) recordChatGptPageObservationSize(page, observed.bodyTextChars);
     const snapshot = observed.snapshot ?? cache?.snapshot;
     if (!snapshot) throw new Error("ChatGPT turn DOM revision cache has no baseline snapshot");
     if (purpose === "submission" && observed.snapshot && cache) {
@@ -3268,7 +3269,7 @@ export class ChatGptBrowserWorker {
     if (!completionTracker) throw chatGptToolBoundaryError("chatgpt_tool_boundary_context_missing");
     await captureChatGptToolBoundary({
       tracker: completionTracker, revision, signal,
-      timeoutMs: chatGptPageObservationTimeoutMs(page),
+      timeoutMs: chatGptPageBoundaryTimeoutMs(page),
       capture: capture ?? (ownedSignal => this.currentSubmissionAnswerText(page, baseline, ownedSignal, completionTracker)),
       acknowledge: () => externalProgress.acknowledgeToolBatch(revision),
     });
@@ -3281,7 +3282,7 @@ export class ChatGptBrowserWorker {
     completionTracker?: ChatGptCompletionTracker,
   ): Promise<string> {
     const state = await this.observeResponseProbe(page, baseline, signal, undefined, completionTracker,
-      ownedSignal => this.submissionDomState(page, undefined, ownedSignal, "tool_boundary"), undefined, "boundary_turn_state");
+      ownedSignal => this.submissionDomState(page, undefined, ownedSignal, "tool_boundary"), chatGptPageBoundaryTimeoutMs(page), "boundary_turn_state");
     await this.reconcileMultipartHistory(page, baseline, state, signal);
     const identity = chatGptNewTurnIdentity(
       baseline.initialTurnIdentities,
@@ -3290,7 +3291,7 @@ export class ChatGptBrowserWorker {
     if (!identity) return "";
     const locator = page.locator(chatGptAssistantTurnSelector(identity));
     const snapshot = await this.observeResponseProbe(page, baseline, signal, undefined, completionTracker,
-      ownedSignal => this.boundedResponseDomSnapshot(page, locator, {}, ownedSignal), undefined, "boundary_response_projection");
+      ownedSignal => this.boundedResponseDomSnapshot(page, locator, {}, ownedSignal, chatGptPageBoundaryTimeoutMs(page)), chatGptPageBoundaryTimeoutMs(page), "boundary_response_projection");
     if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
     if (snapshot.responsePresent === false) throw chatGptToolBoundaryError("chatgpt_tool_boundary_observation_failed");
     return snapshot.visibleText;
@@ -4107,6 +4108,25 @@ export class ChatGptBrowserWorker {
       && Array.isArray(baseline.initialTurnIdentities)) {
       baseline.recoveryIdentity ??= globalThis.crypto.randomUUID();
       const identity = `${submissionLifecycle?.traceId ?? "untracked"}:${baseline.recoveryIdentity}`;
+      // Both the observer and reconciliation own this same physical submission.
+      // A same-tab CDP reconnect invalidates the old Page and every locator on it.
+      // Preserve the baseline object/receipt key, and publish the rebound page before
+      // reconciliation reads it. The original input audit cannot prove non-dispatch
+      // on a replacement connection, so it never authorizes another Send there.
+      const binding: { page: Page; pending?: Promise<ChatGptSubmissionObservationRecovery> } = { page };
+      const recoverCurrentObservation: ChatGptObservationRecovery | undefined = recoverObservation
+        ? async (...args) => {
+          const pending = recoverObservation(...args).then(recovered => {
+            args[3]?.throwIfAborted();
+            Object.assign(baseline, recovered.baseline);
+            binding.page = recovered.page;
+            return { page: binding.page, baseline };
+          });
+          binding.pending = pending;
+          try { return await pending; }
+          finally { if (binding.pending === pending) binding.pending = undefined; }
+        }
+        : undefined;
       let audit: Awaited<ReturnType<typeof createChatGptSubmissionAudit>> | undefined;
       let disposed = false;
       try {
@@ -4125,26 +4145,42 @@ export class ChatGptBrowserWorker {
             await sendButton.press("Enter", { noWaitAfter: true, signal, timeout: 0 });
           },
           observe: signal => this.waitForSubmissionAcceptedWithRecovery(
-            page, baseline, signal, externalProgress, initialToolBatchRevision, completionTracker, recoverObservation,
+            binding.page, baseline, signal, externalProgress, initialToolBatchRevision, completionTracker, recoverCurrentObservation,
           ),
           reconcile: async signal => {
-            if ((externalProgress?.snapshot().lastToolBatchRevision ?? 0) > initialToolBatchRevision) {
-              await this.observeSubmissionToolBoundary(page, baseline, signal, externalProgress, completionTracker);
-              return { state: "accepted", evidence: "mcp_tool_call" as ChatGptSubmissionEvidence };
+            if (binding.pending) await withBrowserTurnAbort(binding.pending, signal);
+            // A reconnect can begin while an earlier read is still in flight. Only
+            // restart that read after this submission's recovery published a page.
+            for (let attempt = 0; ; attempt++) {
+              const currentPage = binding.page;
+              try {
+                if ((externalProgress?.snapshot().lastToolBatchRevision ?? 0) > initialToolBatchRevision) {
+                  await this.observeSubmissionToolBoundary(currentPage, baseline, signal, externalProgress, completionTracker);
+                  return { state: "accepted", evidence: "mcp_tool_call" as ChatGptSubmissionEvidence };
+                }
+                const evidence = await this.currentSubmissionEvidence(currentPage, baseline, signal);
+                if (evidence) return { state: "accepted", evidence };
+                const dialogs = currentPage.locator('[role="dialog"], [data-testid="tool-approval-card"]').filter({ visible: true });
+                if (await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(dialogs.count(), signal), chatGptPageObservationTimeoutMs(currentPage)) > 0) {
+                  return { state: "approval_pending" };
+                }
+                const state = await this.submissionDomState(currentPage, undefined, signal);
+                const unchanged = state.turnIdentities.length === baseline.initialTurnIdentities.length
+                  && state.turnIdentities.every(value => baseline.initialTurnIdentities.includes(value))
+                  && state.visibleStopButtonCount === 0 && !baseline.acceptedUserIdentity;
+                const noInput = unchanged && currentPage === page
+                  && await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(audit!.notDispatched(), signal), chatGptPageObservationTimeoutMs(currentPage));
+                signal.throwIfAborted();
+                return { state: noInput ? "not_dispatched" : "ambiguous" };
+              } catch (error) {
+                signal.throwIfAborted();
+                // Boundary/ACK failures retain their cached failure and must revoke
+                // the turn. A reconnect is only a reason to repeat a stale DOM read.
+                if (error instanceof ChatGptWebAdapterError || attempt >= 1
+                  || !binding.pending && binding.page === currentPage) throw error;
+                if (binding.pending) await withBrowserTurnAbort(binding.pending, signal);
+              }
             }
-            const evidence = await this.currentSubmissionEvidence(page, baseline, signal);
-            if (evidence) return { state: "accepted", evidence };
-            const dialogs = page.locator('[role="dialog"], [data-testid="tool-approval-card"]').filter({ visible: true });
-            if (await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(dialogs.count(), signal), chatGptPageObservationTimeoutMs(page)) > 0) {
-              return { state: "approval_pending" };
-            }
-            const state = await this.submissionDomState(page, undefined, signal);
-            const unchanged = state.turnIdentities.length === baseline.initialTurnIdentities.length
-              && state.turnIdentities.every(value => baseline.initialTurnIdentities.includes(value))
-              && state.visibleStopButtonCount === 0 && !baseline.acceptedUserIdentity;
-            const noInput = unchanged && await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(audit!.notDispatched(), signal), chatGptPageObservationTimeoutMs(page));
-            signal.throwIfAborted();
-            return { state: noInput ? "not_dispatched" : "ambiguous" };
           },
           onAccepted: () => submissionLifecycle?.onSubmitted?.(),
           onEvent: event => console.info(`[chatgpt-web] submission_recovery ${JSON.stringify(event)}`),
@@ -4505,10 +4541,11 @@ export class ChatGptBrowserWorker {
     responseTurn: Locator,
     cache?: ChatGptResponseDomCache,
     signal?: AbortSignal,
+    timeoutMs = chatGptPageObservationTimeoutMs(page),
   ): Promise<ChatGptResponseDomSnapshot> {
     return withChatGptBrowserObservationTimeout(
       withBrowserTurnAbort(this.responseDomSnapshot(responseTurn, cache), signal),
-      chatGptPageObservationTimeoutMs(page),
+      timeoutMs,
     );
   }
 

@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
 import { chatGptRoundFailureEvidence, isChatGptObserverAbort } from "../src/adapters/chatgpt-web/round-observer";
+import { chatGptToolBoundaryError } from "../src/adapters/chatgpt-web/tool-boundary";
+
+test("boundary failures retain the precise phase without exposing DOM contents", () => {
+  for (const code of ["chatgpt_tool_boundary_observation_timeout", "chatgpt_tool_boundary_observation_failed",
+    "chatgpt_tool_boundary_ack_timeout", "chatgpt_tool_boundary_ack_failed", "chatgpt_tool_boundary_ack_rejected"]) {
+    expect(chatGptRoundFailureEvidence(chatGptToolBoundaryError(code, new Error("private transcript"))))
+      .toEqual({ errorName: "ChatGptWebAdapterError", errorCode: code });
+  }
+});
 
 test("an aborted observer does not classify validation and browser errors as disconnection", () => {
   const signal = AbortSignal.abort();
