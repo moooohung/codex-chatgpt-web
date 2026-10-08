@@ -1,14 +1,36 @@
 name: Release
+run-name: Release ${{ github.ref_name }} at ${{ github.sha }}
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
+  prepare:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.repository == 'moooohung/codex-chatgpt-web' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Plan an immutable release for this source commit
+        id: plan
+        run: node scripts/prepare-fork-release.cjs
+
   build:
+    needs: prepare
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +48,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - name: Synchronize the build version and fork download provenance
+        run: node scripts/prepare-fork-release.cjs --apply
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -86,12 +112,22 @@ jobs:
             launcher/artifacts/*.exe
             launcher/artifacts/*.AppImage
           if-no-files-found: error
+          retention-days: 7
 
   publish:
-    needs: build
+    needs: [prepare, build]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - name: Synchronize the release version and installers
+        run: node scripts/prepare-fork-release.cjs --apply
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -106,7 +142,7 @@ jobs:
       - name: Verify release tag matches package version
         run: |
           expected="v$(jq -r .version package.json)"
-          test "$GITHUB_REF_NAME" = "$expected"
+          test "$RELEASE_TAG" = "$expected"
       - name: Add licenses and installers
         run: |
           cp LICENSE release-assets/LICENSE
@@ -116,6 +152,7 @@ jobs:
           cp scripts/install.sh release-assets/install.sh
           cp scripts/install-launcher.sh release-assets/install-launcher.sh
           cp scripts/install-launcher.ps1 release-assets/install-launcher.ps1
+          cp release-plan.json release-assets/release-plan.json
       - name: Flatten release assets
         run: |
           cd release-assets
@@ -159,10 +196,10 @@ jobs:
           mapfile -d '' release_files < <(find release-assets -type f -print0)
           test "${#release_files[@]}" -gt 0
           release_flags=(--latest)
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+          if [[ "$RELEASE_TAG" == *-* ]]; then
             release_flags=(--prerelease --latest=false)
           fi
-          if existing_release="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isPrerelease 2>/dev/null)"; then
+          if existing_release="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease 2>/dev/null)"; then
             # A maintainer can stage a final-version tag as a public preview before building it.
             # Rebuilding its assets must not silently promote that release to old launchers.
             if jq -e '.isPrerelease == true' <<< "$existing_release" >/dev/null; then
@@ -170,23 +207,21 @@ jobs:
             else
               release_flags=(--prerelease=false --latest)
             fi
-            gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" \
+            gh release upload "$RELEASE_TAG" "${release_files[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
-            gh release edit "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --draft=false \
-              "${release_flags[@]}"
           else
-            gh release create "$GITHUB_REF_NAME" "${release_files[@]}" \
+            gh release create "$RELEASE_TAG" "${release_files[@]}" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "$GITHUB_REF_NAME" \
+              --target "$SOURCE_SHA" \
+              --title "$RELEASE_TAG" \
+              --draft \
               "${release_flags[@]}" \
               --generate-notes
           fi
 
           published_manifest="$(mktemp)"
-          gh release view "$GITHUB_REF_NAME" \
+          gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
             --jq '.assets[] | select(.name != "checksums.txt") | [.name, .digest] | @tsv' \
@@ -200,7 +235,7 @@ jobs:
             | LC_ALL=C sort -k2 > "$published_manifest"
           test -s "$published_manifest"
           mv "$published_manifest" release-assets/checksums.txt
-          gh release upload "$GITHUB_REF_NAME" release-assets/checksums.txt \
+          gh release upload "$RELEASE_TAG" release-assets/checksums.txt \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
@@ -211,14 +246,18 @@ jobs:
               echo "Published asset checksum mismatch: $name" >&2
               exit 1
             fi
-          done < <(gh release view "$GITHUB_REF_NAME" \
+          done < <(gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
             --jq '.assets[] | [.name, .digest] | @tsv')
 
           local_manifest_digest="$(sha256sum release-assets/checksums.txt | awk '{ print $1 }')"
-          remote_manifest_digest="$(gh release view "$GITHUB_REF_NAME" \
+          remote_manifest_digest="$(gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
             --jq '.assets[] | select(.name == "checksums.txt") | .digest')"
           test "sha256:$local_manifest_digest" = "$remote_manifest_digest"
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            "${release_flags[@]}"

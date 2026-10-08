@@ -1,3 +1,5 @@
+> Fork builds with local patches: [download releases](https://github.com/moooohung/codex-chatgpt-web/releases). Every push to `main` publishes a tested prerelease; see [fork release automation](docs/fork-releases.md).
+
 <p align="center">
   <img src="assets/readme/hero.svg" width="960" alt="Switch to web models. Stay in Codex. Your ChatGPT plan. Your workflow. Maximum capabilities.">
 </p>

@@ -1,3 +1,5 @@
+> 기존 패치를 포함한 포크 빌드: [릴리스 다운로드](https://github.com/moooohung/codex-chatgpt-web/releases). `main`에 푸시할 때마다 검증된 프리릴리스를 게시합니다. [자동 릴리스 안내](docs/fork-releases.md)를 참고하세요.
+
 <p align="center">
   <img src="assets/readme/hero.svg" width="960" alt="웹 모델로 전환해도, Codex는 그대로. 내 ChatGPT 플랜. 내 작업 흐름. 모델의 가능성을 최대한.">
 </p>

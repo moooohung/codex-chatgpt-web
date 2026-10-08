@@ -4,6 +4,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { resolveReleaseRepository } = require("../electron/release-repository.cjs");
+const RELEASE_REPOSITORY = resolveReleaseRepository(require("../package.json"));
 const {
   buildJob,
   compareVersions,
@@ -61,7 +63,7 @@ test("unsupported Linux launches reject updates before downloading or changing s
             tag_name: "v1.2.0",
             assets: ["codex-web-gpt-1.2.0-linux-x64.AppImage", "checksums.txt"].map(name => ({
               name,
-              browser_download_url: `https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/${name}`,
+              browser_download_url: `https://github.com/${RELEASE_REPOSITORY}/releases/download/v1.2.0/${name}`,
             })),
           }),
           downloadText: async () => { calls.push("checksums"); throw new Error("Unexpected download"); },
@@ -103,11 +105,11 @@ test("checksums and release URLs bind the exact expected asset", () => {
   assert.throws(() => expectedChecksum(`${hash}  other.zip\n`, "launcher.zip"), /no entry/);
   assert.equal(
     validateReleaseAssetUrl(
-      "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/launcher.zip",
+      `https://github.com/${RELEASE_REPOSITORY}/releases/download/v1.2.0/launcher.zip`,
       "1.2.0",
       "launcher.zip",
     ),
-    "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/launcher.zip",
+    `https://github.com/${RELEASE_REPOSITORY}/releases/download/v1.2.0/launcher.zip`,
   );
   assert.throws(
     () => validateReleaseAssetUrl("https://example.com/launcher.zip", "1.2.0", "launcher.zip"),
@@ -143,11 +145,11 @@ test("startup check runs once and exposes only a newer complete release", async 
           assets: [
             {
               name: "codex-web-gpt-1.2.0-linux-x64.AppImage",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/codex-web-gpt-1.2.0-linux-x64.AppImage",
+              browser_download_url: `https://github.com/${RELEASE_REPOSITORY}/releases/download/v1.2.0/codex-web-gpt-1.2.0-linux-x64.AppImage`,
             },
             {
               name: "checksums.txt",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/checksums.txt",
+              browser_download_url: `https://github.com/${RELEASE_REPOSITORY}/releases/download/v1.2.0/checksums.txt`,
             },
           ],
         };
@@ -170,7 +172,7 @@ test("preview and draft releases stay hidden until promoted, regardless of the v
             tag_name: `v${tag}`, ...flags,
             assets: [`codex-web-gpt-${tag}-linux-x64.AppImage`, "checksums.txt"].map(name => ({
               name,
-              browser_download_url: `https://github.com/miuuyy/codex-chatgpt-web/releases/download/v${tag}/${name}`,
+              browser_download_url: `https://github.com/${RELEASE_REPOSITORY}/releases/download/v${tag}/${name}`,
             })),
           }),
         },
@@ -215,11 +217,11 @@ for (const arch of ["x64", "arm64"]) {
             assets: [
               {
                 name: `codex-web-gpt-1.2.0-linux-${arch}.AppImage`,
-                browser_download_url: `https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/codex-web-gpt-1.2.0-linux-${arch}.AppImage`,
+                browser_download_url: `https://github.com/${RELEASE_REPOSITORY}/releases/download/v1.2.0/codex-web-gpt-1.2.0-linux-${arch}.AppImage`,
               },
               {
                 name: "checksums.txt",
-                browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/checksums.txt",
+                browser_download_url: `https://github.com/${RELEASE_REPOSITORY}/releases/download/v1.2.0/checksums.txt`,
               },
             ],
           }),
