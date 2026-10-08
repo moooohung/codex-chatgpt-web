@@ -335,7 +335,7 @@ function gatewayToolCatalogPage(response: {
   if (response.isError) {
     throw new Error(`Native nested tool inventory failed: ${textBlocks.join("\n") || "unknown error"}`);
   }
-  if (textBlocks.length !== 1) {
+  if (textBlocks.length === 0) {
     throw new Error("Native nested tool inventory returned an invalid text response");
   }
   let parsed: unknown;
@@ -343,7 +343,7 @@ function gatewayToolCatalogPage(response: {
   // using a fresh nonce so a stale response or unrelated JSON cannot register tools.
   const open = `<codex_native_tool_catalog_${catalogNonce}>`;
   const close = `</codex_native_tool_catalog_${catalogNonce}>`;
-  const text = textBlocks[0]!;
+  const text = textBlocks.join("\n");
   const start = text.indexOf(open);
   const end = text.indexOf(close, start + open.length);
   if (start < 0 || end < 0 || text.indexOf(open, start + open.length) >= 0 || text.indexOf(close, end + close.length) >= 0) {

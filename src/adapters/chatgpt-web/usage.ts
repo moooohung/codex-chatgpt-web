@@ -8,6 +8,7 @@ import {
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
+  supportsChatGptWebBiggerContext,
 } from "../../chatgpt-web-models";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "./input-tokens";
@@ -87,13 +88,17 @@ export function resolveBiggerContextMultipartParts(
     throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
   }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  if (!supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, capabilities, parsed._chatgptModelFamily)) return undefined;
   const preparation = prepared ?? createChatGptWebPromptPreparation(parsed);
   if (preparation.request !== parsed) throw new Error("Prompt preparation belongs to another request");
   const estimate = preparation.estimate;
   const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
-    CHATGPT_WEB_BACKEND_MODEL,
-    mode.effort,
-    { ...capabilities, experimentalBiggerContext: false },
+    CHATGPT_WEB_BACKEND_MODEL, mode.effort,
+    { ...capabilities, experimentalBiggerContext: false }, parsed._chatgptModelFamily,
+  );
+  const { contextWindow: totalContextWindow } = resolveChatGptWebContextLimits(
+    CHATGPT_WEB_BACKEND_MODEL, mode.effort,
+    { ...capabilities, experimentalBiggerContext: true }, parsed._chatgptModelFamily,
   );
   const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
     parsed, capabilities, mode.localTools && !parsed._compactionRequest ? ESTIMATE_TURN_TOKEN : undefined,
@@ -140,7 +145,7 @@ export function resolveBiggerContextMultipartParts(
       if (estimate(text, parsed.modelId) > budget) return false;
     }
     return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId, estimate)
-      < contextWindow * Math.min(messages.length, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
+      < Math.min(totalContextWindow, contextWindow * messages.length);
   };
   if ((minimalTransport || initialParts === undefined) && inline && fits(inline)) return undefined;
   const knownRecordChars = preparation.records?.prepared.reduce((total, record) => total + record.text.length, 0);

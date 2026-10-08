@@ -3,9 +3,9 @@ import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { assertChatGptModelFamily, chatGptModelSelectionStageError, chatGptSelectionFamily } from "../src/adapters/chatgpt-web/model-selection";
 
-test("Latest lower-effort selection proves explicit 5.6 without changing the final Pro family", () => {
-  expect(chatGptSelectionFamily("6", "low")).toBe("5.6");
-  expect(chatGptSelectionFamily("6", "xhigh")).toBe("5.6");
+test("explicit GPT-6 selection keeps its version at all efforts; staging is chosen separately", () => {
+  expect(chatGptSelectionFamily("6", "low")).toBe("6");
+  expect(chatGptSelectionFamily("6", "xhigh")).toBe("6");
   expect(chatGptSelectionFamily("6", "max")).toBe("6");
   expect(chatGptSelectionFamily("5.6", "max")).toBe("5.6");
 });

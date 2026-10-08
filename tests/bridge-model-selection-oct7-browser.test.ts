@@ -9,7 +9,7 @@ import { selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-sele
 const fixture=readFileSync(new URL("./fixtures/chatgpt-model-picker-oct7.html",import.meta.url),"utf8");
 const caps={localToolsEnabled:false,solAvailable:true,extraHighAvailable:true,proAvailable:true};
 
-for(const [family,effort] of [["5.6","high"],["6","low"]] as const)
+for(const [family,effort] of [["5.6","high"],["5.6","low"]] as const)
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`October picker selects ${family}/${effort} with an attribute-free view action and effort-only header`,async()=>{
   const browser=await chromium.launch({executablePath:process.env.CHATGPT_DOM_TEST_BROWSER,headless:true});
   try{
@@ -21,7 +21,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`October picker selects ${fam
     expect(await page.evaluate(()=>(window as any).familySelections)).toEqual(["5.6"]);
     expect(await page.evaluate(()=>(window as any).sends)).toBe(0);
     expect(await page.locator('#prompt-textarea').innerText()).toBe("Unsent draft");
-    if(family==="6"){
+    if(effort==="low"){
       const final=await worker.selectModelAndEffort(page,CHATGPT_WEB_MODEL_ID,"max",caps,undefined,false,"6");
       await worker.assertSelectedEffort(page,final);
       expect(final.modelFamily).toBe("6");expect(final.effort).toBe("max");expect(final.selection.label).toBe("Pro");

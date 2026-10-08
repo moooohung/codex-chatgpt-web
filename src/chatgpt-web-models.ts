@@ -1,9 +1,13 @@
 export const CHATGPT_WEB_MODEL_PREFIX = "chatgpt-web/";
+/** Shared automatic transport profile; exact browser version is carried by modelFamily. */
 export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
+/** Internal Luna transport identity; the Free UI does not expose a selectable model version. */
 export const CHATGPT_WEB_LUNA_BACKEND_MODEL = "gpt-5.6-luna";
 export const CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR =
   "Bigger Context is unavailable for Luna and Think. Turn it off in launcher Settings "
   + "(or run setup with --standard-context), then restart Codex.";
+export const CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_ERROR =
+  "GPT-6 Sol uses standard context for this account and effort. Bigger Context supports Medium, High and Extra High on Pro accounts.";
 /** Internal adapter identity for a turn whose ChatGPT model is selected by the user in the launcher. */
 export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
 /** Internal adapter identity for the explicitly enabled, Pro-sized Zero Risk context profile. */
@@ -83,6 +87,11 @@ export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
  */
 export const CHATGPT_WEB_LUNA_CONTEXT_WINDOW = 1_050_000;
 export const CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3;
+// Rechecked 2026-10-08 on Pro: GPT-6 Medium/High/Extra High retained all 12
+// markers at 253k input tokens but lost the oldest markers at 283k. Keep room
+// below the passing boundary and compact before reaching this context ceiling.
+export const CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_WINDOW = 240_000;
+export const CHATGPT_WEB_GPT6_SOL_BIGGER_AUTO_COMPACT_TOKEN_LIMIT = 220_000;
 
 export interface ChatGptWebContextLimits {
   contextWindow: number;
@@ -93,6 +102,18 @@ export interface ChatGptWebContextLimits {
 export interface ChatGptWebTransportLimits {
   browserMessageTokenLimit?: number;
   browserComposerCharLimit?: number;
+}
+
+/** GPT-6 staged context is supported only by the account and efforts checked live. */
+export function supportsChatGptWebBiggerContext(
+  backendModel: string,
+  effort: ChatGptWebAdapterEffort,
+  capabilities: Pick<ChatGptWebAccountCapabilities, "proAvailable">,
+  modelFamily?: ChatGptWebModelFamily,
+): boolean {
+  return backendModel === CHATGPT_WEB_BACKEND_MODEL && (
+    modelFamily !== "6" || effort === "max" || (capabilities.proAvailable && effort !== "low")
+  );
 }
 
 export function isChatGptWebZeroRiskBackendModel(
@@ -120,6 +141,7 @@ export function resolveChatGptWebContextLimits(
   backendModel: ChatGptWebBackendModel,
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
+  modelFamily?: ChatGptWebModelFamily,
 ): ChatGptWebContextLimits {
   if (isChatGptWebZeroRiskBackendModel(backendModel)) {
     if (capabilities.experimentalBiggerContext) {
@@ -164,7 +186,14 @@ export function resolveChatGptWebContextLimits(
   } else {
     throw new Error(`ChatGPT Plus context limit is not defined for unavailable effort: ${effort}`);
   }
-  if (!capabilities.experimentalBiggerContext) return limits;
+  if (!capabilities.experimentalBiggerContext
+    || !supportsChatGptWebBiggerContext(backendModel, effort, capabilities, modelFamily)) return limits;
+  if (modelFamily === "6" && effort !== "max") {
+    return contextLimits(
+      CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_WINDOW,
+      CHATGPT_WEB_GPT6_SOL_BIGGER_AUTO_COMPACT_TOKEN_LIMIT,
+    );
+  }
   return contextLimits(
     limits.contextWindow * CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
     limits.autoCompactTokenLimit * CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
@@ -334,7 +363,7 @@ export const CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE: ChatGptWebModelRoute = {
 
 export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
   slug: "chatgpt-web/gpt-5.6-luna",
-  displayName: "GPT-5.6 Luna (Web)",
+  displayName: "Luna (Web)",
   description: "ChatGPT Luna. Light selects the ordinary mode; Medium enables Think.",
   interactionMode: "automatic",
   backendModel: CHATGPT_WEB_LUNA_BACKEND_MODEL,
@@ -413,6 +442,30 @@ export const CHATGPT_WEB_LEGACY_MODEL_ROUTES: readonly ChatGptWebAutomaticModelR
 
 /** Group only efforts with identical context and compaction budgets. */
 export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] = [
+  {
+    slug: "chatgpt-web/gpt-6-sol-instant",
+    displayName: "GPT-6 Sol Instant (Web)",
+    description: "GPT-6 Sol Instant through ChatGPT. Uses standard context even when Bigger Context is enabled.",
+    interactionMode: "automatic",
+    backendModel: CHATGPT_WEB_BACKEND_MODEL,
+    modelFamily: "6",
+    codexEffort: "low",
+    adapterEffort: "low",
+    supportedCodexEfforts: ["low"],
+    requiresPro: false,
+  },
+  {
+    slug: "chatgpt-web/gpt-6-sol",
+    displayName: "GPT-6 Sol (Web)",
+    description: "GPT-6 Sol with Medium, High, or account-supported Extra High. Bigger Context supports up to 240,000 tokens on Pro; other accounts use standard context.",
+    interactionMode: "automatic",
+    backendModel: CHATGPT_WEB_BACKEND_MODEL,
+    modelFamily: "6",
+    codexEffort: "high",
+    adapterEffort: "high",
+    supportedCodexEfforts: ["medium", "high", "xhigh"],
+    requiresPro: false,
+  },
   {
     slug: "chatgpt-web/gpt-5.6-sol-instant",
     displayName: "GPT-5.6 Sol Instant (Web)",
