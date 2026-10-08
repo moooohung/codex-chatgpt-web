@@ -162,6 +162,7 @@ test.each([
     );
     expect(actions).toEqual([
       ...(multipart ? [
+        `effort:${effort}`,
         largeStage ? "effort:medium" : "effort:low",
         ...Array.from({ length: 5 }, (_, index) => [
           ...(index > 0 ? [largeStage ? "effort:medium" : "effort:low"] : []), "attach:plain", "send", "observe", "ack",

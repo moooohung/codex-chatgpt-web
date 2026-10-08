@@ -4,6 +4,12 @@ import { ChatGptWebAdapterError } from "./adapter-error";
 
 type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
 
+/** User-authorized downgrade applies only after positive Plus account evidence. */
+export function resolveChatGptPlusFallback(family: ChatGptWebModelFamily | undefined, effort: ChatGptWebAdapterEffort, planType: string) {
+  if (planType !== "plus" || (effort !== "xhigh" && effort !== "max")) return undefined;
+  return { family: family === "6" && effort === "max" ? "5.6" as const : family, effort: "high" as const };
+}
+
 export const CHATGPT_MODEL_SELECTION_SETTLE_MS = 10_000;
 
 function selectionTimeout(family: ChatGptWebModelFamily, phase: string, cause?: unknown): ChatGptWebAdapterError {
@@ -53,7 +59,8 @@ export function chatGptModelSelectionStageError(error: unknown, stage: string): 
     || !/^(?:chatgpt_model_|chatgpt_effort_|model_version_unavailable)/.test(error.code)) return error;
   return new ChatGptWebAdapterError(
     `ChatGPT ${stage} failed: ${error.message}`
-      + (/^(?:multipart_|final_part_)/.test(stage) ? " Earlier multipart parts may already have been accepted." : ""),
+      + (stage === "multipart_requested_model_preflight" ? " No multipart part was sent."
+        : /^(?:multipart_|final_part_)/.test(stage) ? " Earlier multipart parts may already have been accepted." : ""),
     { status: error.status, errorType: error.errorType, code: error.code, retryable: error.retryable, cause: error },
   );
 }

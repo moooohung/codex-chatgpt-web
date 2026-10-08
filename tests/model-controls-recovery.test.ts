@@ -1,6 +1,42 @@
 import { expect, test } from "bun:test";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
+import { resolveChatGptPlusFallback } from "../src/adapters/chatgpt-web/model-selection";
+
+test("Plus fallback keeps Sol's family and routes GPT-6 Pro to GPT-5.6 High only", () => {
+  for (const family of ["5.6", "6"] as const) {
+    expect(resolveChatGptPlusFallback(family, "xhigh", "plus")).toEqual({ family, effort: "high" });
+    expect(resolveChatGptPlusFallback(family, "max", "plus")).toEqual({ family: "5.6", effort: "high" });
+    for (const effort of ["low", "medium", "high"] as const) expect(resolveChatGptPlusFallback(family, effort, "plus")).toBeUndefined();
+    for (const plan of ["pro", "prolite", "free", "", "unknown"]) expect(resolveChatGptPlusFallback(family, "max", plan)).toBeUndefined();
+  }
+});
+
+test.each([ ["5.6", "xhigh", "5.6"], ["6", "xhigh", "6"], ["6", "max", "5.6"] ] as const)(
+  "Plus %s/%s unavailability verifies %s/High without Send or reload", async (family, effort, effectiveFamily) => {
+  const selections: unknown[][] = [];
+  const capabilities = { solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const page = {
+    keyboard: { press: async (key: string) => expect(key).toBe("Escape") },
+    evaluate: async () => ({ userId: "fixture-user", accountId: "fixture-account", planType: "plus", structure: "personal", needsAttention: false }),
+    url: () => "https://chatgpt.com/?temporary-chat=true",
+    reload: async () => { throw new Error("A supported fallback must not reload the owned conversation"); },
+  };
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    selectModelAndEffort: async (...args: unknown[]) => {
+      selections.push(args);
+      if (selections.length === 1) throw new ChatGptWebAdapterError("Requested effort is unavailable", {
+        status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable", retryable: false,
+      });
+      expect(args[2]).toBe("high"); expect(args[6]).toBe(effectiveFamily);
+      expect(args[3]).toMatchObject({ proAvailable: false, extraHighAvailable: false });
+      return { effort: "high", modelFamily: effectiveFamily, selection: { url: page.url(), label: "High" } };
+    },
+  });
+  const result = await worker.selectModelAndEffortWithRecovery(page, "gpt-5.6-sol", effort, capabilities, undefined, false, family);
+  expect(result).toMatchObject({ effort: "high", modelFamily: effectiveFamily, accountFallback: { capabilities: { proAvailable: false } } });
+  expect(selections).toHaveLength(2);
+});
 
 test.each([
   new ChatGptWebAdapterError("Selected model is unavailable", {

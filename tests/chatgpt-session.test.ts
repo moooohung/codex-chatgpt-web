@@ -295,7 +295,9 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
   };
   const composer = { filter() { return this; }, last() { return this; }, count: async () => 1, isEditable: async () => true, locator: () => ({ count: async () => 1, locator: () => control }) };
   const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
-  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows };
+  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows,
+    getByRole: () => ({ filter() { return this; }, count: async () => 0 }),
+  };
   const page = {
     url: () => "https://chatgpt.com/?temporary-chat=true",
     evaluate: async () => true,
@@ -422,6 +424,17 @@ test("stale saved capabilities cannot activate a locked effort; High remains sel
       expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
     }
   }
+});
+
+test.each(["xhigh", "max"])("stale Pro capabilities on the observed three-position Plus picker identify unavailable %s", async effort => {
+  const fixture = reasoningPicker({ power: true, max: "2", locks: [null, null, null] });
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    activeComposer: async () => fixture.composer,
+  }) as any;
+  await expect(worker.selectModelAndEffort(fixture.page, "gpt-5.6-sol", effort, {
+    localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  })).rejects.toMatchObject({ code: "chatgpt_effort_unavailable", retryable: false, message: expect.stringContaining("picker exposes 3 effort positions") });
+  expect(fixture.keys).toEqual([]);
 });
 
 test("Pro selection verifies the persisted hidden slider through its visible owner, never model rows", async () => {

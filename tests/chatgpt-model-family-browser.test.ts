@@ -187,3 +187,21 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`effort-only model evidence f
     await expect(assertChatGptModelFamily(menu, "6", "low", 0)).rejects.toThrow();
   } finally { await browser.close(); }
 }, 60_000);
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("the observed Plus effort-only GPT-6 header uses its explicit checked family, never Latest", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div role="menu" id="owned">
+      <div data-model-picker-view-toggle="true"><span data-effort-only="true">Medium</span></div>
+      <div role="menuitem" aria-describedby="announcement"><span role="slider" aria-valuemin="0" aria-valuemax="2" aria-valuenow="1"></span></div>
+      <span id="announcement">Medium, 2 of 3.</span>
+      <div hidden><div role="menuitemradio" aria-checked="true">GPT-6</div></div>
+    </div>`);
+    const menu = { menu: page.locator("#owned"), slider: page.locator('[role="slider"]') } as Parameters<typeof assertChatGptModelFamily>[0];
+    await assertChatGptModelFamily(menu, "6", "medium", 1);
+    await expect(assertChatGptModelFamily(menu, "5.6", "medium", 1)).rejects.toThrow();
+    await page.locator('[role="menuitemradio"]').evaluate(el => { el.textContent = "Latest"; });
+    await expect(assertChatGptModelFamily(menu, "6", "medium", 1)).rejects.toThrow();
+  } finally { await browser.close(); }
+}, 20_000);

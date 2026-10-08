@@ -18,8 +18,8 @@ compiled code, account information or credentials.
 | 10 | Korean personalized button | Add exact localized labels |
 | 11 | Korean unpersonalized button | Add exact localized labels |
 | 12 | Korean personalized menu choice | Add localized choice scoped to the owned menu |
-| 13 | Lower unavailable effort index | Remove downgrade |
-| 14 | Alternate effort downgrade branch | Remove downgrade |
+| 13 | Lower unavailable effort index | Replace implicit index lowering with the explicit Plus mapping in `multipart-plus-account-recovery.md` |
+| 14 | Alternate effort downgrade branch | Require positive Plus evidence and ordinary verification of the effective High selection |
 | 15 | Allow every same-origin verification URL | Keep owned URL proof |
 | 16 | Alternate same-origin URL bypass | Keep owned URL proof |
 | 17 | Global latest-message React completion override | Bind private evidence to current assistant message; retain DOM fence |

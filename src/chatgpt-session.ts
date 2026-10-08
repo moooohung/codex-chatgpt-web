@@ -62,7 +62,7 @@ export async function readChatGptModelAnnouncements(slider: Locator): Promise<st
         }
       }
       descriptions.push(words.join(" "));
-      // Some 5.6-only accounts deliberately omit the version from this header.
+      // Some accounts deliberately omit the version from this header.
       // The explicit checked family row remains authoritative while its advanced
       // view is collapsed; Latest does not prove a concrete model version.
       const effortOnly = content.querySelector('[data-effort-only="true"]');
@@ -71,7 +71,7 @@ export async function readChatGptModelAnnouncements(slider: Locator): Promise<st
           .filter(row => row.closest('[role="menu"]') === menu);
         if (selected.length > 1) throw new Error("ChatGPT model picker exposes multiple selected model families");
         const label = selected[0]?.getAttribute("aria-label") ?? selected[0]?.textContent?.trim() ?? "";
-        if (/^GPT[-\s]?5\.6(?:\s+Sol)?(?:\s*\((?:Web|웹)\))?$/i.test(label)) {
+        if (/^GPT[-\s]?(?:5\.6(?:\s+Sol)?|6(?:\s+Sol)?)(?:\s*\((?:Web|웹)\))?$/i.test(label)) {
           descriptions.push(`${label} ${effortOnly.textContent?.trim() ?? ""}`);
         }
       }

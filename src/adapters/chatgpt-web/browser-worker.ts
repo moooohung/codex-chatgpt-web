@@ -100,7 +100,7 @@ import {
 } from "./page-observation-budget";
 import { ChatGptDeliveryRecovery, chatGptMessageDeliveryTimeoutVisible } from "./delivery-recovery";
 import { createChatGptSubmissionAudit, recoverChatGptSubmission } from "./submission-recovery";
-import { CHATGPT_MODEL_SELECTION_SETTLE_MS, assertChatGptModelFamily, chatGptModelSelectionStageError, chatGptSelectionFamily, readClosedChatGptEffortLabel, selectChatGptModelFamily } from "./model-selection";
+import { CHATGPT_MODEL_SELECTION_SETTLE_MS, assertChatGptModelFamily, chatGptModelSelectionStageError, chatGptSelectionFamily, readClosedChatGptEffortLabel, resolveChatGptPlusFallback, selectChatGptModelFamily } from "./model-selection";
 import { ChatGptBrowserRunQueue, MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
   ChatGptCompactionHandoffAccepted,
@@ -233,6 +233,7 @@ function chatGptModelControlUnavailableAdapterError(
   detail?: string,
   retryable = false,
 ): ChatGptWebAdapterError {
+  console.info(`[chatgpt-web] model_control_failure ${JSON.stringify({ reason: redactChatGptUiDiagnostic(diagnostic).slice(0, 500) })}`);
   return new ChatGptWebAdapterError(
     detail ? `${CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE} ChatGPT: ${detail}` : CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE,
     {
@@ -978,6 +979,7 @@ type SelectedChatGptWebModelMode = ChatGptWebModelMode & {
   modelFamily?: "5.6" | "6";
   selection?: { url: string; label: string };
   usageModel?: ChatGptUsageModel;
+  accountFallback?: { capabilities: ChatGptWebCapabilities };
 };
 
 export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope): Promise<void> {
@@ -2787,11 +2789,12 @@ export class ChatGptBrowserWorker {
         .catch(error => { throw chatGptModelControlUnavailableAdapterError(String(error), undefined, true); });
       if (uiEffortIndex > state.max - state.min) {
         const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(menu) : undefined;
-        throw chatGptModelControlUnavailableAdapterError(
-          `ChatGPT effort slider does not expose item index ${uiEffortIndex} (min=${state.min}; max=${state.max})`
-          + (uiEffortIndex === 4 ? " ChatGPT may have temporarily hidden Pro because you reached its usage limit." : ""),
-          detail,
-          false,
+        throw new ChatGptWebAdapterError(
+          `ChatGPT ${modelFamily ? `model ${modelFamily} ` : ""}${mode.displayLabel} is unavailable in the current browser account. `
+          + `Its picker exposes ${state.max - state.min + 1} effort positions; the requested position is ${uiEffortIndex + 1}. `
+          + "This part was not sent. Check the signed-in account and refresh setup capabilities."
+          + (detail ? ` ChatGPT: ${detail}` : ""),
+          { status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable", retryable: false },
         );
       }
       if (!state.available[uiEffortIndex]) {
@@ -2891,6 +2894,25 @@ export class ChatGptBrowserWorker {
         modelFamily,
       );
     } catch (error) {
+      if (error instanceof ChatGptWebAdapterError
+        && (error.code === "chatgpt_effort_unavailable" || error.code === "chatgpt_effort_locked")) {
+        const account = await readChatGptUsageAccount(page).catch(() => undefined);
+        const requested = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
+        const fallback = resolveChatGptPlusFallback(modelFamily, requested.effort, account?.planType ?? "");
+        if (fallback) {
+          const actualCapabilities = { ...capabilities, proAvailable: false, extraHighAvailable: false };
+          await page.keyboard.press("Escape");
+          this.verifiedEffortSelections?.delete(page);
+          const selected = await this.selectModelAndEffort(page, modelId, fallback.effort, actualCapabilities,
+            captureDiagnostic, trackUsage, fallback.family);
+          console.info(`[chatgpt-web] plus_effort_fallback ${JSON.stringify({
+            requestedFamily: modelFamily, requestedEffort: requested.effort,
+            effectiveFamily: fallback.family, effectiveEffort: fallback.effort,
+          })}`);
+          await captureDiagnostic?.("plus-effort-fallback-selected");
+          return { ...selected, accountFallback: { capabilities: actualCapabilities } };
+        }
+      }
       if ((error instanceof ChatGptWebAdapterError && !error.retryable)
         || (error instanceof Error && error.name === "AbortError")) throw error;
       const isUsageLimit = error instanceof ChatGptWebAdapterError
@@ -5466,10 +5488,11 @@ export class ChatGptBrowserWorker {
     if (turn.captureLunaCheckpoint && turn.modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
       throw new Error("Private rolling checkpoint capture is valid only for ChatGPT Luna");
     }
-    const browserCapabilities = turn.nativeConnector
+    let browserCapabilities = turn.nativeConnector
       ? { ...turn.capabilities, localToolsEnabled: true }
       : turn.capabilities;
-    const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, browserCapabilities);
+    let requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, browserCapabilities);
+    let requestedFamily = turn.modelFamily;
     const prepare = reuseConversation ? turn.prepareResume : turn.prepare;
     if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
     const prepared = await prepare();
@@ -5514,7 +5537,7 @@ export class ChatGptBrowserWorker {
       const maxStageChars = multipartStages
         ? Math.max(...multipartStages.map(stage => stage.text.length))
         : undefined;
-      const stagingMode = multipartStages
+      let stagingMode = multipartStages
         ? resolveChatGptWebMultipartStagingMode(
           turn.modelId,
           browserCapabilities,
@@ -5525,10 +5548,10 @@ export class ChatGptBrowserWorker {
       // Pro's inert context uploads have always used 5.6 Sol. Pin that existing
       // transport explicitly now that Latest/GPT-6 uses 6 Sol at lower efforts.
       // The final answer still selects and verifies the requested Pro family.
-      const stagingFamily = multipartStages && turn.modelFamily === "6"
+      let stagingFamily = multipartStages && turn.modelFamily === "6"
         && requestedMode.effort === "max" && stagingMode.effort !== "max"
         ? "5.6" : turn.modelFamily;
-      if (prepared.multipart) {
+      const validateInput = () => { if (prepared.multipart) {
         assertChatGptWebMultipartInputWithinLimits(
           estimatedInputTokens,
           estimatedMessageTokens,
@@ -5548,7 +5571,7 @@ export class ChatGptBrowserWorker {
             finalMessageChars: multipartFinalPrompt.length,
             finalImageTokens: estimateChatGptWebImageTokens(prepared),
           } : undefined,
-          turn.modelFamily,
+          requestedFamily,
         );
       } else {
         assertChatGptWebInputWithinLimits(
@@ -5559,7 +5582,28 @@ export class ChatGptBrowserWorker {
           browserCapabilities,
           maxMessageChars,
         );
-      }
+      } };
+      validateInput();
+      const applyAccountFallback = (selected: SelectedChatGptWebModelMode) => {
+        if (!selected.accountFallback) return;
+        browserCapabilities = selected.accountFallback.capabilities;
+        requestedMode = resolveChatGptWebModelMode(turn.modelId, selected.effort, browserCapabilities);
+        requestedFamily = selected.modelFamily;
+        try {
+          stagingMode = multipartStages ? resolveChatGptWebMultipartStagingMode(
+            turn.modelId, browserCapabilities, maxStageMessageTokens!, maxStageChars!,
+          ) : requestedMode;
+          stagingFamily = requestedFamily;
+          // A downgrade cannot inherit Pro's larger context/composer limits.
+          validateInput();
+        } catch (error) {
+          if (!(error instanceof ChatGptWebAdapterError) || error.code !== "context_length_exceeded") throw error;
+          throw new ChatGptWebAdapterError("Reprepare the unsent prompt for the confirmed Plus account at High effort", {
+            status: 409, errorType: "invalid_request_error",
+            code: requestedFamily === "6" ? "chatgpt_plus_reprepare_6_high" : "chatgpt_plus_reprepare_56_high", retryable: false,
+          });
+        }
+      };
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;
@@ -5718,6 +5762,20 @@ export class ChatGptBrowserWorker {
       }
       // A retained lease proves conversation ownership. Model selection and plugin attachment
       // must still be established for each new submission on that page.
+      // Saved capabilities can belong to a previously signed-in account. Prove the
+      // actual requested family/effort before spending any physical multipart Send
+      // on an easier staging mode that the new account happens to support.
+      if (multipartStages && (stagingMode.effort !== requestedMode.effort || stagingFamily !== turn.modelFamily)) {
+        const preflight = await this.runStage(
+          turn.traceId, "multipart_requested_model_preflight", browserStageTimeouts.effortSelection,
+          () => this.selectModelAndEffortWithRecovery(
+            page, turn.modelId, requestedMode.effort, browserCapabilities,
+            checkpoint => diagnostics.capture(page, `preflight-${checkpoint}`),
+            trackUsage, turn.modelFamily, reuseConversation,
+          ),
+        );
+        applyAccountFallback(preflight);
+      }
       const selectStagingMode = () => (
         this.selectModelAndEffortWithRecovery(
           page,
@@ -5731,6 +5789,7 @@ export class ChatGptBrowserWorker {
         )
       );
       let mode = await this.runStage(turn.traceId, multipartStages ? "multipart_staging_effort_selection" : "effort_selection", browserStageTimeouts.effortSelection, selectStagingMode);
+      applyAccountFallback(mode);
       await diagnostics.capture(page, "effort-selection-complete");
 
       // One receipt per physical Send, not per native tool call or stream attachment.
@@ -5866,6 +5925,9 @@ export class ChatGptBrowserWorker {
             acknowledgement: stage.acknowledgement,
             identities: [acknowledgedResponse.identity],
           });
+          // An ACK changes the conversation route and can replace the picker. Do
+          // not reuse a proof from before that physical submission on the next part.
+          this.verifiedEffortSelections?.delete(page);
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
           await turn.onMultipartStageAcknowledged?.(index + 1);
         }
@@ -5883,7 +5945,7 @@ export class ChatGptBrowserWorker {
               browserCapabilities,
               checkpoint => diagnostics.capture(page, `final-part-${checkpoint}`),
               trackUsage,
-              turn.modelFamily,
+              requestedFamily,
               true,
             ),
           );
@@ -6435,9 +6497,14 @@ export class ChatGptBrowserWorker {
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
       );
-      await onFailure?.(error);
-      if (diagnosticPage && !diagnosticPage.isClosed()) {
-        await diagnostics.capture(diagnosticPage, "turn-failed", error);
+      try {
+        if (diagnosticPage && !diagnosticPage.isClosed()) {
+          await diagnostics.capture(diagnosticPage, "turn-failed", error);
+        }
+      } finally {
+        // The callback releases the launcher lease and closes its page. Capture
+        // failure evidence first; cleanup still runs if that observation fails.
+        await onFailure?.(error);
       }
       throw error;
     } finally {

@@ -22,6 +22,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
+import { runWithChatGptPlusPreparation, type ChatGptPlusPreparation } from "./account-fallback";
 import { PreparedChatGptTurnStore } from "./prepared-turn";
 import { planLargeContextCompaction, runLargeContextCompaction } from "./large-context-compaction";
 import { prepareCompactionStageTransport } from "./compaction-stage-transport";
@@ -474,7 +475,7 @@ export function createChatGptWebAdapter(
     const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
       ? retainedConversationRelease(retainedLauncherDescriptor, conversationKey)
       : undefined;
-    const compileOptionsFor = (input: CodexParsedRequest) => {
+    const compileOptionsFor = (input: CodexParsedRequest, capabilities = turnCapabilities) => {
       if (manualRequest) return {};
       const preparation = createChatGptWebPromptPreparation(input);
       if (hooks.boundedCompactionStage) return { preparation, preserveCompactionHistory: true };
@@ -482,7 +483,7 @@ export function createChatGptWebAdapter(
       // Ordinary turns retain the minimal transport optimization.
       const minimal = minimalTransportFor(input);
       const experimentalMultipartParts = experimentalBiggerContext
-        ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments, preparation, minimal)
+        ? resolveBiggerContextMultipartParts(input, capabilities, experimentalSkillAttachments, preparation, minimal)
         : undefined;
       return {
         preparation,
@@ -751,26 +752,29 @@ export function createChatGptWebAdapter(
       };
     }
     if (!mode.localTools) {
-      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
+      const prepareReadOnly = async (override?: ChatGptPlusPreparation) => {
+        const input = override ? { ...checkpointInput.parsed,
+          _chatgptModelFamily: override.modelFamily,
+          options: { ...checkpointInput.parsed.options, reasoning: override.reasoning },
+        } : checkpointInput.parsed;
+        const capabilities = override?.capabilities ?? turnCapabilities;
+        const compiled = (!override && hooks.compactionStagePrompt) || compileChatGptWebPrompt(
+          input, capabilities, undefined, compileOptionsFor(input, capabilities),
+        );
+        if (hooks.boundedCompactionStage && compiledChatGptWebMessages(compiled).some(text => Buffer.byteLength(JSON.stringify(text), "utf8") > 110_000)) {
+          throw new ChatGptWebAdapterError("The staged compaction prompt exceeds the bounded browser budget; no history was truncated or submitted", {
+            status: 409, errorType: "invalid_request_error", code: "compaction_stage_too_large", retryable: false,
+          });
+        }
+        return { ...compiled, release: () => {} };
+      };
+      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(runWithChatGptPlusPreparation(worker, {
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
         capabilities: turnCapabilities,
-        prepare: async () => {
-          const compiled = hooks.compactionStagePrompt ?? compileChatGptWebPrompt(
-            checkpointInput.parsed,
-            turnCapabilities,
-            undefined,
-            compileOptionsFor(checkpointInput.parsed),
-          );
-          if (hooks.boundedCompactionStage && compiledChatGptWebMessages(compiled).some(text => Buffer.byteLength(JSON.stringify(text), "utf8") > 110_000)) {
-            throw new ChatGptWebAdapterError("The staged compaction prompt exceeds the bounded browser budget; no history was truncated or submitted", {
-              status: 409, errorType: "invalid_request_error", code: "compaction_stage_too_large", retryable: false,
-            });
-          }
-          return { ...compiled, release: () => {} };
-        },
+        prepare: () => prepareReadOnly(),
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
@@ -783,7 +787,7 @@ export function createChatGptWebAdapter(
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
-      })), browserAbort);
+      }, override => prepareReadOnly(override))), browserAbort);
       return guardProgress({
         mode: "read-only",
         browser: browserTurn.browser,
@@ -800,7 +804,11 @@ export function createChatGptWebAdapter(
     const externalProgress = new ChatGptExternalTurnProgress();
     let tokenSettled = false;
     let activeToken: string | undefined;
-    const prepareWith = async (input: CodexParsedRequest) => {
+    const prepareWith = async (source: CodexParsedRequest, override?: ChatGptPlusPreparation) => {
+      const input = override ? { ...source, _chatgptModelFamily: override.modelFamily,
+        options: { ...source.options, reasoning: override.reasoning },
+      } : source;
+      const capabilities = override?.capabilities ?? turnCapabilities;
       const turnToken = activeToken ?? await broker.register(
         environment,
         timeoutMs === undefined ? undefined : timeoutMs + 60_000,
@@ -810,9 +818,9 @@ export function createChatGptWebAdapter(
       try {
         const compiled = compileChatGptWebPrompt(
           input,
-          turnCapabilities,
+          capabilities,
           turnToken,
-          compileOptionsFor(input),
+          compileOptionsFor(input, capabilities),
         );
         // Publish only after preparation succeeds: otherwise its failure revokes the token
         // before the response observer uses it and masks the cause as an expired capability.
@@ -828,7 +836,7 @@ export function createChatGptWebAdapter(
         throw error;
       }
     };
-    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
+    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(runWithChatGptPlusPreparation(worker, {
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
@@ -854,7 +862,7 @@ export function createChatGptWebAdapter(
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
-    }))), browserAbort);
+    }, (override, resume) => prepareWith(resume && resumeInput ? resumeInput : checkpointInput.parsed, override)))), browserAbort);
     void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;
