@@ -92,3 +92,22 @@ test("a missing synchronization marker fails before any package file changes", (
     expect(readFileSync(join(root, "package.json"), "utf8")).toBe(original);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("updater retry fixtures pass after applying the real fork release metadata", () => {
+  const root = fixture();
+  try {
+    const plan = releasePlan("6.1.5", env);
+    applyReleasePlan(root, plan);
+    for (const relative of ["launcher/electron/update.cjs", "launcher/electron/release-repository.cjs",
+      "launcher/tests/update.test.cjs"]) {
+      mkdirSync(dirname(join(root, relative)), { recursive: true });
+      cpSync(join(source, relative), join(root, relative));
+    }
+    const result = spawnSync("node", ["--test", "--test-reporter=tap", "--test-name-pattern", "a failed startup check", join(root, "launcher/tests/update.test.cjs")], { encoding: "utf8" });
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("# pass 1");
+    expect(result.stdout).toContain("# fail 0");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

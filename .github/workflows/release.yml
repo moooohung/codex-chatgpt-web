@@ -65,6 +65,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: launcher
+      - name: Prepare pinned Electron binary before fixture imports
+        run: node launcher/node_modules/electron/install.js
       - name: Prepare AVX2-independent Windows runtime
         if: runner.os == 'Windows'
         shell: pwsh
