@@ -168,7 +168,7 @@ function RegisterBridgeReservation($Reservation, [string]$WorkerSource) {
     $taskArguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $Reservation.workerPath + '" -Action Run -ReservationPath "' + $manifestPath + '" -ReservationSha256 ' + $manifestHash
     $taskAction = New-ScheduledTaskAction -Execute $Reservation.powershellPath -Argument $taskArguments
     $trigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddSeconds(5))
-    $trigger.EndBoundary = [DateTime]::Now.AddMinutes(30).ToString('s')
+    $trigger.EndBoundary = [DateTime]::Now.AddSeconds(1800 + [int]$Reservation.waitForIdleSeconds).ToString('s')
     $settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds (900 + [int]$Reservation.waitForIdleSeconds)) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -DeleteExpiredTaskAfter (New-TimeSpan -Minutes 1)
     $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) -LogonType Interactive -RunLevel Limited
     $state = [ordered]@{ phase = 'prepared'; preparedAt = [DateTime]::UtcNow.ToString('o'); operation = $Reservation.operation; shutdownRequested = $false; browserTurnsAtQuit = 0; httpTurnsAtQuit = 0; installerInvocations = 0; launcherStarts = 0; operationSucceeded = $false }
