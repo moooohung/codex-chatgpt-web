@@ -9,6 +9,8 @@ import { rememberCompactionContinuation } from "../src/adapters/chatgpt-web/comp
 import { encodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
 import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
+import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
+import { defaultBrokerEndpoint } from "../src/config";
 import type { CodexParsedRequest, CodexTool } from "../src/types";
 
 const root = resolve(process.cwd());
@@ -1031,6 +1033,50 @@ describe("trusted Codex task environment continuity", () => {
     return { ...fixture, request: parseRequest({ ...body, model: "chatgpt-web/pro" }), body, delta };
   }
 
+  for (const attributed of [false, true]) test(`issue 812 root continuation authenticates a date-only delta (attributed=${attributed})`, () => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    const delta = { type: "message", role: "user", id: "msg_root_date_delta",
+      ...(attributed ? { internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId } } : {}),
+      content: [{ type: "input_text", text: "<environment_context><current_date>2026-10-10</current_date><timezone>Asia/Seoul</timezone></environment_context>" }] };
+    body.input.push(delta);
+    const native = [JSON.parse(readFileSync(rolloutPath, "utf8").split("\n")[0]!),
+      { type: "event_msg", payload: { type: "task_started", turn_id: rolloutTurnId } },
+      childTurnContext(), { type: "response_item", payload: body.input[0] },
+      { type: "response_item", payload: delta }];
+    writeFileSync(rolloutPath, native.map(item => JSON.stringify(item)).join("\n") + "\n");
+    request.context.tools = [{ name: "current_only", description: "d", parameters: { type: "object" } }];
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+    expect(store.resolve(request)).toEqual({ cwd: root, roots: [root], writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" }, tools: request.context.tools });
+    // A cached environment never legitimizes an edited, foreign or absent native delta.
+    for (const invalid of [
+      delta.content[0]!.text.replace("2026-10-10", "2026-10-11"),
+      delta.content[0]!.text.replace("<current_date>", "<cwd/><current_date>"),
+      delta.content[0]!.text.replace("</environment_context>", "<sandbox_mode>danger-full-access</sandbox_mode></environment_context>"),
+    ]) {
+      const bad = structuredClone(request);
+      const wire = bad._rawBody as { input: Array<Record<string, unknown>> };
+      wire.input[wire.input.length - 1] = { ...delta, content: [{ type: "input_text", text: invalid }] };
+      expect(() => store.resolve(bad)).toThrow();
+    }
+    const malformedStart = structuredClone(request);
+    (malformedStart._rawBody as { input: Array<Record<string, unknown>> }).input.unshift({
+      type: "message", role: "user", id: "msg_bad_current_environment",
+      internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
+      content: [{ type: "input_text", text: "<environment_context><cwd/></environment_context>" }],
+    });
+    expect(() => store.resolve(malformedStart)).toThrow();
+    const foreignTask = structuredClone(native);
+    (foreignTask[1]!.payload as { turn_id: string }).turn_id = rolloutParentId;
+    writeFileSync(rolloutPath, foreignTask.map(item => JSON.stringify(item)).join("\n") + "\n");
+    expect(() => store.resolve(request)).toThrow();
+    writeFileSync(rolloutPath, native.map(item => JSON.stringify(item)).join("\n") + "\n");
+    writeFileSync(rolloutPath, native.slice(0, -1).map(item => JSON.stringify(item)).join("\n") + "\n");
+    expect(() => store.resolve(request)).toThrow();
+  });
+
   test("a same-turn midnight delta obtains cwd and current permissions from its exact native rollout", () => {
     const { codexHome, request, body } = midnightRolloutFixture();
     request.context.tools = [{ name: "current_only", description: "d", parameters: { type: "object" } }];
@@ -1262,6 +1308,86 @@ describe("trusted Codex task environment continuity", () => {
       .toThrow("Steering environment conflicts");
   });
 
+  // #790. Codex 0.162 emits the same envelope with network access on or off: the permission
+  // profile states filesystem access only, so the envelope cannot contradict the rollout here.
+  for (const mode of ["workspace-write", "read-only"] as const) test(`${mode} uses one native network policy before and after steering`, async () => {
+    const { codexHome, request, body, rolloutPath, environment, auxiliary } = steeredRolloutFixture(false, []);
+    environment.content[1]!.text = environment.content[1]!.text.replace(
+      dangerFullAccessProfileXml, mode === "workspace-write" ? workspaceWriteProfileXml : readOnlyProfileXml,
+    );
+    const metadata = JSON.parse(body.client_metadata["x-codex-turn-metadata"]!);
+    metadata.sandbox_mode = mode;
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    const entries = [
+      { path: { type: "special", value: { kind: "root" } }, access: "read" },
+      ...(mode === "workspace-write" ? [
+        ...[root, auxiliary].map(path => ({ path: { type: "path", path }, access: "write" })),
+        { path: { type: "special", value: { kind: "slash_tmp" } }, access: "write" },
+        { path: { type: "special", value: { kind: "tmpdir" } }, access: "write" },
+      ] : []),
+    ];
+    const writeRollout = (networkAccess: boolean) => writeFileSync(rolloutPath, [
+      { type: "session_meta", payload: { id: rolloutThreadId, source: "vscode" } },
+      childTurnContext(rolloutTurnId, {
+        workspace_roots: [root, auxiliary],
+        sandbox_policy: { type: mode, ...(mode === "workspace-write" ? { writable_roots: [auxiliary] } : {}), network_access: networkAccess },
+        permission_profile: {
+          type: "managed", file_system: { type: "restricted", entries }, network: networkAccess ? "enabled" : "restricted",
+        },
+        file_system_sandbox_policy: { kind: "restricted", entries },
+      }),
+    ].map(value => JSON.stringify(value)).join("\n") + "\n");
+    const statePath = join(codexHome, "environment-cache.json");
+    const store = new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome);
+    const resolved = () => store.resolve(request);
+    const beforeSteering = { ...request, _rawBody: { ...body, input: body.input.slice(0, -1) } };
+    const withoutEnvelope = { ...request, _rawBody: { ...body, input: body.input.slice(-1) } };
+    const cachedFollowup = { ...request, _rawBody: {
+      client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: rolloutThreadId, turn_id: rolloutTurnId }) },
+      input: body.input.slice(-1),
+    } };
+    const broker = TurnBroker.forSocket(process.platform === "win32"
+      ? defaultBrokerEndpoint(codexHome)
+      : join(codexHome, "review.sock"));
+    try {
+      for (const enabled of [true, false]) {
+        writeRollout(enabled);
+        const initial = store.resolve(beforeSteering);
+        expect(initial.sandboxPolicy).toEqual(mode === "workspace-write"
+          ? { type: "workspaceWrite", writableRoots: [root, auxiliary], networkAccess: enabled }
+          : { type: "readOnly", networkAccess: enabled });
+        const token = await broker.register(initial, 10_000);
+        for (const input of [request, withoutEnvelope, beforeSteering]) {
+          const next = store.resolve(input);
+          expect(next.sandboxPolicy).toEqual(initial.sandboxPolicy);
+          expect(() => broker.updateEnvironment(token, next)).not.toThrow();
+        }
+        expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(cachedFollowup).sandboxPolicy)
+          .toEqual(initial.sandboxPolicy);
+        writeRollout(!enabled);
+        expect(() => broker.updateEnvironment(token, store.resolve(withoutEnvelope)))
+          .toThrow("environment changed");
+        broker.revoke(token);
+      }
+    } finally { await broker.close(); }
+
+    // An envelope that does state its network policy is still held to the rollout.
+    writeRollout(true);
+    const unstated = environment.content[1]!.text;
+    environment.content[1]!.text = unstated.replace("<filesystem>", "<network_access>restricted</network_access><filesystem>");
+    expect(resolved).toThrow("Steering environment conflicts");
+    environment.content[1]!.text = unstated.replace("<filesystem>", "<network_access>enabled</network_access><filesystem>");
+    expect(resolved().sandboxPolicy).toMatchObject({ networkAccess: true });
+    writeRollout(false);
+    expect(resolved).toThrow("Steering environment conflicts");
+    environment.content[1]!.text = unstated;
+    expect(resolved().sandboxPolicy).toMatchObject({ networkAccess: false });
+    // Unstated permissions require current evidence, even when a cache already exists.
+    rmSync(rolloutPath);
+    expect(() => store.resolve(beforeSteering)).toThrow("missing network access");
+    expect(resolved).toThrow("missing cwd");
+  });
+
   test("steering never replaces missing or contradictory rollout proof with cached authority", () => {
     const { codexHome, request, body, rolloutPath, environment, auxiliary } = steeredRolloutFixture(false, []);
     const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
@@ -1405,7 +1531,8 @@ describe("trusted Codex task environment continuity", () => {
       { type: "message", role: "user", id: "invalid_current_context",
         content: [{ type: "input_text", text: "<environment_context><cwd/></environment_context>" }] },
     );
-    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow("missing cwd");
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Codex rollout has no current task boundary for environment history");
   });
 
   test("root rollout lookup authenticates the indexed owner and current sandbox", () => {

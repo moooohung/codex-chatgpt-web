@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - name: Verify Windows broker lifecycle, ACK and outer harness
         run: bun test ./tests/turn-broker-lifecycle.test.ts ./tests/turn-orphan-watchdog.test.ts ./tests/tool-boundary-ipc.test.ts ./tests/dev-chat.test.ts

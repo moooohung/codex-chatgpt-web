@@ -347,8 +347,24 @@ export function isChatGptCompactionContinuation(parsed: CodexParsedRequest): boo
     && isAcceptedCompactionContinuation(parsed, identity, revision);
 }
 
+export interface ChatGptEnvironmentClaim {
+  environment: ChatGptTurnEnvironment;
+  /**
+   * Codex's permission-profile envelope states filesystem access only; the network policy lives
+   * in the native turn context. Only the legacy sandbox_mode envelope carried a network statement.
+   */
+  statesNetworkAccess: boolean;
+}
+
+function environmentClaim(parsed: CodexParsedRequest, text: string): ChatGptEnvironmentClaim {
+  return {
+    environment: parseChatGptEnvironmentText(parsed, text),
+    statesNetworkAccess: /<network_access\b/i.test(text) || /network access is /i.test(text),
+  };
+}
+
 /** Parse a claim only: the caller must compare it with this turn's native rollout authority. */
-export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
+export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRequest): ChatGptEnvironmentClaim {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   const body = record(parsed._rawBody);
   const updates = (Array.isArray(body?.input) ? body.input : []).flatMap(value => {
@@ -366,7 +382,7 @@ export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRe
     });
   });
   if (updates.length !== 1) throw new Error("Compaction continuation requires one current native environment claim");
-  return parseChatGptEnvironmentText(parsed, updates[0]!);
+  return environmentClaim(parsed, updates[0]!);
 }
 
 /**
@@ -374,7 +390,7 @@ export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRe
  * Git workspace metadata need not list every native filesystem root. Return that earlier claim
  * only for a same-turn pair; the store must compare it with the current canonical rollout.
  */
-export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedRequest): ChatGptTurnEnvironment | undefined {
+export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedRequest): ChatGptEnvironmentClaim | undefined {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   if (!turnId) return undefined;
   const body = record(parsed._rawBody);
@@ -403,7 +419,7 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
     const instruction = record(input[index]);
     if (typeof instruction?.id !== "string" || !instruction.id) continue;
     const text = environmentBeforeUser(input, index, turnId, metadata);
-    if (text) return parseChatGptEnvironmentText(parsed, text);
+    if (text) return environmentClaim(parsed, text);
   }
   return undefined;
 }
@@ -414,7 +430,11 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
  * still requires this exact turn's native rollout, equal roots and corroborating sandbox metadata.
  * Unknown profiles/fields are deliberately not classified as permission-neutral updates.
  */
-export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): { workspaceRoots?: string[] } | undefined {
+export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): {
+  workspaceRoots?: string[];
+  nativeMessages?: ChatGptUnattributedEnvironmentMessage[];
+  startClaim?: ChatGptEnvironmentClaim;
+} | undefined {
   const metadata = clientTurnMetadata(parsed);
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   if (!metadata || !turnId) return undefined;
@@ -424,14 +444,38 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
   const active = record(input[activeIndex]);
   if (itemTurnId(active) !== turnId || typeof active?.id !== "string" || !active.id) return undefined;
 
+  let startClaim: ChatGptEnvironmentClaim | undefined;
+  for (const value of input.slice(0, activeIndex)) {
+    const item = record(value);
+    if (!hasEnvironmentContextFragment(item) || itemTurnId(item) !== turnId) continue;
+    if (startClaim || item?.role !== "user") return undefined;
+    const parts = typeof item.content === "string" ? [item.content]
+      : Array.isArray(item.content) ? item.content.map(part => record(part)?.text) : [];
+    const envelopes = parts.filter((text): text is string => typeof text === "string"
+      && /<\/?environment_context\b/i.test(text));
+    if (envelopes.length !== 1) return undefined;
+    try { startClaim = environmentClaim(parsed, envelopes[0]!.trim()); }
+    catch { return undefined; }
+  }
   let deltas = 0;
   let workspaceRoots: string[] | undefined;
+  const nativeMessages: ChatGptUnattributedEnvironmentMessage[] = [];
   for (let index = activeIndex + 1; index < input.length; index += 1) {
     const item = record(input[index]);
     if (!hasEnvironmentContextFragment(item)) continue;
-    if (item.role !== "user" || itemTurnId(item) !== turnId || typeof item.id !== "string" || !item.id
-      || !hasAssistantOutputBetween(input, activeIndex + 1, index)) return undefined;
+    if (item.role !== "user" || typeof item.id !== "string" || !item.id) return undefined;
     const text = rawMessageText(item).trim();
+    // Date-only world-state updates carry no filesystem authority. They can also follow the
+    // instruction immediately after compaction. Require exact native records for both items;
+    // the store must not recover this shape from its cache or from request metadata alone.
+    if (/^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<\/environment_context>$/.test(text)) {
+      const owner = itemTurnId(item);
+      if (owner !== undefined && owner !== turnId) return undefined;
+      nativeMessages.push({ id: item.id, content: item.content });
+      deltas += 1;
+      continue;
+    }
+    if (itemTurnId(item) !== turnId || !hasAssistantOutputBetween(input, activeIndex + 1, index)) return undefined;
     // Match the whole native fragment, not just the presence of a disabled profile: another
     // profile, a malformed cwd, or any additional permission declaration must fail closed.
     const calendar = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*(?:<workspace_roots>\s*((?:<root>[^<>]+<\/root>\s*)+)<\/workspace_roots>\s*)?<permission_profile type="disabled">\s*<file_system type="unrestricted"\s*\/>\s*<\/permission_profile>\s*<\/filesystem>\s*<\/environment_context>$/.exec(text);
@@ -451,7 +495,11 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
     }
     deltas += 1;
   }
-  return deltas > 0 ? { ...(workspaceRoots ? { workspaceRoots } : {}) } : undefined;
+  return deltas > 0 ? {
+    ...(startClaim ? { startClaim } : {}),
+    ...(workspaceRoots ? { workspaceRoots } : {}),
+    ...(nativeMessages.length ? { nativeMessages: [{ id: active.id, content: active.content }, ...nativeMessages] } : {}),
+  } : undefined;
 }
 
 function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string, metadata?: Record<string, unknown>): string | undefined {
@@ -870,6 +918,10 @@ function matchesPath(root: string, path: string): boolean {
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
   return parseChatGptEnvironmentText(parsed, trustedEnvironmentText(parsed));
+}
+
+export function extractChatGptTurnEnvironmentClaim(parsed: CodexParsedRequest): ChatGptEnvironmentClaim {
+  return environmentClaim(parsed, trustedEnvironmentText(parsed));
 }
 
 function parseChatGptEnvironmentText(parsed: CodexParsedRequest, text: string): ChatGptTurnEnvironment {

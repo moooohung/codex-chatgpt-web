@@ -47,6 +47,7 @@ test("background log bursts retain Activity history without scheduling a launche
   }
   const react = {
     useState: initial => [typeof initial === "function" ? initial() : initial, () => renders++],
+    useRef: current => ({ current }),
     useEffect: effect => effects.push(effect),
     useCallback: callback => callback,
   };
@@ -57,7 +58,8 @@ test("background log bursts retain Activity history without scheduling a launche
     setTimeout: callback => { timers.push(callback); return timers.length; }, clearTimeout() {},
     require: name => name === "react" ? react : name === "./log-store" ? {
       createLauncherLogStore: () => { const store = createLauncherLogStore(); stores.push(store); return store; },
-    } : name === "react/jsx-runtime" ? { jsx: () => null, jsxs: () => null } : {},
+    } : name === "./utils" ? { isIdleBrowserSurface: () => false }
+      : name === "react/jsx-runtime" ? { jsx: () => null, jsxs: () => null } : {},
   });
   exported.App();
   const cleanup = effects.map(effect => effect());
