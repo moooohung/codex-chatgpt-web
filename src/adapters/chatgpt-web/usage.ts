@@ -3,7 +3,7 @@ import { estimateTokens } from "../../lib/token-estimate";
 import {
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
-  CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR,
+  CHATGPT_WEB_PLATFORM_RESERVE_TOKENS,
   isChatGptWebZeroRiskBackendModel,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
@@ -62,9 +62,9 @@ export function estimateChatGptWebInputTokens(
       ...options,
       preparation,
       ...(manual ? { manualControl: true as const } : {}),
-      captureLunaCheckpoint: parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
+      captureLunaCheckpoint: options.captureLunaCheckpoint ?? (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
         && !parsed._compactionRequest
-        && Boolean(identity.threadId && identity.turnId),
+        && Boolean(identity.threadId && identity.turnId)),
     },
   );
   return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId, preparation.estimate);
@@ -84,29 +84,32 @@ export function resolveBiggerContextMultipartParts(
   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
   }
-  if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
-    throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
-  }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   if (!supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, capabilities, parsed._chatgptModelFamily)) return undefined;
+  if (parsed._compactionRequest && (!minimalTransport || parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID)) {
+    return CHATGPT_BIGGER_CONTEXT_PARTS;
+  }
+  const backendModel = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID ? CHATGPT_WEB_LUNA_MODEL_ID : CHATGPT_WEB_BACKEND_MODEL;
   const preparation = prepared ?? createChatGptWebPromptPreparation(parsed);
   if (preparation.request !== parsed) throw new Error("Prompt preparation belongs to another request");
   const estimate = preparation.estimate;
-  const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
-    CHATGPT_WEB_BACKEND_MODEL, mode.effort,
+  const { autoCompactTokenLimit } = resolveChatGptWebContextLimits(
+    backendModel, mode.effort,
     { ...capabilities, experimentalBiggerContext: false }, parsed._chatgptModelFamily,
   );
   const { contextWindow: totalContextWindow } = resolveChatGptWebContextLimits(
-    CHATGPT_WEB_BACKEND_MODEL, mode.effort,
+    backendModel, mode.effort,
     { ...capabilities, experimentalBiggerContext: true }, parsed._chatgptModelFamily,
   );
+  const contextWindow = resolveChatGptWebMessageTokenBudget(backendModel, mode.effort, capabilities)
+    + CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + 1;
   const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
     parsed, capabilities, mode.localTools && !parsed._compactionRequest ? ESTIMATE_TURN_TOKEN : undefined,
-    { experimentalMultipartParts: parts, experimentalSkillAttachments, preparation,
+    { experimentalMultipartParts: parts, experimentalSkillAttachments, preparation, captureLunaCheckpoint: false,
       preserveCompactionHistory: minimalTransport },
   );
   const widestComposer = Math.max(...([mode.effort, capabilities.proAvailable ? "max" : "medium"] as const).map(effort =>
-    resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities).browserComposerCharLimit ?? Infinity));
+    resolveChatGptWebTransportLimits(backendModel, effort, capabilities).browserComposerCharLimit ?? Infinity));
   // A very long plain-text history gets a multipart probe first. Its sanitized serialized
   // records establish the lower bound; raw text alone never decides the final transport.
   const plainTextChars = parsed.context.messages.reduce((sum, message) => sum
@@ -119,7 +122,12 @@ export function resolveBiggerContextMultipartParts(
   const inline = (parsed._compactionRequest && !minimalTransport) || probeRequiresMoreParts ? undefined : compile();
   const inputTokens = inline ? estimateCompiledChatGptWebInputTokens(inline, parsed.modelId, estimate) : 0;
   const initialParts = probeRequiresMoreParts ? CHATGPT_BIGGER_CONTEXT_PARTS
-    : biggerContextPartCount(inputTokens, autoCompactTokenLimit, parsed._compactionRequest === true);
+    : biggerContextPartCount(inputTokens, Math.min(contextWindow, autoCompactTokenLimit), Boolean(parsed._compactionRequest));
+  // Preserve upstream's 1/2/6 contract for Luna. Sol's opt-in staged compaction can use
+  // smaller composers without increasing the advertised total context ceiling.
+  if (backendModel === CHATGPT_WEB_LUNA_MODEL_ID && initialParts === CHATGPT_BIGGER_CONTEXT_PARTS) {
+    return initialParts;
+  }
 
   const fits = (compiled: CompiledChatGptWebPrompt): boolean => {
     if (parsed._compactionRequest && !compiled.multipart
@@ -127,26 +135,30 @@ export function resolveBiggerContextMultipartParts(
     const messages = compiledChatGptWebMessages(compiled);
     // Inert stages may use any explicitly available staging effort; execution keeps the chosen
     // effort. These are the widest stage modes used by the browser's existing selector.
-    const stagingEffort = capabilities.proAvailable ? "max" : "medium";
+    const stagingEffort = backendModel === CHATGPT_WEB_LUNA_MODEL_ID ? "low" : capabilities.proAvailable ? "max" : "medium";
     // Reject a character-overflowing candidate before tokenizing any of its other messages.
     if (messages.some((text, index) => {
       const effort = index === messages.length - 1 ? mode.effort : stagingEffort;
-      const limit = resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities).browserComposerCharLimit;
+      const limit = resolveChatGptWebTransportLimits(backendModel, effort, capabilities).browserComposerCharLimit;
       return limit !== undefined && text.length > limit;
     })) return false;
     for (const [index, text] of messages.entries()) {
       const final = index === messages.length - 1;
       const effort = final ? mode.effort : stagingEffort;
-      const { browserComposerCharLimit } = resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
+      const { browserComposerCharLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
       if (browserComposerCharLimit !== undefined && text.length > browserComposerCharLimit) return false;
       const budget = resolveChatGptWebMessageTokenBudget(
-        CHATGPT_WEB_BACKEND_MODEL, effort, capabilities, final ? estimateChatGptWebImageTokens(compiled) + skillFileTokens(compiled.skillFiles, parsed.modelId) : 0,
+        backendModel, effort, capabilities, final ? estimateChatGptWebImageTokens(compiled) + skillFileTokens(compiled.skillFiles, parsed.modelId) : 0,
       );
       if (estimate(text, parsed.modelId) > budget) return false;
     }
     return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId, estimate)
       < Math.min(totalContextWindow, contextWindow * messages.length);
   };
+  if (backendModel === CHATGPT_WEB_LUNA_MODEL_ID) {
+    if (initialParts === undefined && inline && fits(inline)) return undefined;
+    return fits(compile(2)) ? 2 : CHATGPT_BIGGER_CONTEXT_PARTS;
+  }
   if ((minimalTransport || initialParts === undefined) && inline && fits(inline)) return undefined;
   const knownRecordChars = preparation.records?.prepared.reduce((total, record) => total + record.text.length, 0);
   const firstParts = minimalTransport
@@ -206,6 +218,7 @@ export function estimateChatGptWebUsage(
   const preparation = createChatGptWebPromptPreparation(parsed);
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
     preparation,
+    ...(experimentalBiggerContext ? { captureLunaCheckpoint: false } : {}),
     experimentalSkillAttachments,
     preserveCompactionHistory: experimentalBiggerContext && minimalTransport,
     experimentalMultipartParts: experimentalBiggerContext

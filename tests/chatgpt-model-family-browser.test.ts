@@ -82,7 +82,9 @@ async function selectGpt6Pro(picker: Picker) {
     const page = await browser.newPage();
     page.setDefaultTimeout(5_000);
     const config = "<script>window.pickerHeader = " + (picker.header ? picker.header.toString() : "null")
-      + "; window.pickerStatus = " + picker.status.toString() + ";</script>";
+      + "; window.pickerStatus = (_effort, value) => "
+      + JSON.stringify(["Instant", "Medium", "High", "Extra High", "Pro"].map((effort, value) => picker.status(effort, value)))
+      + "[value];</script>";
     await page.setContent(config + FIXTURE);
     const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
     try {
@@ -205,3 +207,9 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("the observed Plus effort-onl
     await expect(assertChatGptModelFamily(menu, "6", "medium", 1)).rejects.toThrow();
   } finally { await browser.close(); }
 }, 20_000);
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("localized position punctuation works through actual picker selection and usage readback", async () => {
+  for (const separator of ["、", "،", "；", "—"]) {
+    const picker: Picker = { header: null, status: (effort, value) => `${value === 4 ? "6" : "5.6"} ${effort}${separator}5 件中 ${value + 1} 番目。` };
+    expect(await selectGpt6Pro(picker)).toEqual({ ok: true, label: "Pro", usageModel: "gpt-6-pro", draft: "Draft" });
+  }
+}, 60_000);

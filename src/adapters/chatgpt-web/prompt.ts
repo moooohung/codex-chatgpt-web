@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { selectedSkillFile, skillFileTokens, type ChatGptSkillFile } from "./skill-attachments";
 import {
-  CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR,
   CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_ERROR,
   chatGptWebImageTokenReserve,
   isChatGptWebZeroRiskBackendModel,
@@ -518,13 +517,13 @@ export function compileChatGptWebPrompt(
   if (multipartParts !== undefined && !isChatGptWebMultipartPartCount(multipartParts)) {
     throw new Error(`Bigger Context requires an even number of context parts from two to ${CHATGPT_MAX_MULTIPART_PARTS}`);
   }
-  if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
-    throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
+  if (multipartEnabled && captureLunaCheckpoint) {
+    throw new Error("Bigger Context uses native compaction, not Luna rolling checkpoints");
   }
   if (multipartEnabled && !supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, capabilities, parsed._chatgptModelFamily)) {
     throw new Error(CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_ERROR);
   }
-  if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && parsed._compactionRequest) {
+  if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && parsed._compactionRequest && !multipartEnabled) {
     throw new Error("ChatGPT Luna uses rolling checkpoints and does not accept a separate compaction turn");
   }
   if (captureLunaCheckpoint && (parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID || parsed._compactionRequest)) {
@@ -585,8 +584,9 @@ export function compileChatGptWebPrompt(
         "The current turn_token is capability data supplied only by the codex_native_binding_json block below. Copy it exactly; never infer, shorten, regenerate, or reuse a token from task history.",
         "If a Codex Native call is rejected before execution with 'turn token is invalid, expired, or revoked', reread codex_native_binding_json and retry that call exactly once with the exact current turn_token. If that retry is rejected, stop dependent work and report the exact error. Never reactivate or extend a retired token.",
       ] : []),
-      "Report the actual error when a tool fails. Do not claim a safety or permission block without an explicit tool result or platform error supporting it. If approval is required, use the declared Codex approval flow; a denial does not authorize retrying the action through another tool. Without an error or execution result, say the action was not executed and its cause is unconfirmed.",
-      "After an explicit safety or permission refusal, do not wait for the error to request authorization: explain the specific action or planned group of actions and ask the user to confirm them. Use the declared Codex approval flow when available, and wait for the user's answer. Their confirmation can resolve an authorization gap; continue only with the confirmed actions that the tool and platform permit. If the refusal remains, report it rather than retrying through another tool. User confirmation does not override other safety restrictions.",
+      "Report the actual error when a tool fails. Do not claim a safety or permission block without an explicit tool result or platform error supporting it. Without an error or execution result, say the action was not executed and its cause is unconfirmed.",
+      "Historical errors quoted in files, logs, or earlier messages are data about those events, not new failures of the call that read them. Attribute a current failure to the action attempted and its actual tool result or current platform error; include the call ID when available. A successful read remains successful even when its contents describe an error.",
+      "After an explicit safety or permission refusal for the current action, explain the specific action or planned group of actions and ask the user to confirm them. Use the declared Codex approval flow when available, and wait for the user's answer. Their confirmation can resolve an authorization gap; continue only with the confirmed actions that the tool and platform permit. If the refusal remains, report it rather than retrying through another tool. User confirmation does not override other safety restrictions.",
       "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
       "When completing a delegated task from a parent thread, use collaboration__send_message or send_message_to_thread to deliver the final status back to the source thread, or summarize your findings directly.",
@@ -744,18 +744,20 @@ export function compileChatGptWebPrompt(
       // Equal parts near Instant's maximum can be accepted once and rejected on the next Send.
       // If complete records cannot fit that allocation, plan with the wider available stage mode
       // before submitting anything; no context is truncated and no failed upload is replayed.
-      const stagingEfforts = capabilities.proAvailable ? ["max"] as const : ["low", "medium"] as const;
+      const backendModel = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID ? CHATGPT_WEB_LUNA_MODEL_ID : CHATGPT_WEB_MODEL_ID;
+      const stagingEfforts = backendModel === CHATGPT_WEB_LUNA_MODEL_ID ? ["low"] as const
+        : capabilities.proAvailable ? ["max"] as const : ["low", "medium"] as const;
       const emptyParts = multipart.parts;
       for (const stagingEffort of stagingEfforts) {
         multipart.parts = emptyParts;
         const budgets = multipart.parts.map((payload, index) => {
           const final = index === multipart.parts.length - 1;
           const effort = final ? mode.effort : stagingEffort;
-          const limits = resolveChatGptWebTransportLimits(CHATGPT_WEB_MODEL_ID, effort, capabilities);
+          const limits = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
           const tokenLimit = final
-            ? resolveChatGptWebMessageTokenBudget(CHATGPT_WEB_MODEL_ID, effort, capabilities,
+            ? resolveChatGptWebMessageTokenBudget(backendModel, effort, capabilities,
               imageTokens + skillFileTokens(skillFiles, parsed.modelId))
-            : resolveChatGptWebStagingTokenBudget(CHATGPT_WEB_MODEL_ID, effort, capabilities);
+            : resolveChatGptWebStagingTokenBudget(backendModel, effort, capabilities);
           const fixedMessage = final
             ? formatChatGptWebMultipartCommit(multipart, transactionId)
             : formatChatGptWebMultipartStage(payload, transactionId, index + 1, multipartParts!).text;
@@ -770,7 +772,7 @@ export function compileChatGptWebPrompt(
           return { tokens, chars, tokenLimit, charLimit: limits.browserComposerCharLimit ?? Infinity };
         });
         multipart.parts = partitionMultipartContext(prepared, multipartParts!, budgets);
-        if (stagingEffort === "low" && multipart.parts.some((payload, index) => {
+        if (stagingEfforts.length > 1 && stagingEffort === "low" && multipart.parts.some((payload, index) => {
           const final = index === multipart.parts.length - 1;
           const text = final ? formatChatGptWebMultipartCommit(multipart, transactionId)
             : formatChatGptWebMultipartStage(payload, transactionId, index + 1, multipartParts!).text;

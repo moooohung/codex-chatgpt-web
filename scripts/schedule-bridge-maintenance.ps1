@@ -47,7 +47,8 @@ function BridgeRuntimeState($Reservation) {
     $original = $true
     $candidate = $true
     foreach ($file in $Reservation.files) {
-        $hash = BridgeFileHash $file.target
+        if (Test-Path -LiteralPath $file.target -PathType Container) { return 'unknown' }
+        $hash = if (Test-Path -LiteralPath $file.target -PathType Leaf) { BridgeFileHash $file.target } else { $null }
         if ($hash -ne $file.originalSha256 -and $hash -ne $file.candidateSha256) { return 'unknown' }
         if ($hash -ne $file.originalSha256) { $original = $false }
         if ($hash -ne $file.candidateSha256) { $candidate = $false }
@@ -116,15 +117,46 @@ function AssertBridgeReservation($Reservation) {
     if ($Reservation.schemaVersion -ne 1 -or $Reservation.taskName -notmatch '^CodexWebGPT-(Maintenance|RestartProbe|RestartFixture)-[a-f0-9]{32}$') { throw 'Unexpected restart reservation' }
     foreach ($guard in @(
         @{ path = $Reservation.workerPath; hash = $Reservation.workerSha256 },
-        @{ path = $Reservation.launcherPath; hash = $Reservation.launcherSha256 },
         @{ path = $Reservation.planPath; hash = $Reservation.planSha256 }
     )) {
         if ($guard.hash -notmatch '^[a-f0-9]{64}$' -or (BridgeFileHash $guard.path) -ne $guard.hash) { throw 'Reserved file changed: ' + $guard.path }
     }
+    $launcherHash = BridgeFileHash $Reservation.launcherPath
+    $launcherHashes = @($Reservation.launcherSha256)
+    if ($Reservation.launcherCandidateSha256) {
+        $launcherRecord = @($Reservation.files | Where-Object { [IO.Path]::GetFullPath($_.target) -eq $Reservation.launcherPath })
+        if ($launcherRecord.Count -ne 1 -or $launcherRecord[0].candidateSha256 -ne $Reservation.launcherCandidateSha256 -or
+            $launcherRecord[0].originalSha256 -ne $Reservation.launcherSha256 -or $Reservation.launcherCandidateSha256 -notmatch '^[a-f0-9]{64}$') {
+            throw 'Reserved launcher candidate differs from the reviewed file record'
+        }
+        $launcherHashes += $Reservation.launcherCandidateSha256
+    }
+    if ($Reservation.launcherSha256 -notmatch '^[a-f0-9]{64}$' -or $launcherHash -notin $launcherHashes) { throw 'Reserved launcher changed' }
     if ($Reservation.installerPath -and (BridgeFileHash $Reservation.installerPath) -ne $Reservation.installerSha256) { throw 'Reviewed installer changed' }
     $healthUri = [Uri]$Reservation.healthUri
     if ($healthUri.Scheme -ne 'http' -or $healthUri.Host -ne '127.0.0.1') { throw 'Health endpoint must be loopback HTTP' }
     if ($Reservation.operation -notin @('Restart', 'Install', 'Rollback', 'Probe')) { throw 'Unknown maintenance operation' }
+}
+function AssertBridgeLauncherFiles($Plan, [string]$LauncherPath) {
+    $files = @()
+    if ($Plan.launcherFiles) { $files = @($Plan.launcherFiles) }
+    if ($files.Count -eq 0) { return }
+    if ($Plan.operation -ne 'full-launcher-upgrade') { throw 'Launcher files require a full launcher upgrade plan' }
+    $root = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($LauncherPath)) + '\'
+    $sourceRoot = [IO.Path]::GetFullPath($Plan.packageRoot) + '\'
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $files) {
+        $target = [IO.Path]::GetFullPath($file.target)
+        $source = [IO.Path]::GetFullPath($file.source)
+        if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or
+            $target.StartsWith($root + 'resources\runtime\', [StringComparison]::OrdinalIgnoreCase) -or
+            $target -eq $root + 'resources\app.asar' -or -not $source.StartsWith($sourceRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            -not $seen.Add($target)) { throw 'Launcher file escapes the reviewed tree or duplicates a target' }
+        if (($null -ne $file.originalSha256 -and $file.originalSha256 -notmatch '^[a-f0-9]{64}$') -or
+            $file.candidateSha256 -notmatch '^[a-f0-9]{64}$' -or (BridgeFileHash $source) -ne $file.candidateSha256) { throw 'Invalid launcher file hash' }
+    }
+    $executable = @($files | Where-Object { [IO.Path]::GetFullPath($_.target) -eq [IO.Path]::GetFullPath($LauncherPath) })
+    if ($executable.Count -ne 1 -or $executable[0].originalSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Full launcher plan must pin its existing executable' }
 }
 function RegisterBridgeReservation($Reservation, [string]$WorkerSource) {
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Reservation.statePath)) | Out-Null
@@ -410,6 +442,10 @@ function NewBridgeMaintenanceReservation([string]$RequestedOperation, [string]$R
         $targets = @($targets | Where-Object { $_ -ne [IO.Path]::GetFullPath($file.target) })
         if ($file.originalSha256 -notmatch '^[a-f0-9]{64}$' -or $file.candidateSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid target hash' }
     }
+    AssertBridgeLauncherFiles $plan $launcherPath
+    $launcherFiles = @()
+    if ($plan.launcherFiles) { $launcherFiles = @($plan.launcherFiles) }
+    $launcherRecord = @($launcherFiles | Where-Object { [IO.Path]::GetFullPath($_.target) -eq $launcherPath })
     $ReviewedInstallerPath = (Resolve-Path -LiteralPath $ReviewedInstallerPath).Path
     if ($ReviewedInstallerHash -notmatch '^[a-f0-9]{64}$' -or (BridgeFileHash $ReviewedInstallerPath) -ne $ReviewedInstallerHash) { throw 'Reviewed installer hash is required, including for recovery' }
     $descriptorPath = Join-Path $runtimeRoot 'runtime/launcher-browser.json'
@@ -430,10 +466,13 @@ function NewBridgeMaintenanceReservation([string]$RequestedOperation, [string]$R
         schemaVersion = 1; taskName = 'CodexWebGPT-' + $prefix + '-' + $id; operation = $RequestedOperation
         powershellPath = $powershellPath; workerPath = Join-Path $directory 'worker.ps1'; workerSha256 = $null
         statePath = Join-Path $directory 'state.json'; lockPath = Join-Path $runtimeRoot 'runtime/bridge-maintenance.lock'
-        launcherPath = $launcherPath; launcherSha256 = BridgeFileHash $launcherPath; launcherArguments = @('--hidden')
+        launcherPath = $launcherPath
+        launcherSha256 = if ($launcherRecord.Count) { $launcherRecord[0].originalSha256 } else { BridgeFileHash $launcherPath }
+        launcherArguments = @('--hidden')
+        launcherCandidateSha256 = if ($launcherRecord.Count) { $launcherRecord[0].candidateSha256 } else { $null }
         executableRoot = [IO.Path]::GetDirectoryName($launcherPath) + '\'; runtimeRoot = $runtimeRoot
         runtimeCommandPattern = '(?i)(?:\bserve\b|browser-helper|launcher[\\/]electron)'
-        planPath = $ReviewedPlanPath; planSha256 = $ReviewedPlanHash; files = $plan.files
+        planPath = $ReviewedPlanPath; planSha256 = $ReviewedPlanHash; files = @($plan.files) + $launcherFiles
         installerPath = $ReviewedInstallerPath; installerSha256 = $ReviewedInstallerHash
         healthUri = $healthUri; configPath = $configPath; descriptorPath = $descriptorPath
         priorLauncherPid = $owner.ProcessId; priorLauncherCreatedAt = $owner.CreationDate.ToUniversalTime().ToString('o'); priorDaemonPid = $health.pid

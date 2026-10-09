@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-web",
-  "version": "6.1.6",
+  "version": "6.1.7",
   "private": true,
   "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
   "repository": {
@@ -11,7 +11,7 @@
   "bugs": {
     "url": "https://github.com/miuuyy/codex-chatgpt-web/issues"
   },
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "type": "module",
   "bin": {
     "codex-chatgpt-web": "./src/cli.ts"
@@ -60,7 +60,7 @@
     "ajv-formats": "3.0.1",
     "chromium-bidi": "12.1.0",
     "fflate": "^0.8.2",
-    "playwright-core": "^1.62.0",
+    "playwright-core": "1.64.0",
     "tiktoken": "1.0.22",
     "toml-eslint-parser": "1.0.3",
     "turndown": "7.2.0",
@@ -68,12 +68,12 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/bun": "1.4.0",
+    "@types/bun": "1.4.2",
     "@types/turndown": "5.0.5",
     "typescript": "5.9.3"
   },
   "engines": {
-    "bun": "1.4.0"
+    "bun": "1.4.2"
   },
   "overrides": {
     "@hono/node-server": "2.1.3",

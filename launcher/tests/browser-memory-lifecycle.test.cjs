@@ -153,13 +153,15 @@ test("a presentation failure keeps the saved conversation and permits an explici
   assert.equal(loads, 2);
 });
 
-test("hidden viewports are capped without collapsing or overlapping a large launcher window", () => {
+test("hidden viewports retain the measured browser pane without collapsing or overlapping the launcher", () => {
   for (const [width, height] of [[3840, 2160], [1528, 812], [0, 0]]) {
     const f = fixture();
     f.host.window = { getContentSize: () => [width, height] };
+    f.host.boundsReady = width > 0;
+    f.host.bounds = { width: Math.max(800, width - 320), height: Math.max(600, height - 80) };
     const hidden = f.host.hiddenTurnBounds();
-    assert.ok(hidden.width >= 800 && hidden.width <= 1280);
-    assert.ok(hidden.height >= 600 && hidden.height <= 900);
+    assert.equal(hidden.width, f.host.bounds.width);
+    assert.equal(hidden.height, f.host.bounds.height);
     assert.ok(hidden.x > width && hidden.y > height);
   }
 });

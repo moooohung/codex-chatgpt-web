@@ -78,7 +78,7 @@ test("automatic package, source, installers and README downloads share one verif
     }
     const check = spawnSync(process.execPath, ["run", join(root, "scripts/check-version.ts")], { encoding: "utf8" });
     expect(check.stderr).toBe(""); expect(check.status).toBe(0);
-    expect(check.stdout).toContain(`VERSION_SYNC_OK ${plan.version} bun@1.4.0`);
+    expect(check.stdout).toContain(`VERSION_SYNC_OK ${plan.version} bun@1.4.2`);
     expect(JSON.parse(readFileSync(join(root, "release-plan.json"), "utf8"))).toEqual(plan);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
