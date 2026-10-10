@@ -400,6 +400,7 @@ export type LauncherTurnActivity =
       helperPid: number;
       retryAt: number;
       message: string;
+      code?: "rate_limit_exceeded" | "chatgpt_unusual_activity";
     }
   | {
       phase: "approval";
@@ -712,7 +713,9 @@ export async function notifyLauncherTurn(
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-      if (response.status === 429 && body.code === "chatgpt_account_cooldown") throw launcherAccountCooldownError(body);
+      if (response.status === 429 && (body.code === "chatgpt_account_cooldown" || body.code === "chatgpt_unusual_activity")) {
+        throw launcherAccountCooldownError(body);
+      }
       if (response.status === 503 && body.code === "browser_surface_not_ready") throw new ChatGptWebAdapterError(
         typeof body.error === "string" ? body.error : "Launcher browser surface is not ready",
         { status: 503, errorType: "server_error", code: "browser_surface_not_ready", retryable: true },
@@ -785,7 +788,9 @@ function launcherAccountCooldownError(body: Record<string, unknown>): ChatGptWeb
   if (!Number.isSafeInteger(body.retryAt) || !Number.isInteger(body.retry_after_seconds)
     || Number(body.retry_after_seconds) < 1) throw new Error("Launcher returned an invalid account cooldown");
   return new ChatGptWebAdapterError(typeof body.error === "string" ? body.error : "ChatGPT account is temporarily limited", {
-    status: 429, errorType: "rate_limit_error", code: "chatgpt_account_cooldown", retryable: false,
+    status: 429, errorType: "rate_limit_error",
+    code: body.code === "chatgpt_unusual_activity" ? "chatgpt_unusual_activity" : "chatgpt_account_cooldown",
+    retryable: false,
     retryAt: Number(body.retryAt), retryAfterSeconds: Number(body.retry_after_seconds),
   });
 }
@@ -803,7 +808,9 @@ export async function admitLauncherAccount(descriptorPath: string, activity: {
       body: JSON.stringify(activity), signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
     });
     const body = await response.json() as Record<string, unknown>;
-    if (response.status === 429 && body.code === "chatgpt_account_cooldown") throw launcherAccountCooldownError(body);
+    if (response.status === 429 && (body.code === "chatgpt_account_cooldown" || body.code === "chatgpt_unusual_activity")) {
+      throw launcherAccountCooldownError(body);
+    }
     if (body.code === "account_unavailable") throw new ChatGptWebAdapterError(String(body.error || "No signed-in ChatGPT account is available"),
       { status: 409, errorType: "invalid_request_error", code: "account_unavailable", retryable: false });
     if (!response.ok || body.ok !== true) throw new Error(`Launcher account admission failed (HTTP ${response.status})`);

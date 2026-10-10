@@ -7,7 +7,7 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { injectDomStealth, applyStealthHeaders } = require("./stealth.cjs");
 const { accountNameForTab, accountPaths, readAccountConfig, selectAccount } = require("./account-policy.cjs");
-const { AccountCooldownStore, PRIMARY_ACCOUNT } = require("./account-cooldown-store.cjs");
+const { AccountCooldownStore, PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX } = require("./account-cooldown-store.cjs");
 const { resolveCooldownRoute } = require("./account-cooldown-routing.cjs");
 const { bindAccountBackendRecovery } = require("./account-backend-recovery.cjs");
 const {
@@ -430,6 +430,7 @@ class BrowserHost {
     this.profile = profile;
     this.accountPaths = accountPaths({ coreHome, userData, partition });
     this.accountCooldowns = new AccountCooldownStore(this.accountPaths.cooldowns);
+    this.unusualActivityCooldownTimers = new Map();
     this.accountConfigPresent = fs.existsSync(this.accountPaths.config);
     this.pendingRemovalAccounts = new Set(Object.entries(readAccountConfig(this.accountPaths.config).accounts).filter(([, acc]) => acc.pendingRemoval).map(([name]) => name));
     this.accountCleanup = new Map();
@@ -756,17 +757,43 @@ class BrowserHost {
     return { ok: true };
   }
 
-  async recordTurnCooldown(traceId, helperPid, retryAt, message) {
+  scheduleUnusualActivityCooldownEnd(name, retryAt, traceId) {
+    this.unusualActivityCooldownTimers ??= new Map();
+    const existing = this.unusualActivityCooldownTimers.get(name);
+    if (existing) clearTimeout(existing);
+    const delay = Math.max(1, Math.min(2_147_483_647, retryAt - Date.now()));
+    const timer = setTimeout(() => {
+      this.unusualActivityCooldownTimers.delete(name);
+      const entry = this.accountCooldowns.peek(name);
+      if (!entry || !entry.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)) return;
+      if (entry.retryAt > Date.now()) {
+        this.scheduleUnusualActivityCooldownEnd(name, entry.retryAt, traceId);
+        return;
+      }
+      this.logger.info("unusual_activity_cooldown_ended", { traceId, account: name, retryAt: entry.retryAt });
+      this.publishState?.(this.snapshot());
+    }, delay);
+    timer.unref?.();
+    this.unusualActivityCooldownTimers.set(name, timer);
+  }
+
+  async recordTurnCooldown(traceId, helperPid, retryAt, message, code) {
     const tab = [...this.turnTabs.values()].find(item => item.traceId === traceId && item.helperPid === helperPid
       && item.status === "running");
     if (!tab) throw new Error("Account cooldown requires the exact active browser turn owner");
     const name = accountNameForTab(tab) || PRIMARY_ACCOUNT;
-    this.accountCooldowns.record(name, { retryAt, message });
+    const recorded = this.accountCooldowns.record(name, { retryAt, message });
     this.logger.info("browser.account_cooldown", { traceId, account: name, retryAt });
+    if (code === "chatgpt_unusual_activity" || recorded.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)) {
+      this.logger.warn("unusual_activity_detected", { traceId, account: name, retryAt: recorded.retryAt });
+      this.scheduleUnusualActivityCooldownEnd(name, recorded.retryAt, traceId);
+    }
     await this.refreshRoutingAccounts();
     let alternateAvailable = false;
     try { alternateAvailable = (this.resolveAccountForConversation(tab.conversationKey) || PRIMARY_ACCOUNT) !== name; }
-    catch (error) { if (!["chatgpt_account_cooldown", "account_unavailable"].includes(error.code)) throw error; }
+    catch (error) {
+      if (!["chatgpt_account_cooldown", "chatgpt_unusual_activity", "account_unavailable"].includes(error.code)) throw error;
+    }
     this.publishState?.(this.snapshot());
     return { alternateAvailable };
   }
@@ -1998,6 +2025,9 @@ class BrowserHost {
       : manualInteraction
         ? { ...this.state, title: "ChatGPT" }
         : this.state;
+    const unusualActivityCooldowns = Object.entries(this.accountCooldowns?.snapshot?.() || {})
+      .filter(([, entry]) => entry.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX))
+      .sort((a, b) => a[1].retryAt - b[1].retryAt);
     return {
       ...readBrowserNavigationState(contents, {
         ...state,
@@ -2014,6 +2044,12 @@ class BrowserHost {
           ]
         : [homeTab],
       maxTabs: this.memoryPolicy?.maxTabs ?? resolveBrowserMemoryPolicy().maxTabs,
+      ...(unusualActivityCooldowns.length ? {
+        unusualActivityCooldown: {
+          retryAt: unusualActivityCooldowns[0][1].retryAt,
+          accountCount: unusualActivityCooldowns.length,
+        },
+      } : {}),
     };
   }
 
@@ -4076,6 +4112,8 @@ class BrowserHost {
 
   destroy() {
     this.destroyed = true;
+    for (const timer of this.unusualActivityCooldownTimers?.values?.() || []) clearTimeout(timer);
+    this.unusualActivityCooldownTimers?.clear?.();
     if (this.authenticationCookieListener) {
       this.view.webContents.session.cookies.off("changed", this.authenticationCookieListener);
     }

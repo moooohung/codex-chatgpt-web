@@ -14,7 +14,7 @@ const captures = new WeakMap<BoundaryTracker, Map<number, Promise<void>>>();
 const traces = new WeakMap<BoundaryTracker, string>();
 
 export type ChatGptBrowserProbe = "response_probe" | "session_alert" | "rate_limit_dialog"
-  | "terminal_error" | "turn_state" | "response_projection" | "delivery_timeout"
+  | "page_request_rejection" | "terminal_error" | "turn_state" | "response_projection" | "delivery_timeout"
   | "tool_confirmation" | "diagnostic_capture" | "boundary_turn_state" | "boundary_response_projection";
 
 /** Slow/failing observations carry only the operation name and timing, never DOM content. */

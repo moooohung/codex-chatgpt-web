@@ -7,10 +7,31 @@ security challenges and generic capacity errors. Clock notices use the browser
 host's local time, including midnight rollover; only missing/invalid reset times
 use the existing 20-minute fallback.
 
+The browser worker also treats the page-level alert "Our systems have detected
+unusual activity coming from your system. Please try again later." as a hard
+request rejection. It checks this surface while waiting for submission acceptance,
+every Bigger Context acknowledgement, the initial assistant turn, and the final
+response. A `local-chatgpt:` URL paired with visible "Unable to load history" is
+recorded only as supporting evidence; it never triggers a cooldown by itself.
+The unusual-activity verdict is HTTP 429, code `chatgpt_unusual_activity`, and is
+non-retryable by the immediate Codex loop. Its default cooldown is 30 minutes and
+can be changed with `CODEX_WEB_GPT_UNUSUAL_ACTIVITY_COOLDOWN_MINUTES` (1-1440).
+
+Visible page-level Retry alerts beginning with "Unknown error", "Something went
+wrong", "알 수 없는 오류", or "오류가 발생" are also treated as rejected current
+requests and fail immediately with `chatgpt_submission_failed`. Transcript/prose
+copies, hidden alerts, unrelated Retry toasts such as "Projects could not be
+loaded", and subscription-fetch errors do not enter this path. The bridge never
+presses the page Retry button.
+
 The Launcher persists each observed account's absolute `retryAt` and notice in
 `account-cooldowns.json` under its profile user-data directory. Native Codex auth
 files and browser cookies are never copied or replaced. The store survives a
 Launcher restart and preserves malformed files instead of silently repairing them.
+Unusual-activity cooldowns reuse this version-1 schema, so rollback to 6.1.7 can
+still read the state file. While active, the launcher shows a short Korean notice
+with the remaining minutes and logs `unusual_activity_detected` and
+`unusual_activity_cooldown_ended` with the originating trace id.
 
 New requests are admitted before starting an SSE stream or allocating a browser
 tab. A cooling account is not probed. If no other enabled account has a verified

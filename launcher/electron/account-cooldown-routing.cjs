@@ -1,5 +1,5 @@
 const { accountNameForTab, accountUnavailable } = require("./account-policy.cjs");
-const { PRIMARY_ACCOUNT } = require("./account-cooldown-store.cjs");
+const { PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX } = require("./account-cooldown-store.cjs");
 
 function resolveCooldownRoute({ pool, statuses = new Map(), disabled = new Set(), pending = new Set(),
   preferred, cooldowns, tabs = [], roundRobin = 0, now = Date.now() }) {
@@ -26,10 +26,15 @@ function resolveCooldownRoute({ pool, statuses = new Map(), disabled = new Set()
   if (waiting.length) {
     waiting.sort((a, b) => a.cooldown.retryAt - b.cooldown.retryAt);
     const { name, cooldown } = waiting[0];
-    const error = new Error(`ChatGPT account ${name === PRIMARY_ACCOUNT ? "(primary)" : `[${name}]`} is temporarily limited. `
-      + `No other signed-in account is available. Try again after ${new Date(cooldown.retryAt).toISOString()}. ${cooldown.message}`);
-    Object.assign(error, { code: "chatgpt_account_cooldown", retryAt: cooldown.retryAt,
-      retryAfterSeconds: Math.max(1, Math.ceil((cooldown.retryAt - now) / 1000)) });
+    const retryAfterSeconds = Math.max(1, Math.ceil((cooldown.retryAt - now) / 1000));
+    const unusualActivity = cooldown.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX);
+    const remainingMinutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+    const error = new Error(unusualActivity
+      ? `${cooldown.message} Cooldown remaining: ${remainingMinutes} minute${remainingMinutes === 1 ? "" : "s"}.`
+      : `ChatGPT account ${name === PRIMARY_ACCOUNT ? "(primary)" : `[${name}]`} is temporarily limited. `
+        + `No other signed-in account is available. Try again after ${new Date(cooldown.retryAt).toISOString()}. ${cooldown.message}`);
+    Object.assign(error, { code: unusualActivity ? "chatgpt_unusual_activity" : "chatgpt_account_cooldown",
+      retryAt: cooldown.retryAt, retryAfterSeconds });
     throw error;
   }
   throw accountUnavailable(["no verified signed-in account"]);

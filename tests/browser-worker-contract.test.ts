@@ -4537,6 +4537,63 @@ test("multipart observation surfaces Stopped thinking on its first observation e
   expect(acknowledged).toBeFalse();
 });
 
+test("multipart acknowledgement fails fast on a page-level unusual activity rejection", async () => {
+  const unusual = "Our systems have detected unusual activity coming from your system. Please try again later.";
+  const page = {
+    isClosed: () => false,
+    url: () => "https://chatgpt.com/c/local-chatgpt:packet157",
+    locator: () => ({ evaluateAll: async () => ({ kind: "unusual_activity", text: unusual }) }),
+    getByText: () => ({ filter() { return this; }, last() { return this; }, isVisible: async () => true }),
+  } as unknown as Page;
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+  worker.observeResponseProbe = async (
+    _page: Page, _baseline: unknown, _signal: unknown, _progress: unknown, _tracker: unknown,
+    observe: (signal: AbortSignal) => Promise<unknown>, _timeout: unknown, probe: string,
+  ) => probe === "page_request_rejection" ? observe(new AbortController().signal) : undefined;
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+  await expect(observe.call(
+    worker,
+    page,
+    { locator: {} },
+    { initialTurnIdentities: [], domCache: {} },
+    { acknowledgement: "CODEX_MULTIPART_ACK fixture" },
+    Date.now() + 180_000,
+    undefined,
+    undefined,
+    undefined,
+    "trace-multipart-unusual",
+  )).rejects.toMatchObject({ code: "chatgpt_unusual_activity", status: 429, retryable: false });
+});
+
+test("response wait fails fast on a page-level unusual activity rejection", async () => {
+  const unusual = "Our systems have detected unusual activity coming from your system. Please try again later.";
+  const page = {
+    isClosed: () => false,
+    url: () => "https://chatgpt.com/c/local-chatgpt:packet157",
+    locator: () => ({ evaluateAll: async () => ({ kind: "unusual_activity", text: unusual }) }),
+    getByText: () => ({ filter() { return this; }, last() { return this; }, isVisible: async () => true }),
+  } as unknown as Page;
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+  worker.observeSubmissionToolBoundary = async () => {};
+  worker.observeResponseProbe = async (
+    _page: Page, _baseline: unknown, _signal: unknown, _progress: unknown, _tracker: unknown,
+    observe: (signal: AbortSignal) => Promise<unknown>, _timeout: unknown, probe: string,
+  ) => probe === "page_request_rejection" ? observe(new AbortController().signal) : undefined;
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForNewAssistantTurn;
+  await expect(observe.call(
+    worker,
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    Date.now() + 180_000,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    "trace-response-unusual",
+  )).rejects.toMatchObject({ code: "chatgpt_unusual_activity", status: 429, retryable: false });
+});
+
 test("the shipped commentary classifier separates answer Markdown from reasoning in a real DOM", () => {
   // The classifier runs inside page.evaluate, so it cannot be imported. Extract and execute the
   // exact shipped source so the test covers the code that actually runs.

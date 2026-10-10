@@ -73,6 +73,10 @@ export interface BrowserState {
   activeTabId: string;
   maxTabs: number;
   tabs: BrowserTabState[];
+  unusualActivityCooldown?: {
+    retryAt: number;
+    accountCount: number;
+  };
 }
 
 export interface BrowserTabState {

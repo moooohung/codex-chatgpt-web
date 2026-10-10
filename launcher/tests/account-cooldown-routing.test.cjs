@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
-const { AccountCooldownStore, PRIMARY_ACCOUNT } = require("../electron/account-cooldown-store.cjs");
+const { AccountCooldownStore, PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX } = require("../electron/account-cooldown-store.cjs");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
 
@@ -54,6 +54,62 @@ test("no alternate rejects every new request without probing a cooling account o
   for (let i = 0; i < 3; i++) await assert.rejects(host.admitAccount("a".repeat(64), `trace-new-${i}`, 321),
     error => error.code === "chatgpt_account_cooldown" && error.retryAt === retryAt && error.retryAfterSeconds === 60);
   assert.equal(host.turnTabs.size, 0);
+});
+
+test("unusual activity blocks new turns before tab creation and expires exactly on time", async t => {
+  const { host } = fixture(t, ["alpha"]);
+  const retryAt = Date.now() + 30 * 60_000;
+  host.accountCooldowns.record("alpha", {
+    retryAt,
+    message: `${UNUSUAL_ACTIVITY_MESSAGE_PREFIX}Our systems have detected unusual activity coming from your system. Please try again later. Try again in 30 minutes.`,
+  });
+  host.view = { webContents: { get session() { throw new Error("Cooling account must not be opened"); } } };
+  await assert.rejects(host.admitAccount("a".repeat(64), "trace-unusual", 321), error =>
+    error.code === "chatgpt_unusual_activity"
+      && error.retryAt === retryAt
+      && error.retryAfterSeconds === 30 * 60
+      && error.message.includes("Cooldown remaining: 30 minutes"));
+  assert.equal(host.turnTabs.size, 0);
+  t.mock.timers.tick(30 * 60_000 - 1);
+  await assert.rejects(host.admitAccount("a".repeat(64), "trace-still-cooling", 321), error =>
+    error.code === "chatgpt_unusual_activity" && error.retryAfterSeconds === 1);
+  t.mock.timers.tick(1);
+  host.accountStatuses.get("alpha").routingAuthCheckedAt = Date.now();
+  await assert.doesNotReject(host.admitAccount("a".repeat(64), "trace-after-cooldown", 321));
+  assert.equal(host.resolveAccountForConversation("a".repeat(64)), "alpha");
+  assert.equal(host.turnTabs.size, 0);
+});
+
+test("unusual activity logs detection and cooldown end with the originating trace id", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cooldown-logging-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 2_000_000 });
+  const events = [];
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    accountPool: ["alpha"], accountConfigPresent: true,
+    accountStatuses: new Map([["alpha", { authenticated: true, routingAuthenticated: true, routingAuthCheckedAt: Date.now() }]]),
+    accountCooldowns: new AccountCooldownStore(path.join(root, "cooldowns.json")),
+    stickyConversations: new Map(), disabledAccounts: new Set(), pendingRemovalAccounts: new Set(),
+    turnTabs: new Map([["tab", { id: "tab", accountName: "alpha", traceId: "trace-log", helperPid: 77,
+      conversationKey: "b".repeat(64), status: "running" }]]),
+    logger: {
+      info(event, details) { events.push({ level: "info", event, details }); },
+      warn(event, details) { events.push({ level: "warn", event, details }); },
+      error() {},
+    },
+    snapshot: () => ({}), publishState() {}, saveStickyMap() {}, writeDescriptor() {},
+    browserInteractionMode: () => "automatic",
+  });
+  await host.recordTurnCooldown(
+    "trace-log",
+    77,
+    Date.now() + 1_000,
+    `${UNUSUAL_ACTIVITY_MESSAGE_PREFIX}fixture Try again in 30 minutes.`,
+    "chatgpt_unusual_activity",
+  );
+  assert.ok(events.some(entry => entry.event === "unusual_activity_detected" && entry.details.traceId === "trace-log"));
+  t.mock.timers.tick(1_000);
+  assert.ok(events.some(entry => entry.event === "unusual_activity_cooldown_ended" && entry.details.traceId === "trace-log"));
 });
 
 test("unknown, signed-out, disabled and security-check accounts cannot become alternates", t => {

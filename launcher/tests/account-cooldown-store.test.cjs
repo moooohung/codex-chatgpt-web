@@ -98,6 +98,17 @@ test("expired accounts are available exactly at retryAt and reads do not rewrite
   assert.deepEqual(f.open().snapshot(), { alpha: renewed });
 });
 
+test("peek preserves expired metadata for cooldown-end logging without making the account unavailable", t => {
+  const f = fixture(t);
+  const store = f.open();
+  const entry = pending(NOW + 10, "ChatGPT unusual activity detected: fixture");
+  store.record("alpha", entry);
+  f.setTime(NOW + 10);
+  assert.equal(store.get("alpha"), null);
+  assert.deepEqual(store.peek("alpha"), entry);
+  assert.deepEqual(store.snapshot(), {});
+});
+
 test("concurrent same-process A/B observations stay isolated across stale instances", async t => {
   const f = fixture(t);
   const first = f.open();

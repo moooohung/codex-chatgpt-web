@@ -330,7 +330,7 @@ class BrowserControlServer {
       }
       if (request.url === "/v1/turn/cooldown") {
         if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
-        const result = await host.recordTurnCooldown(body.traceId, body.helperPid, body.retryAt, body.message);
+        const result = await host.recordTurnCooldown(body.traceId, body.helperPid, body.retryAt, body.message, body.code);
         writeJson(response, 200, { ok: true, ...result });
         return;
       }
@@ -400,7 +400,7 @@ class BrowserControlServer {
       const manualOwnerLost = error?.code === "manual_turn_owner_lost";
       const manualTimedOut = error?.code === "manual_turn_timed_out";
       const surfaceNotReady = error?.code === "browser_surface_not_ready";
-      const accountCooldown = error?.code === "chatgpt_account_cooldown";
+      const accountCooldown = error?.code === "chatgpt_account_cooldown" || error?.code === "chatgpt_unusual_activity";
       if (accountCooldown) response.setHeader("retry-after", String(error.retryAfterSeconds));
       writeJson(
         response,
@@ -416,7 +416,7 @@ class BrowserControlServer {
         ...(manualOwnerLost ? { code: "manual_turn_owner_lost" } : {}),
         ...(manualTimedOut ? { code: "manual_turn_timed_out" } : {}),
         ...(surfaceNotReady ? { code: "browser_surface_not_ready" } : {}),
-        ...(accountCooldown ? { code: "chatgpt_account_cooldown", retryAt: error.retryAt, retry_after_seconds: error.retryAfterSeconds } : {}),
+        ...(accountCooldown ? { code: error.code, retryAt: error.retryAt, retry_after_seconds: error.retryAfterSeconds } : {}),
         },
       );
     }

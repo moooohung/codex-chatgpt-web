@@ -2,6 +2,7 @@ import { chatGptSubmissionDomProjection } from "./submission-ui";
 import { randomUUID } from "node:crypto";
 import { observeChatGptToolBoundaryDuring, captureChatGptToolBoundary, chatGptToolBoundaryError, setChatGptToolBoundaryTrace, logChatGptBrowserObservation, type ChatGptBrowserProbe } from "./tool-boundary";
 import { chatGptTerminalErrorUiVisible } from "./terminal-ui";
+import { throwIfChatGptPageRequestRejected } from "./page-rejection";
 import { chatGptSessionFailureUiState } from "./session-ui";
 import { CHATGPT_RESPONSE_WAIT_LABELS, type ChatGptResponseWaitState } from "./response-wait";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -3194,6 +3195,7 @@ export class ChatGptBrowserWorker {
     externalProgress?: ChatGptTurnProgressReader,
     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
     completionTracker?: ChatGptCompletionTracker,
+    traceId?: string,
   ): Promise<ChatGptSubmissionEvidence> {
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     for (;;) {
@@ -3203,6 +3205,8 @@ export class ChatGptBrowserWorker {
       if (progress && progress.lastToolBatchRevision > initialToolBatchRevision) return "mcp_tool_call";
       await this.observeResponseProbe(page, baseline, signal, externalProgress, completionTracker, () => throwIfChatGptSessionFailureAlert(page));
       await this.observeResponseProbe(page, baseline, signal, externalProgress, completionTracker, () => throwIfChatGptRateLimitDialog(page));
+      await this.observeResponseProbe(page, baseline, signal, externalProgress, completionTracker,
+        () => throwIfChatGptPageRequestRejected(page, traceId), undefined, "page_request_rejection");
       // Until the new response is bound, last() can still be a historical failed answer.
       // Response errors are checked against the bound current turn in the observation loops.
       let evidence: ChatGptSubmissionEvidence | undefined;
@@ -3479,6 +3483,7 @@ export class ChatGptBrowserWorker {
     graceMs: number = CHATGPT_RESPONSE_DOM_GRACE_MS,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    traceId?: string,
   ): Promise<ChatGptAssistantTurnBinding> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -3506,6 +3511,8 @@ export class ChatGptBrowserWorker {
       try {
         await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptSessionFailureAlert(observationPage), undefined, "session_alert");
         await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker, () => throwIfChatGptRateLimitDialog(observationPage), undefined, "rate_limit_dialog");
+        await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker,
+          () => throwIfChatGptPageRequestRejected(observationPage, traceId), undefined, "page_request_rejection");
         state = await this.observeResponseProbe(observationPage, observationBaseline, signal, externalProgress, completionTracker,
           async ownedSignal => {
             const observed = await this.submissionDomState(observationPage, observationBaseline.domCache, ownedSignal);
@@ -4105,6 +4112,7 @@ export class ChatGptBrowserWorker {
     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    traceId?: string,
   ): Promise<ChatGptSubmissionEvidence> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -4118,6 +4126,7 @@ export class ChatGptBrowserWorker {
           externalProgress,
           initialToolBatchRevision,
           completionTracker,
+          traceId,
         );
         return evidence;
       } catch (error) {
@@ -4164,6 +4173,7 @@ export class ChatGptBrowserWorker {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptRateLimitDialog(page);
+      await throwIfChatGptPageRequestRejected(page, submissionLifecycle?.traceId);
       if (await sendButton.isEnabled()) break;
       if (Date.now() >= sendEnableDeadline) {
         await captureDiagnostic?.("send-disabled");
@@ -4215,6 +4225,7 @@ export class ChatGptBrowserWorker {
           },
           observe: signal => this.waitForSubmissionAcceptedWithRecovery(
             binding.page, baseline, signal, externalProgress, initialToolBatchRevision, completionTracker, recoverCurrentObservation,
+            submissionLifecycle?.traceId,
           ),
           reconcile: async signal => {
             if (binding.pending) await withBrowserTurnAbort(binding.pending, signal);
@@ -4280,6 +4291,7 @@ export class ChatGptBrowserWorker {
         initialToolBatchRevision,
         completionTracker,
         recoverObservation,
+        submissionLifecycle?.traceId,
       ),
       abortSignal,
     );
@@ -4296,6 +4308,7 @@ export class ChatGptBrowserWorker {
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
     completionTracker = new ChatGptCompletionTracker(),
+    traceId?: string,
   ): Promise<ChatGptAssistantTurnBinding> {
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
     // ingests the attached context. The ordinary 60-second missing-response verdict would cut the
@@ -4319,6 +4332,7 @@ export class ChatGptBrowserWorker {
         throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
       }
       await observeProbe(() => throwIfChatGptSessionFailureAlert(page), undefined, "session_alert");
+      await observeProbe(() => throwIfChatGptPageRequestRejected(page, traceId), undefined, "page_request_rejection");
       await observeProbe(() => throwIfChatGptTerminalErrorAlert(responseTurn.locator), undefined, "terminal_error");
       let snapshot = await observeProbe(ownedSignal => this.boundedResponseDomSnapshot(page, responseTurn.locator, responseDomCache, ownedSignal), undefined, "response_projection");
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
@@ -5410,10 +5424,11 @@ export class ChatGptBrowserWorker {
       // Accepted compaction is successful control flow and keeps its existing retention contract.
       if (error instanceof ChatGptCompactionHandoffAccepted) return;
       if (!cooldownRecorded && error instanceof ChatGptWebAdapterError && error.status === 429
-        && error.code === "rate_limit_exceeded" && error.retryAt !== undefined) {
+        && (error.code === "rate_limit_exceeded" || error.code === "chatgpt_unusual_activity")
+        && error.retryAt !== undefined) {
         const acknowledged = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
           phase: "cooldown", traceId: turn.traceId, helperPid: process.pid,
-          retryAt: error.retryAt, message: error.message,
+          retryAt: error.retryAt, message: error.message, code: error.code,
         }, 15_000);
         cooldownRecorded = true;
         if (!sendActivated && !turn.requireRetainedConversation && acknowledged.alternateAvailable === true) markUnsentCooldown();
@@ -5962,6 +5977,7 @@ export class ChatGptBrowserWorker {
                     return recovered;
                   }
                   : undefined,
+                turn.traceId,
               );
               return this.waitForMultipartAcknowledgement(
                 page,
@@ -5971,6 +5987,8 @@ export class ChatGptBrowserWorker {
                 deadline,
                 acknowledgementSignal,
                 turn.externalProgress,
+                undefined,
+                turn.traceId,
               );
             },
             chatGptSuspensionClock,
@@ -6130,6 +6148,7 @@ export class ChatGptBrowserWorker {
             return recovered;
           }
           : undefined,
+        turn.traceId,
       );
       await observeProbe(() => diagnostics.capture(page, "send-accepted"), undefined, "diagnostic_capture");
 
@@ -6192,6 +6211,7 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await observeProbe(() => throwIfChatGptSessionFailureAlert(page), undefined, "session_alert");
+        await observeProbe(() => throwIfChatGptPageRequestRejected(page, turn.traceId), undefined, "page_request_rejection");
         let checkedDeliveryIdentity = responseTurn.identity;
         let deliveryTimedOut = await observeProbe(() => chatGptMessageDeliveryTimeoutVisible(responseTurn.locator), undefined, "delivery_timeout");
         if (!deliveryTimedOut) await observeProbe(() => throwIfChatGptTerminalErrorAlert(responseTurn.locator), undefined, "terminal_error");
@@ -6326,7 +6346,7 @@ export class ChatGptBrowserWorker {
               const binding = await this.waitForNewAssistantTurn(page, nextBaseline, deadline, continuationSignal, turn.externalProgress,
                 CHATGPT_RESPONSE_DOM_GRACE_MS, completionTracker, launcherObservationRecovery ? async (...args) => {
                   const recovered = await recoverAssistantObservation(...args); nextBaseline = recovered.baseline; return recovered;
-                } : undefined);
+                } : undefined, turn.traceId);
               return { baseline: nextBaseline, binding, continued: true };
             },
             onEvent: event => console.info(`[chatgpt-web] message_delivery_recovery ${JSON.stringify(event)}`),

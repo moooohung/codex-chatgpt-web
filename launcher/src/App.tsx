@@ -385,6 +385,7 @@ function LauncherShell({
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
+  const [cooldownNow, setCooldownNow] = useState(Date.now());
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
     snapshot.state.browserInteractionMode === "automatic"
@@ -488,6 +489,18 @@ function LauncherShell({
     return () => window.clearTimeout(timer);
   }, [browser?.authenticated, snapshot.state.sessionRefreshReminderAt]);
 
+  useEffect(() => {
+    const retryAt = browser?.unusualActivityCooldown?.retryAt;
+    setCooldownNow(Date.now());
+    if (!retryAt || retryAt <= Date.now()) return;
+    const interval = window.setInterval(() => setCooldownNow(Date.now()), 60_000);
+    const expiry = window.setTimeout(() => setCooldownNow(Date.now()), Math.max(1, retryAt - Date.now() + 25));
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(expiry);
+    };
+  }, [browser?.unusualActivityCooldown?.retryAt]);
+
   const activateBrowser = useCallback(async (show = false) => {
     setSurface("browser");
     await api!.setBrowserSurfaceActive(true);
@@ -560,6 +573,11 @@ function LauncherShell({
       setBiggerContextRecommendationBusy(false);
     }
   };
+
+  const unusualActivityMinutes = browser?.unusualActivityCooldown
+    && browser.unusualActivityCooldown.retryAt > cooldownNow
+    ? Math.max(1, Math.ceil((browser.unusualActivityCooldown.retryAt - cooldownNow) / 60_000))
+    : 0;
 
   return (
     <motion.main
@@ -690,6 +708,14 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        {unusualActivityMinutes > 0 ? (
+          <div className="tool-approval-notice unusual-activity-notice" role="status">
+            <Icon name="alert" />
+            <div>
+              <strong>ChatGPT 비정상 활동 감지: {unusualActivityMinutes}분 대기 중</strong>
+            </div>
+          </div>
+        ) : null}
         {(snapshot.state.effortCeilings ?? []).map(ceiling => (
           <div className="tool-approval-notice" key={`effort-${ceiling.account}-${ceiling.family}`} role="status">
             <Icon name="alert" />

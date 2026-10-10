@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 const PRIMARY_ACCOUNT = "@primary";
+const UNUSUAL_ACTIVITY_MESSAGE_PREFIX = "ChatGPT unusual activity detected: ";
 const MAX_MESSAGE_BYTES = 2048;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
@@ -95,6 +96,12 @@ class AccountCooldownStore {
     return entry && entry.retryAt > now ? { ...entry } : null;
   }
 
+  peek(account) {
+    validateAccountName(account);
+    const entry = readEntries(this.#filePath).get(account);
+    return entry ? { ...entry } : null;
+  }
+
   record(account, entry) {
     validateAccountName(account);
     const now = this.#time();
@@ -127,4 +134,4 @@ class AccountCooldownStore {
   }
 }
 
-module.exports = { PRIMARY_ACCOUNT, AccountCooldownStore };
+module.exports = { PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX, AccountCooldownStore };
