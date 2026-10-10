@@ -86,7 +86,9 @@ async function stage(installedRoot, sourceRoot, runtime, output, asarModule) {
   if (sha(installed) !== installedSha) throw new Error("Installed archive changed during staging");
   const receipt = { installed_archive: installed, installed_sha256: installedSha, packaged_asar: candidate,
     packaged_sha256: sha(candidate), packaged_app: unpacked, runtime_bundle_id: manifest.bundleId,
-    asar_files_compared: Math.max(before.length, after.length), asar_differences: differences,
+    asar_files_compared: new Set([...before, ...after]).size,
+    asar_baseline_file_count: before.length, asar_candidate_file_count: after.length,
+    asar_differences: differences,
     runtime_files_compared: manifest.files.length, runtime_differences: runtimeDiff,
     preserved_electron_files: electronFiles, packet146_locale_byte_identical: true, packet146_disable_http_cache_present: true,
     installed_archive_preserved: true, app_installed: false, running_app_stopped: false };
