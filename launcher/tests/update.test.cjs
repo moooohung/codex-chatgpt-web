@@ -170,7 +170,7 @@ test("a failed startup check is retried on a bounded schedule; a successful one 
     tag_name: "v1.2.0",
     assets: ["codex-web-gpt-1.2.0-linux-x64.AppImage", "checksums.txt"].map(name => ({
       name,
-      browser_download_url: `https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/${name}`,
+      browser_download_url: `https://github.com/${RELEASE_REPOSITORY}/releases/download/v1.2.0/${name}`,
     })),
   };
   const controllerFor = (retryDelaysMs, fetchRelease, logged = []) => createUpdateController({
