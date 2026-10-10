@@ -386,6 +386,13 @@ export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
   | {
+      phase: "cooldown";
+      traceId: string;
+      helperPid: number;
+      retryAt: number;
+      message: string;
+    }
+  | {
       phase: "approval";
       traceId: string;
       helperPid: number;
@@ -679,6 +686,7 @@ export async function notifyLauncherTurn(
   cancelledByUser?: boolean;
   authenticationRequired?: boolean;
   trackUsage?: boolean;
+  alternateAvailable?: boolean;
 }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
@@ -695,6 +703,7 @@ export async function notifyLauncherTurn(
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (response.status === 429 && body.code === "chatgpt_account_cooldown") throw launcherAccountCooldownError(body);
       if (response.status === 503 && body.code === "browser_surface_not_ready") throw new ChatGptWebAdapterError(
         typeof body.error === "string" ? body.error : "Launcher browser surface is not ready",
         { status: 503, errorType: "server_error", code: "browser_surface_not_ready", retryable: true },
@@ -717,6 +726,10 @@ export async function notifyLauncherTurn(
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (activity.phase === "cooldown") {
+      if (body.ok !== true || typeof body.alternateAvailable !== "boolean") throw new Error("Launcher returned an invalid account cooldown acknowledgement");
+      return { alternateAvailable: body.alternateAvailable };
+    }
     if (activity.phase === "start") {
       if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
         throw new Error("Launcher browser control channel returned an invalid turn surface id");
@@ -757,6 +770,35 @@ export async function notifyLauncherTurn(
   } finally {
     clearTimeout(timer);
   }
+}
+
+function launcherAccountCooldownError(body: Record<string, unknown>): ChatGptWebAdapterError {
+  if (!Number.isSafeInteger(body.retryAt) || !Number.isInteger(body.retry_after_seconds)
+    || Number(body.retry_after_seconds) < 1) throw new Error("Launcher returned an invalid account cooldown");
+  return new ChatGptWebAdapterError(typeof body.error === "string" ? body.error : "ChatGPT account is temporarily limited", {
+    status: 429, errorType: "rate_limit_error", code: "chatgpt_account_cooldown", retryable: false,
+    retryAt: Number(body.retryAt), retryAfterSeconds: Number(body.retry_after_seconds),
+  });
+}
+
+/** Admission does not create a tab, switch a running turn, or submit anything to ChatGPT. */
+export async function admitLauncherAccount(descriptorPath: string, activity: {
+  conversationKey?: string; traceId?: string; helperPid: number;
+}, signal?: AbortSignal): Promise<void> {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/account/admit`, {
+      method: "POST", headers: { authorization: `Bearer ${descriptor.control.token}`, "content-type": "application/json" },
+      body: JSON.stringify(activity), signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+    });
+    const body = await response.json() as Record<string, unknown>;
+    if (response.status === 429 && body.code === "chatgpt_account_cooldown") throw launcherAccountCooldownError(body);
+    if (body.code === "account_unavailable") throw new ChatGptWebAdapterError(String(body.error || "No signed-in ChatGPT account is available"),
+      { status: 409, errorType: "invalid_request_error", code: "account_unavailable", retryable: false });
+    if (!response.ok || body.ok !== true) throw new Error(`Launcher account admission failed (HTTP ${response.status})`);
+  } finally { clearTimeout(timer); }
 }
 
 export async function releaseLauncherRetainedConversation(

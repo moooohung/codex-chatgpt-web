@@ -803,7 +803,11 @@ export async function responseRequest(
       type: error instanceof ChatGptWebAdapterError ? error.errorType : "invalid_request_error",
       message: error instanceof Error ? error.message : String(error),
       code: error instanceof ChatGptWebAdapterError ? error.code : "turn_preflight_failed",
-    } }, { status: error instanceof ChatGptWebAdapterError ? error.status : 400 });
+      ...(error instanceof ChatGptWebAdapterError && error.retryAt !== undefined ? { retryAt: error.retryAt } : {}),
+      ...(error instanceof ChatGptWebAdapterError && error.retryAfterSeconds !== undefined ? { retry_after_seconds: error.retryAfterSeconds } : {}),
+    } }, { status: error instanceof ChatGptWebAdapterError ? error.status : 400,
+      ...(error instanceof ChatGptWebAdapterError && error.retryAfterSeconds !== undefined
+        ? { headers: { "retry-after": String(error.retryAfterSeconds) } } : {}) });
   }
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();

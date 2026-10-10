@@ -19,6 +19,7 @@ function accountPaths({ coreHome = path.join(os.homedir(), ".codex-chatgpt-web")
     config: path.join(canonicalHome, "switcher", "accounts-config.json"),
     secrets: path.join(canonicalHome, "secrets"),
     sticky: path.join(data, "conversations-sticky.json"),
+    cooldowns: path.join(data, "account-cooldowns.json"),
     partition: name => `${partition}-${validateAccountName(name)}`,
     partitionDirectory: name => path.join(data, "Partitions", `${partition.replace(/^persist:/, "")}-${validateAccountName(name)}`),
     tunnelAlias: name => `${namespace}-${validateAccountName(name)}`,

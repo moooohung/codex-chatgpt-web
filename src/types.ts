@@ -228,6 +228,8 @@ export type AdapterEvent =
       errorType?: string;
       code?: string;
       retryable?: boolean;
+      retryAt?: number;
+      retryAfterSeconds?: number;
     };
 
 /**

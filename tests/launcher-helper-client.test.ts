@@ -409,6 +409,8 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
     retryable: true,
+    retryAt: 1_791_644_820_000,
+    retryAfterSeconds: 600,
   }));
 
   const error = await result.then(() => undefined, failure => failure);
@@ -418,6 +420,8 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
     retryable: true,
+    retryAt: 1_791_644_820_000,
+    retryAfterSeconds: 600,
   });
 });
 
