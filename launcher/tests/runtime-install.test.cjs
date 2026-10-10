@@ -1,12 +1,16 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
+const crypto = require("node:crypto");
+const workerThreads = require("node:worker_threads");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { runtimeInvocation } = require("../electron/runtime-command.cjs");
+const { runtimeInvocation, runtimeInvocationAsync } = require("../electron/runtime-command.cjs");
 const {
   ensurePackagedRuntime,
+  exportRuntimeVerificationCache,
+  importRuntimeVerificationCache,
   validateRuntimeBundle,
   waitForPackagedRuntimeSource,
 } = require("../electron/runtime-install.cjs");
@@ -386,7 +390,7 @@ test("packaged runtime replaces stale files when a release is refreshed under th
   }
 });
 
-test("worker verification keeps the event loop live and rejects same-size dependency corruption on every call", async () => {
+test("worker verification keeps the event loop live and rejects same-size corruption with changed metadata", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-worker-"));
   const resourcesPath = runtimeFixture(root), source = path.join(resourcesPath, "runtime");
   const dependency = path.join(source, "app", "dependency.js");
@@ -400,6 +404,323 @@ test("worker verification keeps the event loop live and rejects same-size depend
     fs.writeFileSync(dependency, "tampered");
     await assert.rejects(verifyRuntimeInWorker("validate", { root: source, identity: { version: "0.2.0", platform: process.platform, arch: process.arch } }), /checksum mismatch/);
   } finally { clearInterval(timer); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+function verificationSpies(t, roots) {
+  const counts = { fileReads: 0, manifestReads: 0, hashes: 0, stats: 0 };
+  const originalRead = fs.readFileSync, originalHash = crypto.createHash, originalStat = fs.statSync;
+  const belongs = filename => roots.some(root => path.resolve(String(filename)).startsWith(`${path.resolve(root)}${path.sep}`));
+  t.mock.method(fs, "readFileSync", (filename, ...args) => {
+    if (belongs(filename)) counts[path.basename(String(filename)) === "manifest.json" ? "manifestReads" : "fileReads"]++;
+    return originalRead(filename, ...args);
+  });
+  t.mock.method(crypto, "createHash", (...args) => {
+    counts.hashes++;
+    return originalHash(...args);
+  });
+  t.mock.method(fs, "statSync", (filename, ...args) => {
+    if (belongs(filename)) counts.stats++;
+    return originalStat(filename, ...args);
+  });
+  return { counts, reset: () => Object.keys(counts).forEach(key => { counts[key] = 0; }) };
+}
+
+const fixtureIdentity = { version: "0.2.0", platform: process.platform, arch: process.arch };
+
+test("first validation reads and hashes every file; second reads only the manifest and stats", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-process-cache-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime");
+    const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+    const { counts, reset } = verificationSpies(t, [source]);
+    validateRuntimeBundle(source, fixtureIdentity);
+    assert.deepEqual(counts, { fileReads: n, manifestReads: 1, hashes: n + 1, stats: n });
+    reset();
+    validateRuntimeBundle(source, fixtureIdentity);
+    assert.deepEqual(counts, { fileReads: 0, manifestReads: 1, hashes: 0, stats: n });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const field of ["size", "mtimeMs", "mtimeNs", "ino", "dev", "mode"]) {
+  test(`a changed ${field} fingerprint triggers a complete hash pass`, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-fingerprint-"));
+    try {
+      const source = path.join(runtimeFixture(root), "runtime");
+      const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+      validateRuntimeBundle(source, fixtureIdentity);
+      const { counts } = verificationSpies(t, [source]);
+      const originalStat = fs.statSync;
+      let changed = false;
+      // Inject a metadata difference in the cache comparison, then return the real
+      // metadata for the full pass. No content or manifest change can mask this trigger.
+      t.mock.method(fs, "statSync", (filename, ...args) => {
+        const metadata = originalStat(filename, ...args);
+        if (!changed && String(filename).endsWith(`${path.sep}cli.js`)) {
+          changed = true;
+          metadata[field]++;
+        }
+        return metadata;
+      });
+      validateRuntimeBundle(source, fixtureIdentity);
+      assert.ok(changed);
+      assert.equal(counts.fileReads, n);
+      assert.equal(counts.hashes, n + 1);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+test("an actual mtime-only change triggers a complete hash pass", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-mtime-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime"), cli = path.join(source, "app", "cli.js");
+    const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+    validateRuntimeBundle(source, fixtureIdentity);
+    const metadata = fs.statSync(cli);
+    fs.utimesSync(cli, metadata.atime, new Date(metadata.mtimeMs + 2000));
+    const { counts } = verificationSpies(t, [source]);
+    validateRuntimeBundle(source, fixtureIdentity);
+    assert.equal(counts.fileReads, n);
+    assert.equal(counts.hashes, n + 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const mutation of ["size", "added", "removed", "manifest"]) {
+  test(`a valid ${mutation} change invalidates the cache and hashes the entire new bundle`, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cache-change-"));
+    try {
+      const source = path.join(runtimeFixture(root), "runtime");
+      validateRuntimeBundle(source, fixtureIdentity);
+      if (mutation === "size") fs.writeFileSync(path.join(source, "app", "cli.js"), "new cli");
+      if (mutation === "added") fs.writeFileSync(path.join(source, "app", "extra.js"), "extra");
+      if (mutation === "removed") fs.rmSync(path.join(source, "app", "node_modules", "nested-dependency", "dist", "runtime", "worker.js"));
+      if (mutation !== "manifest") writeRuntimeManifest(source);
+      else fs.appendFileSync(path.join(source, "manifest.json"), "\n");
+      const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+      const { counts, reset } = verificationSpies(t, [source]);
+      validateRuntimeBundle(source, fixtureIdentity);
+      assert.equal(counts.fileReads, n);
+      assert.equal(counts.hashes, n + 1);
+      reset();
+      validateRuntimeBundle(source, fixtureIdentity);
+      assert.equal(counts.fileReads, 0);
+      assert.equal(counts.hashes, 0);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const mutation of ["added", "removed"]) {
+  test(`an unmanifested ${mutation} file fails full verification and evicts its previous grant`, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cache-tree-"));
+    try {
+      const source = path.join(runtimeFixture(root), "runtime");
+      validateRuntimeBundle(source, fixtureIdentity);
+      const filename = path.join(source, "app", mutation === "added" ? "extra.js" : "cli.js");
+      const content = mutation === "removed" ? fs.readFileSync(filename) : null;
+      mutation === "added" ? fs.writeFileSync(filename, "extra") : fs.rmSync(filename);
+      const { counts, reset } = verificationSpies(t, [source]);
+      assert.throws(() => validateRuntimeBundle(source, fixtureIdentity), mutation === "added" ? /unmanifested file/ : /file is missing/);
+      assert.equal(counts.hashes, 1, "full verification validates the manifest before rejecting tree membership");
+      assert.deepEqual(exportRuntimeVerificationCache([source]), []);
+      mutation === "added" ? fs.rmSync(filename) : fs.writeFileSync(filename, content);
+      reset();
+      validateRuntimeBundle(source, fixtureIdentity);
+      assert.ok(counts.fileReads > 0, "restoring the tree must not restore the evicted grant");
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+test("a symlink escape introduced after verification is rejected and evicts the grant", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cached-escape-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime");
+    validateRuntimeBundle(source, fixtureIdentity);
+    const original = path.join(source, "app", "node_modules", "zod"), outside = path.join(root, "outside");
+    fs.renameSync(original, outside);
+    fs.symlinkSync(outside, original, process.platform === "win32" ? "junction" : "dir");
+    assert.throws(() => validateRuntimeBundle(source, fixtureIdentity), /escapes the bundle/);
+    assert.deepEqual(exportRuntimeVerificationCache([source]), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("install hashes the source and copied tree once each and reuses the renamed candidate", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-install-counts-"));
+  try {
+    const resourcesPath = runtimeFixture(root), source = path.join(resourcesPath, "runtime");
+    const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+    const app = { isPackaged: true, getVersion: () => "0.2.0" }, coreHome = path.join(root, "home");
+    const { counts, reset } = verificationSpies(t, [source, path.join(coreHome, "versions")]);
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    assert.equal(counts.fileReads, 2 * n);
+    assert.equal(counts.hashes, 2 * (n + 1));
+    reset();
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
+    runtimeInvocation({ app, sourceRoot: root, installedRuntimeRoot: installed, args: ["doctor"] });
+    assert.equal(counts.fileReads, 0);
+    assert.equal(counts.hashes, 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+function workerVerificationSpies(t) {
+  const results = [];
+  const OriginalWorker = workerThreads.Worker;
+  t.mock.method(workerThreads, "Worker", class extends OriginalWorker {
+    constructor(filename, options) {
+      super(filename, { ...options, execArgv: ["--require", path.join(__dirname, "fixtures", "runtime-verification-spy.cjs")] });
+      this.on("message", message => results.push(message.verificationCounts));
+    }
+  });
+  return results;
+}
+
+test("fresh workers share the main process cache with synchronous validation and concurrent requests", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-worker-counts-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime");
+    const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+    const results = workerVerificationSpies(t);
+    const options = { root: source, identity: fixtureIdentity };
+    await Promise.all([verifyRuntimeInWorker("validate", options), verifyRuntimeInWorker("validate", options)]);
+    assert.equal(results[0].fileReads, n);
+    assert.equal(results[0].hashes, n + 1);
+    assert.deepEqual(results[1], { fileReads: 0, manifestReads: 1, hashes: 0, stats: n });
+    const { counts } = verificationSpies(t, [source]);
+    validateRuntimeBundle(source, fixtureIdentity);
+    assert.equal(counts.fileReads, 0);
+    assert.equal(counts.hashes, 0);
+    const cli = path.join(source, "app", "cli.js"), metadata = fs.statSync(cli);
+    fs.utimesSync(cli, metadata.atime, new Date(metadata.mtimeMs + 2000));
+    await verifyRuntimeInWorker("validate", options);
+    assert.equal(results[2].fileReads, n);
+    validateRuntimeBundle(source, fixtureIdentity);
+    assert.equal(counts.fileReads, 0, "a worker's refreshed fingerprint must reach the main process");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("worker startup wait and install pass their cache to later runtime commands", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-worker-startup-"));
+  try {
+    const resourcesPath = runtimeFixture(root), source = path.join(resourcesPath, "runtime");
+    const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+    const results = workerVerificationSpies(t);
+    await verifyRuntimeInWorker("wait", { version: "0.2.0", resourcesPath });
+    const installed = await verifyRuntimeInWorker("install", { version: "0.2.0", resourcesPath, coreHome: path.join(root, "home") });
+    const invocation = await runtimeInvocationAsync({ app: { isPackaged: true, getVersion: () => "0.2.0" }, installedRuntimeRoot: installed, args: ["doctor"] });
+    assert.equal(invocation.cwd, installed);
+    assert.equal(invocation.args[1], "doctor");
+    assert.equal(results[0].fileReads, n);
+    assert.equal(results[1].fileReads, n, "only the new copied tree needs hashing at install");
+    assert.equal(results[2].fileReads, 0);
+    assert.equal(results[2].hashes, 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("changed bundle identity cannot reuse a verification grant", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cache-identity-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime");
+    for (const identity of [
+      { ...fixtureIdentity, version: "other" },
+      { ...fixtureIdentity, platform: "other" },
+      { ...fixtureIdentity, arch: "other" },
+      { ...fixtureIdentity, bundleId: "0".repeat(64) },
+    ]) {
+      validateRuntimeBundle(source, fixtureIdentity);
+      assert.throws(() => validateRuntimeBundle(source, identity), /identity mismatch/);
+      assert.deepEqual(exportRuntimeVerificationCache([source]), []);
+    }
+    const { counts } = verificationSpies(t, [source]);
+    validateRuntimeBundle(source, fixtureIdentity);
+    assert.ok(counts.fileReads > 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a changed realpath within the bundle triggers a complete hash pass", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cache-realpath-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime");
+    const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+    validateRuntimeBundle(source, fixtureIdentity);
+    const { counts } = verificationSpies(t, [source]);
+    const originalRealpath = fs.realpathSync.native;
+    let changed = false;
+    t.mock.method(fs.realpathSync, "native", (filename, ...args) => {
+      const result = originalRealpath(filename, ...args);
+      if (!changed && String(filename).endsWith(`${path.sep}cli.js`)) {
+        changed = true;
+        return path.join(source, "app", "browser-helper.cjs");
+      }
+      return result;
+    });
+    validateRuntimeBundle(source, fixtureIdentity);
+    assert.equal(counts.fileReads, n);
+    assert.equal(counts.hashes, n + 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("worker failure evicts the main process grant and leaves the verification queue usable", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cache-worker-failure-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime"), cli = path.join(source, "app", "cli.js");
+    const n = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8")).files.length;
+    validateRuntimeBundle(source, fixtureIdentity);
+    const results = workerVerificationSpies(t);
+    const options = { root: source, identity: fixtureIdentity };
+    await verifyRuntimeInWorker("validate", options);
+    assert.equal(results[0].fileReads, 0, "sync cache must be handed to a fresh worker");
+    fs.rmSync(cli);
+    await assert.rejects(verifyRuntimeInWorker("validate", options), /file is missing/);
+    assert.deepEqual(exportRuntimeVerificationCache([source]), []);
+    fs.writeFileSync(cli, "cli");
+    await verifyRuntimeInWorker("validate", options);
+    assert.equal(results[2].fileReads, n);
+    await assert.rejects(verifyRuntimeInWorker("unknown", {}), /Unknown runtime verification operation/);
+    await verifyRuntimeInWorker("validate", options);
+    assert.equal(results[3].fileReads, 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a stale worker snapshot cannot overwrite a newer synchronous verification", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cache-stale-worker-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime"), cli = path.join(source, "app", "cli.js");
+    validateRuntimeBundle(source, fixtureIdentity);
+    const previous = exportRuntimeVerificationCache([source]);
+    const metadata = fs.statSync(cli);
+    fs.utimesSync(cli, metadata.atime, new Date(metadata.mtimeMs + 2000));
+    validateRuntimeBundle(source, fixtureIdentity);
+    importRuntimeVerificationCache([source], previous, previous);
+    const { counts } = verificationSpies(t, [source]);
+    validateRuntimeBundle(source, fixtureIdentity);
+    assert.equal(counts.fileReads, 0);
+    assert.equal(counts.hashes, 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("same-size edits with preserved mtime are accepted only until the next process start", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cache-limit-"));
+  try {
+    const source = path.join(runtimeFixture(root), "runtime"), cli = path.join(source, "app", "cli.js");
+    validateRuntimeBundle(source, fixtureIdentity);
+    const metadata = fs.statSync(cli, { bigint: true });
+    fs.writeFileSync(cli, "BAD");
+    const originalStat = fs.statSync;
+    // Avoid utimes rounding on filesystems whose timestamp precision exceeds JS Date.
+    t.mock.method(fs, "statSync", (filename, ...args) => {
+      const result = originalStat(filename, ...args);
+      if (filename === cli) {
+        result.mtimeMs = metadata.mtimeMs;
+        result.mtimeNs = metadata.mtimeNs;
+      }
+      return result;
+    });
+    const { counts } = verificationSpies(t, [source]);
+    assert.equal(validateRuntimeBundle(source, fixtureIdentity), source);
+    assert.equal(counts.fileReads, 0);
+    const script = `require(${JSON.stringify(path.resolve(__dirname, "../electron/runtime-install.cjs"))}).validateRuntimeBundle(${JSON.stringify(source)}, ${JSON.stringify(fixtureIdentity)});`;
+    const child = require("node:child_process").spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /checksum mismatch/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("packaged runtime uses fast cache on subsequent calls and repairs critical binary tampering", () => {

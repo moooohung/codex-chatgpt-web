@@ -1,4 +1,4 @@
-const { createHash } = require("node:crypto");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { renameAtomicFile } = require("./atomic-file.cjs");
@@ -7,13 +7,57 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const DEFAULT_SOURCE_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_SOURCE_WAIT_INTERVAL_MS = 50;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+// Process-only verification: unchanged manifest bytes, tree membership, stat metadata and
+// realpaths reuse a successful hash pass. An in-place edit preserving size and mtime
+// goes undetected until the next launcher start. Never persist these grants to disk.
+const verificationCache = new Map();
+
+function cacheKey(runtimeRoot) {
+  const resolved = path.resolve(runtimeRoot);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function exportRuntimeVerificationCache(roots) {
+  return roots.flatMap(root => {
+    const key = cacheKey(root);
+    return verificationCache.has(key) ? [[key, verificationCache.get(key)]] : [];
+  });
+}
+
+function importRuntimeVerificationCache(roots, entries, previousEntries) {
+  const incoming = new Map(entries);
+  const previous = previousEntries && new Map(previousEntries);
+  for (const root of roots) {
+    const key = cacheKey(root);
+    // A synchronous validation may have changed this root while the worker ran.
+    if (previous && verificationCache.get(key) !== previous.get(key)) continue;
+    verificationCache.delete(key);
+    if (incoming.has(key)) verificationCache.set(key, incoming.get(key));
+  }
+}
+
+function moveRuntimeVerificationCache(from, to) {
+  const cached = verificationCache.get(cacheKey(from));
+  verificationCache.delete(cacheKey(from));
+  verificationCache.delete(cacheKey(to));
+  if (!cached) return;
+  const canonicalRoot = (fs.realpathSync.native ?? fs.realpathSync)(to);
+  verificationCache.set(cacheKey(to), {
+    ...cached,
+    canonicalRoot,
+    fingerprints: cached.fingerprints.map(file => ({
+      ...file,
+      realpath: path.join(canonicalRoot, path.relative(cached.canonicalRoot, file.realpath)),
+    })),
+  });
+}
 
 function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function bundleIdFor(files) {
-  const digest = createHash("sha256");
+  const digest = crypto.createHash("sha256");
   for (const file of files) {
     digest.update(file.path);
     digest.update("\0");
@@ -38,12 +82,12 @@ function validateManifestPath(relativePath) {
   return relativePath;
 }
 
-function readRuntimeManifest(runtimeRoot, { version, platform, arch, bundleId }) {
+function readRuntimeManifest(runtimeRoot, { version, platform, arch, bundleId }, manifestText) {
   const manifestPath = path.join(runtimeRoot, "manifest.json");
   if (!fs.existsSync(manifestPath)) throw new Error(`Runtime manifest is missing: ${manifestPath}`);
   let manifest;
   try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest = JSON.parse(manifestText);
   } catch (error) {
     throw new Error(
       `Runtime manifest is invalid: ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -102,6 +146,7 @@ function readRuntimeManifest(runtimeRoot, { version, platform, arch, bundleId })
 
 function runtimeFilePaths(runtimeRoot) {
   const paths = [];
+  const realpaths = new Map();
   const canonicalRoot = (fs.realpathSync.native ?? fs.realpathSync)(runtimeRoot);
   const visit = (directory) => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => comparePaths(left.name, right.name))) {
@@ -124,38 +169,76 @@ function runtimeFilePaths(runtimeRoot) {
         continue;
       }
       paths.push(relativePath);
+      realpaths.set(relativePath, target);
     }
   };
   visit(runtimeRoot);
-  return paths.sort(comparePaths);
+  return { paths: paths.sort(comparePaths), canonicalRoot, realpaths };
 }
 
-function validateRuntimeFile(runtimeRoot, canonicalRoot, file) {
+function runtimeFileFingerprint(runtimeRoot, file, realpath) {
   const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
   let metadata;
   try {
-    metadata = fs.statSync(absolutePath);
+    // Windows file IDs can exceed Number's safe integer range. Preserve exact IDs
+    // and sub-millisecond mtimes in the fingerprint without extra stat operations.
+    metadata = fs.statSync(absolutePath, { bigint: true });
   } catch {
     throw new Error(`Runtime bundle file is missing: ${absolutePath}`);
   }
   if (!metadata.isFile()) throw new Error(`Runtime bundle entry is not a file: ${absolutePath}`);
-  {
-    const target = (fs.realpathSync.native ?? fs.realpathSync)(absolutePath);
-    if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${path.sep}`)) {
-      throw new Error(`Runtime bundle symlink escapes the bundle: ${absolutePath}`);
-    }
-  }
-  if (metadata.size !== file.size) {
+  return { size: Number(metadata.size), mtimeMs: metadata.mtimeMs, mtimeNs: metadata.mtimeNs,
+    ino: metadata.ino, dev: metadata.dev, mode: Number(metadata.mode), realpath };
+}
+
+function validateRuntimeFile(runtimeRoot, file, fingerprint) {
+  const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
+  if (fingerprint.size !== file.size) {
     throw new Error(`Runtime bundle file size mismatch: ${absolutePath}`);
   }
-  const sha256 = createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex");
+  const sha256 = crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex");
   if (sha256 !== file.sha256) {
     throw new Error(`Runtime bundle file checksum mismatch: ${absolutePath}`);
   }
 }
 
 function inspectRuntimeBundle(runtimeRoot, identity) {
-  const manifest = readRuntimeManifest(runtimeRoot, identity);
+  const key = cacheKey(runtimeRoot);
+  const cached = verificationCache.get(key);
+  try {
+    const manifestPath = path.join(runtimeRoot, "manifest.json");
+    if (!fs.existsSync(manifestPath)) throw new Error(`Runtime manifest is missing: ${manifestPath}`);
+    const manifestText = fs.readFileSync(manifestPath, "utf8");
+    if (cached && cached.manifestText === manifestText
+      && cached.manifest.appVersion === identity.version
+      && cached.manifest.platform === identity.platform
+      && cached.manifest.arch === identity.arch
+      && (!identity.bundleId || cached.manifest.bundleId === identity.bundleId)) {
+      try {
+        const tree = runtimeFilePaths(runtimeRoot);
+        const expected = cached.manifest.files;
+        if (tree.canonicalRoot === cached.canonicalRoot && tree.paths.length === expected.length
+          && tree.paths.every((relativePath, index) => relativePath === expected[index].path)
+          && expected.every((file, index) => {
+            const fingerprint = runtimeFileFingerprint(runtimeRoot, file, tree.realpaths.get(file.path));
+            return Object.keys(fingerprint).every(field => fingerprint[field] === cached.fingerprints[index][field]);
+          })) {
+          return { manifest: cached.manifest, runtimeRoot };
+        }
+      } catch {
+        // Retry through the full verifier so missing files and realpath escapes fail closed.
+      }
+    }
+    verificationCache.delete(key);
+    return inspectRuntimeBundleFully(runtimeRoot, identity, manifestText);
+  } catch (error) {
+    verificationCache.delete(key);
+    throw error;
+  }
+}
+
+function inspectRuntimeBundleFully(runtimeRoot, identity, manifestText) {
+  const manifest = readRuntimeManifest(runtimeRoot, identity, manifestText);
   const paths = runtimeBundlePaths(runtimeRoot, identity.platform);
 
   const expectedPaths = manifest.files.map(file => file.path);
@@ -172,7 +255,7 @@ function inspectRuntimeBundle(runtimeRoot, identity) {
     }
   }
 
-  const actualPaths = runtimeFilePaths(runtimeRoot);
+  const { paths: actualPaths, canonicalRoot, realpaths } = runtimeFilePaths(runtimeRoot);
   const actualSet = new Set(actualPaths);
   const missing = expectedPaths.find(relativePath => !actualSet.has(relativePath));
   if (missing) throw new Error(`Runtime bundle file is missing: ${path.join(runtimeRoot, ...missing.split("/"))}`);
@@ -184,13 +267,17 @@ function inspectRuntimeBundle(runtimeRoot, identity) {
     throw new Error(`Runtime bundle file count mismatch: expected ${expectedPaths.length}, received ${actualPaths.length}`);
   }
 
-  const canonicalRoot = (fs.realpathSync.native ?? fs.realpathSync)(runtimeRoot);
-  // Full verification path: compute SHA-256 for all files
-  for (const file of manifest.files) validateRuntimeFile(runtimeRoot, canonicalRoot, file);
-  if (identity.platform !== "win32" && (fs.statSync(paths.executable).mode & 0o111) === 0) {
+  const fingerprints = manifest.files.map(file => {
+    const fingerprint = runtimeFileFingerprint(runtimeRoot, file, realpaths.get(file.path));
+    validateRuntimeFile(runtimeRoot, file, fingerprint);
+    return fingerprint;
+  });
+  const executableIndex = expectedPaths.indexOf(path.relative(runtimeRoot, paths.executable).split(path.sep).join("/"));
+  if (identity.platform !== "win32" && (fingerprints[executableIndex].mode & 0o111) === 0) {
     throw new Error(`Bundled Bun runtime is not executable: ${paths.executable}`);
   }
 
+  verificationCache.set(cacheKey(runtimeRoot), { manifestText, manifest, canonicalRoot, fingerprints });
   return { manifest, runtimeRoot: paths.runtimeRoot };
 }
 
@@ -272,8 +359,12 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     }
     try {
       renameAtomicFile(temporary, destination);
+      // Rename preserves the verified files' metadata. Rebase realpaths, then stat-check
+      // the destination instead of hashing the same copied tree again.
+      moveRuntimeVerificationCache(temporary, destination);
       validateRuntimeBundle(destination, expectedIdentity);
     } catch (error) {
+      verificationCache.delete(cacheKey(destination));
       fs.rmSync(destination, { recursive: true, force: true });
       if (previousMoved) {
         try {
@@ -293,6 +384,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
       previousMoved = false;
     }
   } finally {
+    verificationCache.delete(cacheKey(temporary));
     fs.rmSync(temporary, { recursive: true, force: true });
     if (previousMoved && fs.existsSync(previous) && !fs.existsSync(destination)) {
       renameAtomicFile(previous, destination);
@@ -300,11 +392,13 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     }
   }
   try { fs.chmodSync(destination, 0o700); } catch {}
-  return validateRuntimeBundle(destination, expectedIdentity);
+  return destination;
 }
 
 module.exports = {
   ensurePackagedRuntime,
+  exportRuntimeVerificationCache,
+  importRuntimeVerificationCache,
   validateRuntimeBundle,
   waitForPackagedRuntimeSource,
 };

@@ -794,6 +794,10 @@ class BrowserHost {
   }
 
   configureLocalePreferences(browserSession) {
+    this.localePreferencesReady ??= new WeakMap();
+    const existing = this.localePreferencesReady.get(browserSession);
+    if (existing) return existing;
+    const ready = Promise.resolve().then(() => {
     applyStealthHeaders(browserSession);
     bindBrowserResourceBudget(browserSession, contentsId => {
       const tab = [...this.turnTabs.values()].find(candidate => candidate.view?.webContents?.id === contentsId);
@@ -802,7 +806,9 @@ class BrowserHost {
         authenticationRequired: tab.authenticationRequired, isSignInTab: tab.isSignInTab,
         documentUrl: tab.view.webContents.getURL() };
     });
-    const ready = configureChatGptLocale(browserSession);
+    return configureChatGptLocale(browserSession);
+    });
+    this.localePreferencesReady.set(browserSession, ready);
     void ready.catch(error => this.logger.warn("browser.locale_preference_failed", { message: String(error) }));
     return ready;
   }

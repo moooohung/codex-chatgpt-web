@@ -22,6 +22,8 @@ const {
 const { applyChromiumMemoryPolicy } = require("./browser-memory-policy.cjs");
 const { createAccountApi } = require("./account-api.cjs");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+// Packet 146: before the first persistent/default session is constructed.
+if (process.platform === "win32") app.commandLine.appendSwitch("disable-http-cache");
 const { configureBrowserDebugging, waitForBrowserDebugging, ownedDebuggingTarget, smokeBrowserDebugging } = require("./browser-debugging.cjs");
 const { CHATGPT_BROWSER_LOCALE } = require("./chatgpt-locale.cjs");
 const browserMemoryPolicy = applyChromiumMemoryPolicy(app);
