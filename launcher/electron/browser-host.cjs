@@ -7,6 +7,8 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { injectDomStealth, applyStealthHeaders } = require("./stealth.cjs");
 const { accountNameForTab, accountPaths, readAccountConfig, selectAccount } = require("./account-policy.cjs");
+const { AccountCooldownStore, PRIMARY_ACCOUNT } = require("./account-cooldown-store.cjs");
+const { resolveCooldownRoute } = require("./account-cooldown-routing.cjs");
 const { bindAccountBackendRecovery } = require("./account-backend-recovery.cjs");
 const {
   runBrowserHelperOperation,
@@ -427,6 +429,7 @@ class BrowserHost {
     this.partition = partition;
     this.profile = profile;
     this.accountPaths = accountPaths({ coreHome, userData, partition });
+    this.accountCooldowns = new AccountCooldownStore(this.accountPaths.cooldowns);
     this.accountConfigPresent = fs.existsSync(this.accountPaths.config);
     this.pendingRemovalAccounts = new Set(Object.entries(readAccountConfig(this.accountPaths.config).accounts).filter(([, acc]) => acc.pendingRemoval).map(([name]) => name));
     this.accountCleanup = new Map();
@@ -676,6 +679,14 @@ class BrowserHost {
   }
 
   resolveAccountForConversation(conversationKey) {
+    if (this.accountCooldowns && this.browserInteractionMode() !== "manual"
+      && this.routingAccountPool().some(name => this.accountCooldowns.get(name))) {
+      const account = resolveCooldownRoute({ pool: this.routingAccountPool(), statuses: this.accountStatuses,
+        disabled: this.disabledAccounts, pending: this.pendingRemovalAccounts,
+        preferred: this.stickyConversations?.get(conversationKey), cooldowns: this.accountCooldowns,
+        tabs: [...(this.turnTabs?.values() || [])], roundRobin: this.accountRoundRobinIndex || 0 });
+      return account === PRIMARY_ACCOUNT ? null : account;
+    }
     return selectAccount({ pool: this.accountPool, configured: this.accountConfigPresent,
       disabled: this.disabledAccounts, pending: this.pendingRemovalAccounts, statuses: this.accountStatuses,
       tabs: [...(this.turnTabs?.values() || [])], bound: this.stickyConversations?.get(conversationKey),
@@ -683,12 +694,81 @@ class BrowserHost {
   }
 
   commitAccountBinding(conversationKey, name) {
+    if (this.accountCooldowns && this.browserInteractionMode() !== "manual") {
+      const selected = name || PRIMARY_ACCOUNT;
+      this.accountRoundRobinIndex = (this.accountRoundRobinIndex || 0) + 1;
+      // A failover is temporary. Keep the original preference so expiry restores it on the next turn.
+      if (conversationKey && !this.stickyConversations.has(conversationKey)) {
+        this.stickyConversations.set(conversationKey, selected);
+        this.saveStickyMap();
+      }
+      return;
+    }
     if (!name) return;
     this.accountRoundRobinIndex = (this.accountRoundRobinIndex || 0) + 1;
     if (conversationKey && this.stickyConversations.get(conversationKey) !== name) {
       this.stickyConversations.set(conversationKey, name);
       this.saveStickyMap();
     }
+  }
+
+  routingAccountPool() {
+    return this.accountPool?.length || this.accountConfigPresent ? this.accountPool || [] : [PRIMARY_ACCOUNT];
+  }
+
+  async refreshRoutingAccounts() {
+    if (!this.accountCooldowns || !this.routingAccountPool().some(name => this.accountCooldowns.get(name))) return;
+    const now = Date.now();
+    await Promise.all(this.routingAccountPool().map(async name => {
+      if (this.disabledAccounts?.has(name) || this.pendingRemovalAccounts?.has(name)
+        || this.accountCooldowns.get(name)) return;
+      const status = this.accountStatuses.get(name);
+      if (status?.routingAuthCheckedAt > now - 30_000) return;
+      this.routingAuthProbes ||= new Map();
+      if (this.routingAuthProbes.has(name)) return this.routingAuthProbes.get(name);
+      const operation = (async () => {
+        const revision = this.accountStatuses.get(name)?.routingAuthRevision || 0;
+        const primaryRevision = this.authenticationRevision;
+        const partSession = name === PRIMARY_ACCOUNT ? this.view.webContents.session
+          : (this.session || session).fromPartition(this.accountPaths.partition(name));
+        const result = await readChatGptAuthSession(partSession.fetch.bind(partSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+        // A native network failure is unknown, never proof of sign-in or authorization to switch.
+        const previous = this.accountStatuses.get(name);
+        if ((previous?.routingAuthRevision || 0) !== revision
+          || name === PRIMARY_ACCOUNT && this.authenticationRevision !== primaryRevision) return;
+        this.accountStatuses.set(name, { ...previous, routingAuthenticated: result.sessionAuthenticated === true,
+          routingAuthCheckedAt: Date.now(), ...(result.sessionCheckError ? {} : { authenticated: result.sessionAuthenticated === true }),
+          ...(result.sessionAuthenticated === true ? { cooldownUntil: 0 } : {}) });
+      })();
+      this.routingAuthProbes.set(name, operation);
+      try { await operation; } finally { this.routingAuthProbes.delete(name); }
+    }));
+  }
+
+  async admitAccount(conversationKey, traceId, helperPid) {
+    if (!this.accountCooldowns) return { ok: true };
+    // Reconnecting an existing physical turn must keep its already-owned partition.
+    const active = [...this.turnTabs.values()].find(tab => tab.status === "running"
+      && tab.traceId === traceId && tab.helperPid === helperPid && tab.conversationKey === conversationKey);
+    if (active) return { ok: true };
+    await this.refreshRoutingAccounts();
+    this.resolveAccountForConversation(conversationKey);
+    return { ok: true };
+  }
+
+  async recordTurnCooldown(traceId, helperPid, retryAt, message) {
+    const tab = [...this.turnTabs.values()].find(item => item.traceId === traceId && item.helperPid === helperPid
+      && item.status === "running");
+    if (!tab) throw new Error("Account cooldown requires the exact active browser turn owner");
+    const name = accountNameForTab(tab) || PRIMARY_ACCOUNT;
+    this.accountCooldowns.record(name, { retryAt, message });
+    this.logger.info("browser.account_cooldown", { traceId, account: name, retryAt });
+    await this.refreshRoutingAccounts();
+    let alternateAvailable = false;
+    try { alternateAvailable = (this.resolveAccountForConversation(tab.conversationKey) || PRIMARY_ACCOUNT) !== name; }
+    catch (error) { if (!["chatgpt_account_cooldown", "account_unavailable"].includes(error.code)) throw error; }
+    this.publishState?.(this.snapshot());
+    return { alternateAvailable };
   }
 
   allocateTabOrdinal() {
@@ -1258,6 +1338,8 @@ class BrowserHost {
     const now = Date.now();
     if (!this.accountStatuses) this.accountStatuses = new Map();
     const existing = this.accountStatuses.get(accountName);
+    this.accountStatuses.set(accountName, { ...existing, routingAuthenticated: false,
+      routingAuthCheckedAt: 0, routingAuthRevision: (existing?.routingAuthRevision || 0) + 1 });
     if (existing && existing.authenticated === false && existing.cooldownUntil && existing.cooldownUntil > now) {
       return;
     }
@@ -1366,6 +1448,11 @@ class BrowserHost {
     if (tab.accountName) {
       this.recordAccountAuthFailure(tab.accountName);
     } else {
+      if (this.accountCooldowns) {
+        const previous = this.accountStatuses.get(PRIMARY_ACCOUNT);
+        this.accountStatuses.set(PRIMARY_ACCOUNT, { ...previous, routingAuthenticated: false,
+          routingAuthCheckedAt: 0, routingAuthRevision: (previous?.routingAuthRevision || 0) + 1 });
+      }
       this.reauthenticationRequired = true;
       this.authenticationRevision = (this.authenticationRevision ?? 0) + 1;
       this.setState({ authenticated: false, status: "signed-out", message: tab.message });
@@ -3029,6 +3116,10 @@ class BrowserHost {
       }
     }
     const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+    if (this.accountCooldowns && sameTrace?.status !== "running") {
+      await this.admitAccount(conversationKey, traceId, helperPid);
+      signal?.throwIfAborted();
+    }
     if (sameTrace && sameTrace.interactionMode !== "automatic") {
       throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
     }

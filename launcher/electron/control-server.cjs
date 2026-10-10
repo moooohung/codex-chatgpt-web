@@ -99,7 +99,9 @@ class BrowserControlServer {
       || request.url === "/v1/turn/heartbeat"
       || request.url === "/v1/turn/usage"
       || request.url === "/v1/turn/approval"
+      || request.url === "/v1/turn/cooldown"
       || request.url === "/v1/turn/end";
+    const isAccountAdmission = request.url === "/v1/account/admit";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
     const isProxyResolution = request.url === "/v1/network/resolve-proxy";
@@ -111,7 +113,7 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isAccountAdmission && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -136,6 +138,14 @@ class BrowserControlServer {
       const preferences = this.getPreferences();
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
+      if (isAccountAdmission) {
+        if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
+        if (body.conversationKey !== undefined && !/^[a-f0-9]{64}$/.test(body.conversationKey)) throw new Error("conversationKey is invalid");
+        if (body.traceId !== undefined && !/^[A-Za-z0-9_-]{6,128}$/.test(body.traceId)) throw new Error("traceId is invalid");
+        if (!Number.isInteger(body.helperPid) || body.helperPid < 1) throw new Error("browser helper pid is invalid");
+        writeJson(response, 200, await host.admitAccount(body.conversationKey, body.traceId, body.helperPid));
+        return;
+      }
       if (isSessionInspect) {
         if (host.browserInteractionMode() === "manual") {
           const error = new Error(
@@ -301,6 +311,12 @@ class BrowserControlServer {
         writeJson(response, 200, { ok: true });
         return;
       }
+      if (request.url === "/v1/turn/cooldown") {
+        if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
+        const result = await host.recordTurnCooldown(body.traceId, body.helperPid, body.retryAt, body.message);
+        writeJson(response, 200, { ok: true, ...result });
+        return;
+      }
       if (request.url === "/v1/turn/usage") {
         if (host.browserInteractionMode() === "manual") throw new Error("Limits tracking is disabled in Zero Risk mode");
         // The same owner check as a heartbeat prevents another helper from charging this tab.
@@ -367,9 +383,11 @@ class BrowserControlServer {
       const manualOwnerLost = error?.code === "manual_turn_owner_lost";
       const manualTimedOut = error?.code === "manual_turn_timed_out";
       const surfaceNotReady = error?.code === "browser_surface_not_ready";
+      const accountCooldown = error?.code === "chatgpt_account_cooldown";
+      if (accountCooldown) response.setHeader("retry-after", String(error.retryAfterSeconds));
       writeJson(
         response,
-        cancelled || retainedUnavailable || accountUnavailable || manualInspectionDisabled || manualOwnerLost
+        accountCooldown ? 429 : cancelled || retainedUnavailable || accountUnavailable || manualInspectionDisabled || manualOwnerLost
           ? 409
           : surfaceNotReady ? 503 : manualTimedOut ? 408 : 400,
         {
@@ -381,6 +399,7 @@ class BrowserControlServer {
         ...(manualOwnerLost ? { code: "manual_turn_owner_lost" } : {}),
         ...(manualTimedOut ? { code: "manual_turn_timed_out" } : {}),
         ...(surfaceNotReady ? { code: "browser_surface_not_ready" } : {}),
+        ...(accountCooldown ? { code: "chatgpt_account_cooldown", retryAt: error.retryAt, retry_after_seconds: error.retryAfterSeconds } : {}),
         },
       );
     }

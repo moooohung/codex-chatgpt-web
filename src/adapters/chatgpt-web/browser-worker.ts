@@ -71,6 +71,8 @@ import {
   readChatGptEffortSnapshot,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
+import { throwIfChatGptRateLimitNotice } from "./rate-limit-notice";
+import { parseRetryAtFromMessage } from "../../lib/errors";
 import {
   connectLauncherBrowserHost,
   LauncherBrowserTurnCancelledError,
@@ -792,9 +794,13 @@ const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dia
   .last();
 
 export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
+  await throwIfChatGptRateLimitNotice(page);
   const dialog = chatGptRateLimitDialog(page);
   if (!await dialog.isVisible().catch(() => false)) return;
 
+  const text = typeof dialog.innerText === "function" ? await dialog.innerText().catch(() => "") : "";
+  const retryAt = parseRetryAtFromMessage(text || "Too many requests");
+  const retry = { retryAt, retryAfterSeconds: Math.max(1, Math.ceil((retryAt - Date.now()) / 1000)) };
   const acknowledge = dialog.getByRole("button", { name: /^(Got it|知道了|了解|알겠습니다|확인)$/ }).last();
   if (await acknowledge.isVisible().catch(() => false)) {
     try {
@@ -802,7 +808,7 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
     } catch (error) {
       throw new ChatGptWebAdapterError(
         `ChatGPT rate limit: too many requests, and the dialog could not be dismissed (${error instanceof Error ? error.message : String(error)}). Try again in a few minutes.`,
-        { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false },
+        { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false, ...retry },
       );
     }
   }
@@ -810,7 +816,7 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   // replayable in the adapter so native reconnects cannot start more browser submissions.
   throw new ChatGptWebAdapterError(
     "ChatGPT rate limit: too many requests. Try again in a few minutes.",
-    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false },
+    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false, ...retry },
   );
 }
 
@@ -5311,6 +5317,18 @@ export class ChatGptBrowserWorker {
   }
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
+    if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
+    // Only an explicitly unsent prompt may move to another partition. A physical Send attempt,
+    // including an early multipart part, is never replayed across accounts here.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      let retryOnAlternate = false;
+      try { return await this.runLauncherTurn(turn, () => { retryOnAlternate = true; }); }
+      catch (error) { if (!retryOnAlternate || attempt === 7) throw error; }
+    }
+    throw new Error("ChatGPT account failover exhausted");
+  }
+
+  private async runLauncherTurn(turn: BrowserTurn, markUnsentCooldown: () => void): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
 
@@ -5343,6 +5361,8 @@ export class ChatGptBrowserWorker {
     let activityFinished = false;
     let lastHeartbeatFailureAt = 0;
     let activityStage: "preparing" | "sending" | "chatgpt" = "preparing";
+    let sendActivated = false;
+    let cooldownRecorded = false;
     const describeTerminal = (error: unknown): {
       status: "completed" | "failed" | "aborted"; message: string;
     } => ({
@@ -5358,6 +5378,15 @@ export class ChatGptBrowserWorker {
       // through the normal control API before diagnostics or transport cleanup can stall.
       // Accepted compaction is successful control flow and keeps its existing retention contract.
       if (error instanceof ChatGptCompactionHandoffAccepted) return;
+      if (!cooldownRecorded && error instanceof ChatGptWebAdapterError && error.status === 429
+        && error.code === "rate_limit_exceeded" && error.retryAt !== undefined) {
+        const acknowledged = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+          phase: "cooldown", traceId: turn.traceId, helperPid: process.pid,
+          retryAt: error.retryAt, message: error.message,
+        }, 15_000);
+        cooldownRecorded = true;
+        if (!sendActivated && !turn.requireRetainedConversation && acknowledged.alternateAvailable === true) markUnsentCooldown();
+      }
       if (!failedTabRelease) {
         ({ status: terminal, message: terminalMessage } = describeTerminal(error));
         activityFinished = true;
@@ -5420,6 +5449,7 @@ export class ChatGptBrowserWorker {
       return await this.runBrowserTurn({
         ...turn,
         onSendActivated: async () => {
+          sendActivated = true;
           activityStage = "sending";
           sendHeartbeat();
           await turn.onSendActivated?.();
@@ -5433,6 +5463,7 @@ export class ChatGptBrowserWorker {
     } catch (error) {
       originalError = error;
       ({ status: terminal, message: terminalMessage } = describeTerminal(error));
+      await releaseFailedTab(error);
       throw error;
     } finally {
       activityFinished = true;

@@ -32,8 +32,10 @@ function createAccountApi({ profile, getHost, getSupervisor, logger }) {
           await host?.auditAccountCookie(name);
         }
         const status = host?.accountStatuses?.get(name);
+        const cooldown = host?.accountCooldowns?.get(name);
         return { name, email: account.email || "", tunnelId: account.tunnelId || "",
-          cooling: Boolean(status?.cooldownUntil > Date.now()), authenticated: status?.authenticated === true,
+          cooling: Boolean(cooldown || status?.cooldownUntil > Date.now()), authenticated: status?.authenticated === true,
+          ...(cooldown ? { retryAt: cooldown.retryAt } : {}),
           enabled: account.enabled !== false, pendingRemoval: account.pendingRemoval === true,
           partition: paths.partition(name),
           activeTabs: [...(host?.turnTabs?.values() || [])].filter(tab => accountNameForTab(tab) === name).length };

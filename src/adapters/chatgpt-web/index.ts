@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import {
+  admitLauncherAccount,
   cancelLauncherManualTurn,
   endLauncherManualTurn,
   LauncherBrowserTurnCancelledError,
@@ -903,19 +904,28 @@ export function createChatGptWebAdapter(
   const preparedEnvironments = new PreparedChatGptTurnStore();
   return {
     name: "chatgpt-web",
-    prepareTurn(parsed) {
+    async prepareTurn(parsed, incoming) {
       const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
       if (manualRequest !== manualInteraction) return;
       const capabilities = parsed._compactionRequest && !manualRequest
         ? { ...configuredCapabilities, localToolsEnabled: false } : configuredCapabilities;
       const localTools = manualRequest || resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities).localTools;
-      if (!localTools) return;
-      try {
+      if (localTools) try {
         preparedEnvironments.prepare(parsed, environmentStore.resolve(parsed));
       } catch (error) {
         throw new ChatGptWebAdapterError(error instanceof Error ? error.message : String(error), {
           status: 400, errorType: "invalid_request_error", code: "trusted_environment_unavailable", retryable: false, cause: error,
         });
+      }
+      const existingExecution = chatGptTurnSessions.find(`${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`);
+      if (!manualRequest && retainedLauncherDescriptor && !existingExecution) {
+        let traceId: string | undefined;
+        try { traceId = chatGptWebTraceId(provider, parsed); } catch { /* Existing turn validation owns malformed identity. */ }
+        await admitLauncherAccount(retainedLauncherDescriptor, {
+          helperPid: process.pid,
+          ...(traceId ? { traceId } : {}),
+          conversationKey: freshConversationPerTurn ? undefined : chatGptConversationKey(parsed, executionNamespace),
+        }, incoming?.abortSignal);
       }
     },
     async runTurn(parsed, incoming, emit) {
@@ -1657,6 +1667,8 @@ export function createChatGptWebAdapter(
               errorType: handledError.errorType,
               code: handledError.code,
               retryable: handledError.retryable,
+              ...(handledError.retryAt !== undefined ? { retryAt: handledError.retryAt } : {}),
+              ...(handledError.retryAfterSeconds !== undefined ? { retryAfterSeconds: handledError.retryAfterSeconds } : {}),
             });
             session.completeRound(roundKey);
             return;

@@ -45,6 +45,8 @@ type HelperMessage =
       errorType?: string;
       code?: string;
       retryable?: boolean;
+      retryAt?: number;
+      retryAfterSeconds?: number;
     };
 
 function parseHelperMessage(line: string): HelperMessage {
@@ -154,10 +156,14 @@ function parseHelperMessage(line: string): HelperMessage {
     const errorType = message.errorType;
     const code = message.code;
     const retryable = message.retryable;
+    const retryAt = message.retryAt;
+    const retryAfterSeconds = message.retryAfterSeconds;
     const structured = status !== undefined
       || errorType !== undefined
       || code !== undefined
-      || retryable !== undefined;
+      || retryable !== undefined
+      || retryAt !== undefined
+      || retryAfterSeconds !== undefined;
     if (typeof errorMessage !== "string"
       || (errorName !== undefined && typeof errorName !== "string")
       || (structured && (
@@ -169,6 +175,8 @@ function parseHelperMessage(line: string): HelperMessage {
         || typeof code !== "string"
         || !code
         || typeof retryable !== "boolean"
+        || (retryAt !== undefined && (!Number.isSafeInteger(retryAt) || (retryAt as number) <= 0))
+        || (retryAfterSeconds !== undefined && (!Number.isSafeInteger(retryAfterSeconds) || (retryAfterSeconds as number) <= 0))
       ))) {
       throw new Error("Launcher browser helper error payload is invalid");
     }
@@ -182,6 +190,8 @@ function parseHelperMessage(line: string): HelperMessage {
         errorType: errorType as string,
         code: code as string,
         retryable: retryable as boolean,
+        ...(retryAt !== undefined ? { retryAt: retryAt as number } : {}),
+        ...(retryAfterSeconds !== undefined ? { retryAfterSeconds: retryAfterSeconds as number } : {}),
       } : {}),
     };
   }
@@ -585,6 +595,8 @@ export class LauncherBrowserHelperClient {
           errorType: message.errorType!,
           code: message.code!,
           retryable: message.retryable!,
+          retryAt: message.retryAt,
+          retryAfterSeconds: message.retryAfterSeconds,
         })
         : message.name === "AbortError"
           ? new DOMException(message.message, "AbortError")
