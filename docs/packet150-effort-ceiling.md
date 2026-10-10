@@ -23,7 +23,8 @@ A lower multipart staging request cannot erase a remembered higher request.
 An unlocked original position removes the ceiling immediately on the next picker
 observation. A ceiling never suppresses a picker read. A reused selection proof
 expires after ten minutes, and a clamped proof cannot satisfy the original higher
-request's reuse shortcut. Restarting the helper also discards selection proofs.
+request's reuse shortcut. Reuse also requires the same original request, so an
+explicit Medium request cannot inherit a previous High request and later upgrade. Restarting the helper also discards selection proofs.
 Idle accounts are observed when they next submit; no idle browser Send is created.
 
 The launcher logs `effort_clamped` and `effort_restored`, including account, family,
@@ -89,9 +90,9 @@ other historical artifacts. The installer is built from that staged app using
 `--config.nsis.runAfterFinish=false`. It is extracted for payload verification;
 it is not executed or installed by this worker.
 
-The final application is `output\packet150\package-delivery\win-unpacked`; its
-file-level comparisons are in `package-delivery\package-diff.json`. The complete
-installer is `output\packet150\installer-delivery\codex-web-gpt-6.1.7-win-x64.exe`.
+The final application is `output\packet150\package-release\win-unpacked`; its
+file-level comparisons are in `package-release\package-diff.json`. The complete
+installer is `output\packet150\installer-release\codex-web-gpt-6.1.7-win-x64.exe`.
 SHA-256 values and installer payload verification are recorded in the tower inbox
 result rather than inferred from a successful builder exit.
 
@@ -105,7 +106,7 @@ result rather than inferred from a successful builder exit.
    is stopped. Back up both `resources\app.asar` and the entire `resources\runtime`
    code directory. Preserve their baseline hashes and manifest together.
 3. Install the final installer, or replace the ASAR and runtime as a pair from
-   `package-delivery\win-unpacked\resources`. For a manual replacement, copy runtime
+   `package-release\win-unpacked\resources`. For a manual replacement, copy runtime
    to a new sibling directory, verify it, and rename only after the launcher exits.
    Do not mix a new bundle with the old manifest. No browser profile migration is
    required.

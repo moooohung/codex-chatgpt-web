@@ -37,7 +37,11 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("real picker clamps, restores
     const short = await select();
     expect(short).toMatchObject({ effort: "medium", uiEffortIndex: 1, modelFamily: "5.6", requestedMode: { effort: "high" } });
     await worker.assertSelectedEffort(page, short);
+    const explicitMedium = await select("medium");
+    expect(explicitMedium.requestedMode.effort).toBe("medium");
     await page.evaluate(() => { (window as any).available = [true, true, true]; });
+    await worker.assertSelectedEffort(page, explicitMedium);
+    expect(explicitMedium.effort).toBe("medium");
     const restored = await select();
     expect(restored.effort).toBe("high");
     const opens = await page.evaluate(() => (window as any).opens);

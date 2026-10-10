@@ -2745,6 +2745,7 @@ export class ChatGptBrowserWorker {
     const prior = this.verifiedEffortSelections?.get(page);
     if (this.config?.experimentalReuseVerifiedEffort !== false && modelFamily && prior
       && prior.mode.modelId === mode.modelId && prior.mode.effort === mode.effort
+      && (prior.mode.requestedMode?.effort ?? prior.mode.effort) === mode.effort
       && prior.mode.modelFamily === modelFamily && (!trackUsage || prior.mode.usageModel)
       && Date.now() >= prior.checkedAt && Date.now() - prior.checkedAt < EFFORT_RECHECK_MS) {
       const generation = await page.evaluate(() => performance.timeOrigin);
