@@ -30,6 +30,20 @@ const DEFAULT_STATE = Object.freeze({
   sessionRefreshReminderAt: null,
 });
 
+function sanitizeUnusualActivityDisabledAccounts(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result = {};
+  for (const [name, marker] of Object.entries(value)) {
+    if (!(name === "@primary" || /^[a-zA-Z0-9_-]+$/.test(name))) continue;
+    if (!marker || typeof marker !== "object" || Array.isArray(marker)
+      || !Number.isSafeInteger(marker.retryAt) || marker.retryAt < 0
+      || typeof marker.traceId !== "string" || marker.traceId.length === 0 || marker.traceId.length > 256
+      || typeof marker.reactivate !== "boolean") continue;
+    result[name] = { retryAt: marker.retryAt, traceId: marker.traceId, reactivate: marker.reactivate };
+  }
+  return result;
+}
+
 function nextSessionRefreshReminderAt(now = Date.now()) {
   if (!Number.isFinite(now)) throw new Error("Session refresh reminder time must be finite");
   return new Date(now + SESSION_REFRESH_REMINDER_INTERVAL_MS).toISOString();
@@ -41,6 +55,9 @@ function readState(filePath) {
     if (!parsed || parsed.version !== 1) return { ...DEFAULT_STATE };
     const state = { ...DEFAULT_STATE, ...parsed };
     if (state.effortCeilings !== undefined) state.effortCeilings = sanitizeEffortCeilings(state.effortCeilings);
+    if (state.unusualActivityDisabledAccounts !== undefined) {
+      state.unusualActivityDisabledAccounts = sanitizeUnusualActivityDisabledAccounts(state.unusualActivityDisabledAccounts);
+    }
     delete state.bridgeEnabled;
     if (state.language !== null && (typeof state.language !== "string" || !Object.hasOwn(languages, state.language))) {
       state.language = DEFAULT_STATE.language;

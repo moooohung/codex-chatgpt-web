@@ -4,23 +4,34 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { AccountCooldownStore, PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX } = require("../electron/account-cooldown-store.cjs");
+const { readAccountConfig, writeAccountConfig } = require("../electron/account-policy.cjs");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
+const { createStateStore } = require("../electron/state.cjs");
 
-function fixture(t, pool = ["alpha", "beta"]) {
+function fixture(t, pool = ["alpha", "beta"], timerApis = ["Date"]) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cooldown-routing-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  t.mock.timers.enable({ apis: timerApis, now: 1_000_000 });
+  const configPath = path.join(root, "accounts-config.json");
+  const configuredAccounts = Object.fromEntries(pool.filter(name => name !== PRIMARY_ACCOUNT)
+    .map(name => [name, { enabled: true }]));
+  if (Object.keys(configuredAccounts).length) writeAccountConfig(configPath, { accounts: configuredAccounts });
+  const statePath = path.join(root, "launcher-state.json");
+  const cooldownPath = path.join(root, "cooldowns.json");
+  const stateStore = createStateStore(statePath);
   const host = Object.assign(Object.create(BrowserHost.prototype), {
     accountPool: pool, accountConfigPresent: pool.length > 0, accountStatuses: new Map(pool.map(name => [name,
       { authenticated: true, routingAuthenticated: true, routingAuthCheckedAt: Date.now() }])),
-    accountCooldowns: new AccountCooldownStore(path.join(root, "cooldowns.json")),
+    accountPaths: { config: configPath, partition: name => `persist:fixture-${name}` },
+    stateStore,
+    accountCooldowns: new AccountCooldownStore(cooldownPath),
     stickyConversations: new Map([["a".repeat(64), "alpha"]]),
-    disabledAccounts: new Set(), pendingRemovalAccounts: new Set(), turnTabs: new Map(),
+    disabledAccounts: new Set(), unusualActivityDisabledAccounts: new Map(), pendingRemovalAccounts: new Set(), turnTabs: new Map(),
     logger: { info() {}, warn() {}, error() {} }, snapshot: () => ({}), saveStickyMap() {}, writeDescriptor() {},
     browserInteractionMode: () => "automatic",
   });
-  return { host, root };
+  return { host, root, configPath, statePath, cooldownPath };
 }
 
 test("only the observed account cools down; failover keeps original preference and expiry restores it", async t => {
@@ -44,6 +55,86 @@ test("only the observed account cools down; failover keeps original preference a
   await host.admitAccount(key, "trace-beta", 456);
   assert.equal(beta.accountName, "beta", "expiry must never move an in-flight turn");
   assert.equal(host.resolveAccountForConversation(key), "alpha");
+});
+
+test("unusual activity deactivates the observed account and new turns use the remaining active account", async t => {
+  const { host, configPath } = fixture(t);
+  const key = "a".repeat(64);
+  host.turnTabs.set("alpha-tab", { id: "alpha-tab", accountName: "alpha", traceId: "trace-unusual-alpha",
+    helperPid: 123, conversationKey: key, status: "running" });
+  const retryAt = Date.now() + 30 * 60_000;
+  assert.deepEqual(await host.recordTurnCooldown("trace-unusual-alpha", 123, retryAt,
+    `${UNUSUAL_ACTIVITY_MESSAGE_PREFIX}Our systems have detected unusual activity coming from your system. Please try again later. Try again in 30 minutes.`,
+    "chatgpt_unusual_activity"), { alternateAvailable: true });
+  assert.equal(readAccountConfig(configPath).accounts.alpha.enabled, false);
+  assert.equal(host.disabledAccounts.has("alpha"), true);
+  assert.deepEqual(host.stateStore.read().unusualActivityDisabledAccounts.alpha,
+    { retryAt, traceId: "trace-unusual-alpha", reactivate: true });
+  assert.equal(host.resolveAccountForConversation("b".repeat(64)), "beta");
+});
+
+test("unusual activity automatically reactivates the bridge-disabled account when the cooldown ends", async t => {
+  const { host, configPath } = fixture(t, ["alpha"], ["Date", "setTimeout"]);
+  const events = [];
+  host.logger = { info(event, details) { events.push({ event, details }); }, warn() {}, error() {} };
+  host.turnTabs.set("alpha-tab", { id: "alpha-tab", accountName: "alpha", traceId: "trace-auto-reactivate",
+    helperPid: 123, conversationKey: "c".repeat(64), status: "running" });
+  const retryAt = Date.now() + 1_000;
+  await host.recordTurnCooldown("trace-auto-reactivate", 123, retryAt,
+    `${UNUSUAL_ACTIVITY_MESSAGE_PREFIX}fixture Try again in 30 minutes.`, "chatgpt_unusual_activity");
+  assert.equal(readAccountConfig(configPath).accounts.alpha.enabled, false);
+  t.mock.timers.tick(1_000);
+  assert.equal(readAccountConfig(configPath).accounts.alpha.enabled, true);
+  assert.equal(host.disabledAccounts.has("alpha"), false);
+  assert.equal(host.stateStore.read().unusualActivityDisabledAccounts?.alpha, undefined);
+  assert.equal(host.accountCooldowns.get("alpha"), null);
+  assert.ok(events.some(entry => entry.event === "unusual_activity_cooldown_ended"
+    && entry.details.traceId === "trace-auto-reactivate" && entry.details.account === "alpha"));
+});
+
+test("unusual activity cooldown survives launcher restart and still rejects when no account is active", async t => {
+  const { host, configPath, statePath, cooldownPath } = fixture(t, ["alpha"]);
+  host.turnTabs.set("alpha-tab", { id: "alpha-tab", accountName: "alpha", traceId: "trace-restart",
+    helperPid: 123, conversationKey: "d".repeat(64), status: "running" });
+  const retryAt = Date.now() + 30 * 60_000;
+  await host.recordTurnCooldown("trace-restart", 123, retryAt,
+    `${UNUSUAL_ACTIVITY_MESSAGE_PREFIX}fixture Try again in 30 minutes.`, "chatgpt_unusual_activity");
+  for (const timer of host.unusualActivityCooldownTimers.values()) clearTimeout(timer);
+
+  const restarted = Object.assign(Object.create(BrowserHost.prototype), {
+    accountPool: ["alpha"], accountConfigPresent: true,
+    accountStatuses: new Map([["alpha", { authenticated: true, routingAuthenticated: true, routingAuthCheckedAt: Date.now() }]]),
+    accountPaths: { config: configPath, partition: name => `persist:fixture-${name}` },
+    stateStore: createStateStore(statePath), accountCooldowns: new AccountCooldownStore(cooldownPath),
+    stickyConversations: new Map(), disabledAccounts: new Set(["alpha"]), pendingRemovalAccounts: new Set(), turnTabs: new Map(),
+    unusualActivityCooldownTimers: new Map(), logger: { info() {}, warn() {}, error() {} },
+    snapshot: () => ({}), publishState() {}, saveStickyMap() {}, writeDescriptor() {}, browserInteractionMode: () => "automatic",
+  });
+  restarted.unusualActivityDisabledAccounts = restarted.loadUnusualActivityDisabledAccounts();
+  restarted.restoreUnusualActivityDisabledAccounts();
+  assert.deepEqual(restarted.unusualActivityDisabledAccounts.get("alpha"),
+    { retryAt, traceId: "trace-restart", reactivate: true });
+  assert.equal(readAccountConfig(configPath).accounts.alpha.enabled, false);
+  await assert.rejects(restarted.admitAccount("e".repeat(64), "new-trace", 999), error =>
+    error.code === "chatgpt_unusual_activity" && error.retryAt === retryAt && error.retryAfterSeconds === 30 * 60);
+  for (const timer of restarted.unusualActivityCooldownTimers.values()) clearTimeout(timer);
+});
+
+test("a manually disabled account is never reactivated by unusual activity expiry", async t => {
+  const { host, configPath } = fixture(t, ["alpha"], ["Date", "setTimeout"]);
+  const data = readAccountConfig(configPath);
+  data.accounts.alpha.enabled = false;
+  writeAccountConfig(configPath, data);
+  host.disabledAccounts.add("alpha");
+  host.turnTabs.set("alpha-tab", { id: "alpha-tab", accountName: "alpha", traceId: "trace-manual-disable",
+    helperPid: 123, conversationKey: "f".repeat(64), status: "running" });
+  const retryAt = Date.now() + 1_000;
+  await host.recordTurnCooldown("trace-manual-disable", 123, retryAt,
+    `${UNUSUAL_ACTIVITY_MESSAGE_PREFIX}fixture Try again in 30 minutes.`, "chatgpt_unusual_activity");
+  assert.equal(host.stateStore.read().unusualActivityDisabledAccounts.alpha.reactivate, false);
+  t.mock.timers.tick(1_000);
+  assert.equal(readAccountConfig(configPath).accounts.alpha.enabled, false);
+  assert.equal(host.disabledAccounts.has("alpha"), true);
 });
 
 test("no alternate rejects every new request without probing a cooling account or creating a tab", async t => {
@@ -85,11 +176,15 @@ test("unusual activity logs detection and cooldown end with the originating trac
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 2_000_000 });
   const events = [];
+  const configPath = path.join(root, "accounts-config.json");
+  writeAccountConfig(configPath, { accounts: { alpha: { enabled: true } } });
   const host = Object.assign(Object.create(BrowserHost.prototype), {
     accountPool: ["alpha"], accountConfigPresent: true,
     accountStatuses: new Map([["alpha", { authenticated: true, routingAuthenticated: true, routingAuthCheckedAt: Date.now() }]]),
+    accountPaths: { config: configPath, partition: name => `persist:fixture-${name}` },
+    stateStore: createStateStore(path.join(root, "launcher-state.json")),
     accountCooldowns: new AccountCooldownStore(path.join(root, "cooldowns.json")),
-    stickyConversations: new Map(), disabledAccounts: new Set(), pendingRemovalAccounts: new Set(),
+    stickyConversations: new Map(), disabledAccounts: new Set(), unusualActivityDisabledAccounts: new Map(), pendingRemovalAccounts: new Set(),
     turnTabs: new Map([["tab", { id: "tab", accountName: "alpha", traceId: "trace-log", helperPid: 77,
       conversationKey: "b".repeat(64), status: "running" }]]),
     logger: {

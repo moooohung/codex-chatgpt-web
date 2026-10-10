@@ -67,6 +67,34 @@ test.each([false, true])("account fallback only replays a prompt that never acti
   } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("unusual activity never resubmits the blocked turn on another account", async () => {
+  const root = mkdtempSync(join(tmpdir(), "unusual-activity-no-replay-"));
+  const phases: string[] = [];
+  const error = new ChatGptWebAdapterError(
+    "ChatGPT unusual activity detected: Our systems have detected unusual activity coming from your system. Please try again later. Try again in 30 minutes.",
+    { status: 429, errorType: "rate_limit_error", code: "chatgpt_unusual_activity", retryable: false,
+      retryAt: Date.now() + 30 * 60_000, retryAfterSeconds: 30 * 60 },
+  );
+  let calls = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const body = await request.json() as { phase: string };
+    phases.push(body.phase);
+    return Response.json(body.phase === "start" ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      : body.phase === "cooldown" ? { ok: true, alternateAvailable: true } : { cancelledByUser: false });
+  } });
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { browserHost: "launcher", browserHostDescriptorPath: descriptor(root, `http://127.0.0.1:${server.port}`) },
+    async runBrowserTurn() { calls++; throw error; },
+  });
+  try {
+    await expect(worker.runExclusive({ traceId: "unusual-no-replay", capabilities: { localToolsEnabled: false } })).rejects.toBe(error);
+    expect(calls).toBe(1);
+    expect(phases.filter(phase => phase === "start")).toHaveLength(1);
+    expect(phases).toContain("cooldown");
+    expect(phases).toContain("end");
+  } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("streamed and collected account errors retain retry metadata", () => {
   const retryAt = Date.now() + 60_000;
   const response = buildResponseJSON([{ type: "error", status: 429, errorType: "rate_limit_error",

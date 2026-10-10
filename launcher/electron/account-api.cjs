@@ -74,7 +74,9 @@ function createAccountApi({ profile, getHost, getSupervisor, logger }) {
       const enabled = input?.enabled === true;
       data.accounts[name].enabled = enabled;
       writeAccountConfig(paths.config, data);
-      getHost().setAccountEnabled(name, enabled);
+      const host = getHost();
+      host.recordManualAccountEnabledChange?.(name);
+      host.setAccountEnabled(name, enabled);
       return { ok: true, name, enabled };
     },
   };

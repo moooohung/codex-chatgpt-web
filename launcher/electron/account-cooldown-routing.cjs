@@ -2,7 +2,7 @@ const { accountNameForTab, accountUnavailable } = require("./account-policy.cjs"
 const { PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX } = require("./account-cooldown-store.cjs");
 
 function resolveCooldownRoute({ pool, statuses = new Map(), disabled = new Set(), pending = new Set(),
-  preferred, cooldowns, tabs = [], roundRobin = 0, now = Date.now() }) {
+  unusualActivityDisabled = new Set(), preferred, cooldowns, tabs = [], roundRobin = 0, now = Date.now() }) {
   const eligible = pool.filter(name => !disabled.has(name) && !pending.has(name)
     && !statuses.get(name)?.securityCheckRequired);
   const available = eligible.filter(name => {
@@ -21,7 +21,13 @@ function resolveCooldownRoute({ pool, statuses = new Map(), disabled = new Set()
     const candidates = available.filter(name => counts.get(name) === minimum);
     return candidates[roundRobin % candidates.length];
   }
-  const waiting = eligible.filter(name => statuses.get(name)?.authenticated !== false)
+  const waitingEligible = pool.filter(name => {
+    if (pending.has(name) || statuses.get(name)?.securityCheckRequired) return false;
+    const cooldown = cooldowns.get(name);
+    const unusualActivity = cooldown?.message?.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX) === true;
+    return !disabled.has(name) || unusualActivityDisabled.has(name) || unusualActivity;
+  });
+  const waiting = waitingEligible.filter(name => statuses.get(name)?.authenticated !== false)
     .map(name => ({ name, cooldown: cooldowns.get(name) })).filter(item => item.cooldown);
   if (waiting.length) {
     waiting.sort((a, b) => a.cooldown.retryAt - b.cooldown.retryAt);

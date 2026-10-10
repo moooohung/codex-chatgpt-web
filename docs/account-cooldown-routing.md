@@ -29,9 +29,15 @@ The Launcher persists each observed account's absolute `retryAt` and notice in
 files and browser cookies are never copied or replaced. The store survives a
 Launcher restart and preserves malformed files instead of silently repairing them.
 Unusual-activity cooldowns reuse this version-1 schema, so rollback to 6.1.7 can
-still read the state file. While active, the launcher shows a short Korean notice
-with the remaining minutes and logs `unusual_activity_detected` and
-`unusual_activity_cooldown_ended` with the originating trace id.
+still read the state file. In addition, unusual activity temporarily disables the
+affected account through the existing account enable/disable path. The Launcher
+stores the bridge-owned disable, expiry, originating trace id, and whether it may
+auto-reactivate in `launcher-state.json`; this prevents a manually disabled account
+from being enabled later. On expiry the bridge-owned account is automatically
+enabled again, including after a Launcher restart. While active, the launcher shows
+the account as disabled plus a short Korean notice with the remaining minutes and
+logs `unusual_activity_detected` and `unusual_activity_cooldown_ended` with the
+originating trace id and account label.
 
 New requests are admitted before starting an SSE stream or allocating a browser
 tab. A cooling account is not probed. If no other enabled account has a verified
@@ -48,10 +54,11 @@ account if it is still eligible; an already running turn keeps its current accou
 Ordinary cookie-presence checks cannot clear a usage cooldown or establish routing
 proof. Recent authentication failures invalidate cached and in-flight proof.
 
-A notice discovered during preparation can fail over automatically only before any
-physical Send activation. Once Send has been activated, including for a multipart
-part, the bridge records the cooldown and returns the error without replaying the
-request on another account. Existing execution reconnects bypass new-request
+An ordinary usage-limit notice discovered during preparation can fail over
+automatically only before any physical Send activation. An unusual-activity block
+always fails the current physical turn without replaying it on another account,
+even if an alternate is available. New turns from other sessions continue through
+the remaining enabled accounts. Existing execution reconnects bypass new-request
 admission and retain their execution ownership and tool acknowledgement contract.
 
 Verification uses sanitized DOM fixtures, controlled clocks, local control HTTP

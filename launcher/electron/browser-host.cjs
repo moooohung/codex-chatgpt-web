@@ -6,7 +6,13 @@ const { app, clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { injectDomStealth, applyStealthHeaders } = require("./stealth.cjs");
-const { accountNameForTab, accountPaths, readAccountConfig, selectAccount } = require("./account-policy.cjs");
+const {
+  accountNameForTab,
+  accountPaths,
+  readAccountConfig,
+  selectAccount,
+  writeAccountConfig,
+} = require("./account-policy.cjs");
 const { AccountCooldownStore, PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX } = require("./account-cooldown-store.cjs");
 const { resolveCooldownRoute } = require("./account-cooldown-routing.cjs");
 const { bindAccountBackendRecovery } = require("./account-backend-recovery.cjs");
@@ -401,6 +407,7 @@ class BrowserHost {
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
     getUseSavedChats = () => false,
+    stateStore,
     memoryPolicy = resolveBrowserMemoryPolicy(),
     getAppMetrics = () => app?.getAppMetrics?.() ?? [],
   }) {
@@ -439,6 +446,7 @@ class BrowserHost {
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.getUseSavedChats = getUseSavedChats;
+    this.stateStore = stateStore;
     this.memoryPolicy = memoryPolicy;
     this.getAppMetrics = getAppMetrics;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
@@ -455,6 +463,7 @@ class BrowserHost {
     this.selectedTabId = "home";
     this.accountPool = this.loadAccountPool();
     this.disabledAccounts = this.loadDisabledAccounts();
+    this.unusualActivityDisabledAccounts = this.loadUnusualActivityDisabledAccounts();
     this.accountRoundRobinIndex = 0;
     this.stickyConversations = this.loadStickyMap();
     this.accountStatuses = new Map();
@@ -524,6 +533,7 @@ class BrowserHost {
     this.bindChatGptBackendRecovery();
     this.bindAuthenticationChanges();
     this.bindWebContents();
+    this.restoreUnusualActivityDisabledAccounts();
     this.initializationReady = this.initializePrimaryView().catch((error) => {
       this.logger.error("browser.initialization_failed", {
         message: error instanceof Error ? error.message : String(error),
@@ -660,6 +670,98 @@ class BrowserHost {
       .filter(([, account]) => account.enabled === false).map(([name]) => name));
   }
 
+  loadUnusualActivityDisabledAccounts() {
+    const raw = this.stateStore?.read?.().unusualActivityDisabledAccounts;
+    return new Map(raw && typeof raw === "object" && !Array.isArray(raw) ? Object.entries(raw) : []);
+  }
+
+  persistUnusualActivityDisableState() {
+    this.stateStore?.update?.({ unusualActivityDisabledAccounts: Object.fromEntries(this.unusualActivityDisabledAccounts || []) });
+  }
+
+  persistUnusualActivityDisable(name, retryAt, traceId) {
+    const temporary = this.unusualActivityDisabledAccounts || new Map();
+    const existing = temporary.get(name);
+    let reactivate = existing?.reactivate;
+    if (reactivate === undefined) {
+      if (name === PRIMARY_ACCOUNT) reactivate = !this.disabledAccounts?.has(name);
+      else {
+        const data = readAccountConfig(this.accountPaths.config);
+        const account = data.accounts[name];
+        if (!account) throw new Error(`Account ${name} does not exist`);
+        reactivate = account.enabled !== false;
+      }
+    }
+    temporary.set(name, { retryAt, traceId, reactivate });
+    this.unusualActivityDisabledAccounts = temporary;
+    if (reactivate && name !== PRIMARY_ACCOUNT) {
+      const data = readAccountConfig(this.accountPaths.config);
+      const account = data.accounts[name];
+      if (!account) throw new Error(`Account ${name} does not exist`);
+      account.enabled = false;
+      writeAccountConfig(this.accountPaths.config, data);
+    }
+    this.persistUnusualActivityDisableState();
+    if (reactivate) this.setAccountEnabled(name, false);
+    return temporary.get(name);
+  }
+
+  recordManualAccountEnabledChange(name) {
+    const marker = this.unusualActivityDisabledAccounts?.get(name);
+    if (!marker || marker.reactivate === false) return;
+    this.unusualActivityDisabledAccounts.set(name, { ...marker, reactivate: false });
+    this.persistUnusualActivityDisableState();
+  }
+
+  clearUnusualActivityDisable(name, { log = true } = {}) {
+    const temporary = this.unusualActivityDisabledAccounts || new Map();
+    const marker = temporary.get(name);
+    if (!marker) return false;
+    if (marker.reactivate && name !== PRIMARY_ACCOUNT) {
+      const data = readAccountConfig(this.accountPaths.config);
+      if (data.accounts[name]) {
+        data.accounts[name].enabled = true;
+        writeAccountConfig(this.accountPaths.config, data);
+      }
+    }
+    temporary.delete(name);
+    this.unusualActivityDisabledAccounts = temporary;
+    this.persistUnusualActivityDisableState();
+    this.accountCooldowns.clear(name);
+    if (marker.reactivate) this.setAccountEnabled(name, true);
+    if (log) this.logger.info("unusual_activity_cooldown_ended", {
+      traceId: marker.traceId,
+      account: name,
+      retryAt: marker.retryAt,
+    });
+    return true;
+  }
+
+  restoreUnusualActivityDisabledAccounts() {
+    if (!this.unusualActivityDisabledAccounts?.size) return;
+    for (const [name, marker] of [...this.unusualActivityDisabledAccounts]) {
+      const cooldown = this.accountCooldowns.peek(name);
+      if (!cooldown || !cooldown.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)
+        || cooldown.retryAt <= Date.now() || marker.retryAt <= Date.now()) {
+        this.clearUnusualActivityDisable(name);
+        continue;
+      }
+      const retryAt = Math.max(marker.retryAt, cooldown.retryAt);
+      if (retryAt !== marker.retryAt) this.persistUnusualActivityDisable(name, retryAt, marker.traceId);
+      else if (marker.reactivate) {
+        if (name !== PRIMARY_ACCOUNT) {
+          const data = readAccountConfig(this.accountPaths.config);
+          if (data.accounts[name] && data.accounts[name].enabled !== false) {
+            data.accounts[name].enabled = false;
+            writeAccountConfig(this.accountPaths.config, data);
+          }
+        }
+        this.setAccountEnabled(name, false);
+      }
+      this.scheduleUnusualActivityCooldownEnd(name, retryAt, marker.traceId);
+    }
+  }
+
   loadStickyMap() {
     const stickyPath = this.accountPaths.sticky;
     if (!fs.existsSync(stickyPath)) return new Map();
@@ -684,6 +786,7 @@ class BrowserHost {
       && this.routingAccountPool().some(name => this.accountCooldowns.get(name))) {
       const account = resolveCooldownRoute({ pool: this.routingAccountPool(), statuses: this.accountStatuses,
         disabled: this.disabledAccounts, pending: this.pendingRemovalAccounts,
+        unusualActivityDisabled: new Set(this.unusualActivityDisabledAccounts?.keys?.() || []),
         preferred: this.stickyConversations?.get(conversationKey), cooldowns: this.accountCooldowns,
         tabs: [...(this.turnTabs?.values() || [])], roundRobin: this.accountRoundRobinIndex || 0 });
       return account === PRIMARY_ACCOUNT ? null : account;
@@ -764,13 +867,15 @@ class BrowserHost {
     const delay = Math.max(1, Math.min(2_147_483_647, retryAt - Date.now()));
     const timer = setTimeout(() => {
       this.unusualActivityCooldownTimers.delete(name);
+      const marker = this.unusualActivityDisabledAccounts?.get(name);
+      if (!marker) return;
       const entry = this.accountCooldowns.peek(name);
-      if (!entry || !entry.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)) return;
-      if (entry.retryAt > Date.now()) {
-        this.scheduleUnusualActivityCooldownEnd(name, entry.retryAt, traceId);
+      const pendingUntil = Math.max(marker.retryAt, entry?.retryAt || 0);
+      if (entry?.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX) && pendingUntil > Date.now()) {
+        this.scheduleUnusualActivityCooldownEnd(name, pendingUntil, marker.traceId || traceId);
         return;
       }
-      this.logger.info("unusual_activity_cooldown_ended", { traceId, account: name, retryAt: entry.retryAt });
+      this.clearUnusualActivityDisable(name);
       this.publishState?.(this.snapshot());
     }, delay);
     timer.unref?.();
@@ -785,6 +890,7 @@ class BrowserHost {
     const recorded = this.accountCooldowns.record(name, { retryAt, message });
     this.logger.info("browser.account_cooldown", { traceId, account: name, retryAt });
     if (code === "chatgpt_unusual_activity" || recorded.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)) {
+      this.persistUnusualActivityDisable(name, recorded.retryAt, traceId);
       this.logger.warn("unusual_activity_detected", { traceId, account: name, retryAt: recorded.retryAt });
       this.scheduleUnusualActivityCooldownEnd(name, recorded.retryAt, traceId);
     }

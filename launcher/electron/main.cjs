@@ -1265,6 +1265,7 @@ async function start() {
     profile: LAUNCHER_PROFILE.kind,
     coreHome: CORE_HOME,
     userData: LAUNCHER_PROFILE.userData,
+    stateStore,
     publishState: (state) => send("launcher:browser-state", state),
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,

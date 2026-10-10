@@ -5431,7 +5431,8 @@ export class ChatGptBrowserWorker {
           retryAt: error.retryAt, message: error.message, code: error.code,
         }, 15_000);
         cooldownRecorded = true;
-        if (!sendActivated && !turn.requireRetainedConversation && acknowledged.alternateAvailable === true) markUnsentCooldown();
+        if (error.code === "rate_limit_exceeded" && !sendActivated && !turn.requireRetainedConversation
+          && acknowledged.alternateAvailable === true) markUnsentCooldown();
       }
       if (!failedTabRelease) {
         ({ status: terminal, message: terminalMessage } = describeTerminal(error));
