@@ -386,6 +386,15 @@ export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
   | {
+      phase: "effort";
+      traceId: string;
+      helperPid: number;
+      family: "5.6" | "6";
+      requestedPosition: number;
+      actualPosition: number;
+      available: boolean[];
+    }
+  | {
       phase: "cooldown";
       traceId: string;
       helperPid: number;

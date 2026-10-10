@@ -17,6 +17,7 @@ import { Icon, type IconName } from "./icons";
 import { AccountsSurface } from "./AccountsSurface";
 import { LimitsSurface } from "./LimitsSurface";
 import { limitsCopyFor } from "./limits-copy";
+import { effortCeilingNotice } from "./effort-notice";
 import { useLimits } from "./useLimits";
 import { describeTurnActivity } from "./turn-activity";
 import { isIdleBrowserSurface } from "./browser-surface";
@@ -689,6 +690,13 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        {(snapshot.state.effortCeilings ?? []).map(ceiling => (
+          <div className="tool-approval-notice" key={`effort-${ceiling.account}-${ceiling.family}`} role="status">
+            <Icon name="alert" />
+            <div><strong>{effortCeilingNotice(ceiling, language)}</strong>
+              <p>{ceiling.account} · GPT-{ceiling.family}</p></div>
+          </div>
+        ))}
         {approvalTabs.map(tab => (
           <div className="tool-approval-notice" key={tab.id} role="status">
             <Icon name="alert" />

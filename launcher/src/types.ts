@@ -26,6 +26,8 @@ export interface AccountAddInput {
 }
 
 export interface LauncherState {
+  effortCeilings?: Array<{ account: string; family: "5.6" | "6"; requestedPosition: number;
+    actualPosition: number; observedAt: number; lastCheckedAt: number }>;
   version: 1;
   language: Language | null;
   onboardingComplete: boolean;

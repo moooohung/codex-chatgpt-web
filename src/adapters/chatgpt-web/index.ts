@@ -46,6 +46,7 @@ import {
 import { ChatGptExternalTurnProgress } from "./turn-progress";
 import { logChatGptToolBoundary, waitForChatGptToolBoundaryAck } from "./tool-boundary";
 import { ChatGptResponseProgressTracker } from "./response-progress";
+import { chatGptEffortMetadata } from "./effort-ceiling";
 import {
   canonicalizeCompactionHandoff,
   cancelStructuredCompactionNativeTurn,
@@ -535,7 +536,9 @@ export function createChatGptWebAdapter(
     const progressTracker = manualRequest ? undefined : new ChatGptResponseProgressTracker(provider.chatgptWeb?.stallTimeoutSec);
     const trace = new ChatGptTraceFeed(() => progressTracker?.emittedContent());
     const text = new ChatGptTextFeed(() => progressTracker?.emittedContent());
+    const responseMetadata: Record<string, string> = {};
     const guardProgress = <T extends ChatGptTurnRuntime>(runtime: T): T => {
+      runtime.responseMetadata = responseMetadata;
       if (!progressTracker) return runtime;
       const timer = setInterval(() => {
         const failure = progressTracker.check(runtime.mode === "tools" ? runtime.externalProgress.snapshot() : undefined);
@@ -787,6 +790,7 @@ export function createChatGptWebAdapter(
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
+        onEffortSelected: selection => Object.assign(responseMetadata, chatGptEffortMetadata(selection)),
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
@@ -859,6 +863,7 @@ export function createChatGptWebAdapter(
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
+      onEffortSelected: selection => Object.assign(responseMetadata, chatGptEffortMetadata(selection)),
       externalProgress,
       completionFence: {
         begin: async () => broker.beginCompletionFence(await token.promise),
@@ -1345,7 +1350,13 @@ export function createChatGptWebAdapter(
         );
         const roundKey = chatGptTurnRoundKey(parsed);
         let roundStage = "event_replay";
+        let lastMetadata = "";
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
+          const metadata = session.runtime.responseMetadata;
+          if (metadata && Object.keys(metadata).length && JSON.stringify(metadata) !== lastMetadata) {
+            lastMetadata = JSON.stringify(metadata);
+            events = [{ type: "response_metadata", metadata: { ...metadata } }, ...events];
+          }
           // Journal the complete synchronous event batch before touching the HTTP observer. If the
           // observer disconnects midway through emission, an exact reconnect can replay the entire
           // canonical batch instead of losing the already-drained tail.

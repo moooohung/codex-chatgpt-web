@@ -1,6 +1,9 @@
 const { createServer } = require("node:http");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
+const { observeEffortCeiling } = require("./effort-ceiling.cjs");
+const { accountNameForTab } = require("./account-policy.cjs");
+const { PRIMARY_ACCOUNT } = require("./account-cooldown-store.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_MANUAL_START_BODY_BYTES = 3 * 1024 * 1024;
@@ -38,12 +41,14 @@ function writeJson(response, status, body) {
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits, stateStore, publishState }) {
     this.logger = logger;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
     this.resolveProxy = resolveProxy;
     this.limits = limits;
+    this.stateStore = stateStore;
+    this.publishState = publishState;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
     this.server = createServer((request, response) => {
@@ -100,6 +105,7 @@ class BrowserControlServer {
       || request.url === "/v1/turn/usage"
       || request.url === "/v1/turn/approval"
       || request.url === "/v1/turn/cooldown"
+      || request.url === "/v1/turn/effort"
       || request.url === "/v1/turn/end";
     const isAccountAdmission = request.url === "/v1/account/admit";
     const isTurnRelease = request.url === "/v1/turn/release";
@@ -309,6 +315,17 @@ class BrowserControlServer {
         host.setTurnApprovalPending(body.traceId, body.helperPid, body.pending);
         this.logger.info("browser.tool_approval", { traceId: body.traceId, pending: body.pending });
         writeJson(response, 200, { ok: true });
+        return;
+      }
+      if (request.url === "/v1/turn/effort") {
+        if (host.browserInteractionMode() === "manual") throw new Error("Automatic effort selection is disabled in Zero Risk mode");
+        const tab = [...host.turnTabs.values()].find(v => v.traceId === body.traceId
+          && v.helperPid === body.helperPid && v.status === "running");
+        if (!tab || !this.stateStore) throw new Error("Effort observation requires the exact active browser turn owner");
+        const result = observeEffortCeiling(this.stateStore, accountNameForTab(tab) || PRIMARY_ACCOUNT, body);
+        if (result.event) this.logger.info(result.event.event, result.event);
+        this.publishState?.(this.stateStore.read());
+        writeJson(response, 200, { ok: true, ceiling: result.ceiling });
         return;
       }
       if (request.url === "/v1/turn/cooldown") {

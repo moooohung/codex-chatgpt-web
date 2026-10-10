@@ -1208,6 +1208,8 @@ async function start() {
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config),
+    stateStore,
+    publishState: state => send("launcher:state-changed", state),
     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
     limits: limitsController,
   }).start();

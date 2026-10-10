@@ -103,7 +103,8 @@ import {
 } from "./page-observation-budget";
 import { ChatGptDeliveryRecovery, chatGptMessageDeliveryTimeoutVisible } from "./delivery-recovery";
 import { createChatGptSubmissionAudit, recoverChatGptSubmission } from "./submission-recovery";
-import { CHATGPT_MODEL_SELECTION_SETTLE_MS, assertChatGptModelFamily, chatGptModelSelectionStageError, chatGptSelectionFamily, readClosedChatGptEffortLabel, resolveChatGptPlusFallback, selectChatGptModelFamily } from "./model-selection";
+import { CHATGPT_MODEL_SELECTION_SETTLE_MS, assertChatGptModelFamily, chatGptModelSelectionStageError, chatGptSelectionFamily, readClosedChatGptEffortLabel, selectChatGptModelFamily } from "./model-selection";
+import { clampChatGptEffort, EFFORT_RECHECK_MS, type ChatGptEffortSelection } from "./effort-ceiling";
 import { ChatGptBrowserRunQueue, MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
   ChatGptCompactionHandoffAccepted,
@@ -986,7 +987,7 @@ type SelectedChatGptWebModelMode = ChatGptWebModelMode & {
   modelFamily?: "5.6" | "6";
   selection?: { url: string; label: string };
   usageModel?: ChatGptUsageModel;
-  accountFallback?: { capabilities: ChatGptWebCapabilities };
+  requestedMode?: ChatGptWebModelMode;
 };
 
 export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope): Promise<void> {
@@ -1419,6 +1420,8 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void | Promise<void>;
+  /** Actual picker evidence at the physical Send boundary, after any effort clamp. */
+  onEffortSelected?: (selection: ChatGptEffortSelection) => void;
   /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
   onMultipartStageAcknowledged?: (stageIndex: number) => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
@@ -2410,7 +2413,31 @@ export class ChatGptBrowserWorker {
 
   // UI evidence only, scoped to the physical Page and document. Never a turn capability or
   // account choice. Every actual Send still verifies the family, slider and availability.
-  private verifiedEffortSelections?: WeakMap<Page, { mode: SelectedChatGptWebModelMode; document: number }>;
+  private verifiedEffortSelections?: WeakMap<Page, { mode: SelectedChatGptWebModelMode; document: number; checkedAt: number }>;
+  private effortContexts?: WeakMap<Page, BrowserTurn>;
+
+  private async observeEffort(page: Page, mode: SelectedChatGptWebModelMode, available: boolean[]): Promise<void> {
+    const requested = mode.requestedMode ?? mode;
+    if (requested.uiEffortIndex === null || mode.uiEffortIndex === null || !mode.modelFamily) return;
+    const observation = { family: mode.modelFamily, requestedPosition: requested.uiEffortIndex + 1,
+      actualPosition: mode.uiEffortIndex + 1, available };
+    const turn = this.effortContexts?.get(page);
+    if (turn && this.config?.browserHost === "launcher") {
+      await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+        phase: "effort", traceId: turn.traceId, helperPid: process.pid, ...observation,
+      });
+    } else if (requested.uiEffortIndex !== mode.uiEffortIndex) {
+      console.info(`[chatgpt-web] effort_clamped ${JSON.stringify(observation)}`);
+    }
+  }
+
+  private reportSelectedEffort(page: Page, mode: SelectedChatGptWebModelMode): void {
+    const requested = mode.requestedMode ?? mode;
+    if (!mode.modelFamily || requested.uiEffortIndex === null || mode.uiEffortIndex === null) return;
+    this.effortContexts?.get(page)?.onEffortSelected?.({ family: mode.modelFamily,
+      requestedEffort: requested.effort, actualEffort: mode.effort,
+      requestedPosition: requested.uiEffortIndex + 1, actualPosition: mode.uiEffortIndex + 1 });
+  }
 
   /**
    * Lexical/contenteditable may preserve runs of ASCII spaces by exposing some of them as NBSP
@@ -2676,10 +2703,11 @@ export class ChatGptBrowserWorker {
     trackUsage = false,
     modelFamily?: "5.6" | "6",
   ): Promise<SelectedChatGptWebModelMode> {
-    const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
+    const requestedMode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
+    let mode = requestedMode;
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const uiEffortIndex = mode.uiEffortIndex;
+    let uiEffortIndex = mode.uiEffortIndex;
     if (uiEffortIndex === null) {
       await settleChatGptUi();
       await throwIfChatGptRateLimitDialog(page);
@@ -2717,7 +2745,8 @@ export class ChatGptBrowserWorker {
     const prior = this.verifiedEffortSelections?.get(page);
     if (this.config?.experimentalReuseVerifiedEffort !== false && modelFamily && prior
       && prior.mode.modelId === mode.modelId && prior.mode.effort === mode.effort
-      && prior.mode.modelFamily === modelFamily && (!trackUsage || prior.mode.usageModel)) {
+      && prior.mode.modelFamily === modelFamily && (!trackUsage || prior.mode.usageModel)
+      && Date.now() >= prior.checkedAt && Date.now() - prior.checkedAt < EFFORT_RECHECK_MS) {
       const generation = await page.evaluate(() => performance.timeOrigin);
       if (generation === prior.document) {
         try {
@@ -2779,20 +2808,24 @@ export class ChatGptBrowserWorker {
       waitAbort.abort();
     }
     const selectionUrl = page.url();
-    const readAvailableEffort = async (container: Locator, menu: Locator) => {
+    const readAvailableEffort = async (container: Locator, menu: Locator, choose = false) => {
       const state = await readChatGptEffortSnapshot(container)
         .catch(error => { throw chatGptModelControlUnavailableAdapterError(String(error), undefined, true); });
-      if (uiEffortIndex > state.max - state.min) {
+      if (choose) {
+        mode = clampChatGptEffort(requestedMode, state.available);
+        uiEffortIndex = mode.uiEffortIndex!;
+      }
+      if (uiEffortIndex! > state.max - state.min) {
         const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(menu) : undefined;
         throw new ChatGptWebAdapterError(
           `ChatGPT ${modelFamily ? `model ${modelFamily} ` : ""}${mode.displayLabel} is unavailable in the current browser account. `
-          + `Its picker exposes ${state.max - state.min + 1} effort positions; the requested position is ${uiEffortIndex + 1}. `
+          + `Its picker exposes ${state.max - state.min + 1} effort positions; the requested position is ${uiEffortIndex! + 1}. `
           + "This part was not sent. Check the signed-in account and refresh setup capabilities."
           + (detail ? ` ChatGPT: ${detail}` : ""),
           { status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable", retryable: false },
         );
       }
-      if (!state.available[uiEffortIndex]) {
+      if (!state.available[uiEffortIndex!]) {
         throw new ChatGptWebAdapterError(
           `ChatGPT locks the browser option requested for ${mode.displayLabel} behind an upgrade. `
           + "The message was not sent. Choose an available effort and run Repair Codex setup to refresh the model list.",
@@ -2801,9 +2834,9 @@ export class ChatGptBrowserWorker {
       }
       return state;
     };
-    let sliderState = await readAvailableEffort(sliderContainer, activation.menu);
+    let sliderState = await readAvailableEffort(sliderContainer, activation.menu, true);
     const initialMin = sliderState.min;
-    const targetValue = initialMin + uiEffortIndex;
+    const targetValue = initialMin + uiEffortIndex!;
     const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
     while (sliderState.value !== targetValue) {
       await throwIfChatGptRateLimitDialog(page);
@@ -2820,9 +2853,12 @@ export class ChatGptBrowserWorker {
         if (sliderState.value !== previousValue) break;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
       } while (Date.now() < changeDeadline);
-      if (sliderState.value !== previousValue + direction) {
+      // Some pickers skip locked ticks with one arrow; others move through them.
+      // Accept either only while moving toward (and never past) the verified target.
+      if ((sliderState.value - previousValue) * direction <= 0
+        || (targetValue - sliderState.value) * direction < 0) {
         throw chatGptModelControlUnavailableError(
-          `ChatGPT effort slider did not move exactly one step with ${key}`
+          `ChatGPT effort slider did not move toward its unlocked target with ${key}`
           + ` (before=${previousValue}; after=${sliderState.value})`,
         );
       }
@@ -2839,6 +2875,7 @@ export class ChatGptBrowserWorker {
     // closed label and reopen the menu once to prove the selection survived the commit.
     const selectedMode: SelectedChatGptWebModelMode = {
       ...mode,
+      requestedMode,
       ...(modelFamily ? { modelFamily } : {}),
       selection: { url: selectionUrl, label: await readClosedChatGptEffortLabel(currentEffort, modelFamily ?? "5.6") },
     };
@@ -2849,7 +2886,7 @@ export class ChatGptBrowserWorker {
     if (confirmedState.min !== initialMin || confirmedState.value !== targetValue) {
       throw chatGptModelControlUnavailableAdapterError("ChatGPT did not persist the requested effort after closing its menu");
     }
-    if (modelFamily) await assertChatGptModelFamily(confirmation, modelFamily, mode.effort, uiEffortIndex, CHATGPT_MODEL_SELECTION_SETTLE_MS);
+    if (modelFamily) await assertChatGptModelFamily(confirmation, modelFamily, mode.effort, uiEffortIndex!, CHATGPT_MODEL_SELECTION_SETTLE_MS);
     // A bare 'Pro' trigger does not identify the family selected by ChatGPT's Latest option.
     // Unknown evidence remains visible as unclassified Pro usage in Limits.
     if (trackUsage) {
@@ -2861,9 +2898,10 @@ export class ChatGptBrowserWorker {
     await readClosedChatGptEffortLabel(currentEffort, modelFamily ?? "5.6");
     await this.assertSelectedEffort(page, selectedMode, false);
     await captureDiagnostic?.("effort-selection-confirmed");
+    await this.observeEffort(page, selectedMode, confirmedState.available);
     this.verifiedEffortSelections ??= new WeakMap();
     this.verifiedEffortSelections.set(page, {
-      mode: selectedMode, document: await page.evaluate(() => performance.timeOrigin),
+      mode: selectedMode, document: await page.evaluate(() => performance.timeOrigin), checkedAt: Date.now(),
     });
     return selectedMode;
   }
@@ -2889,25 +2927,6 @@ export class ChatGptBrowserWorker {
         modelFamily,
       );
     } catch (error) {
-      if (error instanceof ChatGptWebAdapterError
-        && (error.code === "chatgpt_effort_unavailable" || error.code === "chatgpt_effort_locked")) {
-        const account = await readChatGptUsageAccount(page).catch(() => undefined);
-        const requested = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
-        const fallback = resolveChatGptPlusFallback(modelFamily, requested.effort, account?.planType ?? "");
-        if (fallback) {
-          const actualCapabilities = { ...capabilities, proAvailable: false, extraHighAvailable: false };
-          await page.keyboard.press("Escape");
-          this.verifiedEffortSelections?.delete(page);
-          const selected = await this.selectModelAndEffort(page, modelId, fallback.effort, actualCapabilities,
-            captureDiagnostic, trackUsage, fallback.family);
-          console.info(`[chatgpt-web] plus_effort_fallback ${JSON.stringify({
-            requestedFamily: modelFamily, requestedEffort: requested.effort,
-            effectiveFamily: fallback.family, effectiveEffort: fallback.effort,
-          })}`);
-          await captureDiagnostic?.("plus-effort-fallback-selected");
-          return { ...selected, accountFallback: { capabilities: actualCapabilities } };
-        }
-      }
       if ((error instanceof ChatGptWebAdapterError && !error.retryable)
         || (error instanceof Error && error.name === "AbortError")) throw error;
       const isUsageLimit = error instanceof ChatGptWebAdapterError
@@ -2970,12 +2989,22 @@ export class ChatGptBrowserWorker {
     }
     if (verifyFamily && mode.modelFamily && mode.uiEffortIndex !== null) {
       const menu = await activateChatGptEffortMenu(page, control);
+      let state;
       try {
-        const state = await readChatGptEffortSnapshot(menu.sliderContainer);
-        if (!state.available[mode.uiEffortIndex]) {
-          throw new ChatGptWebAdapterError("ChatGPT locked the requested effort before submission", {
-            status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_locked", retryable: false,
-          });
+        state = await readChatGptEffortSnapshot(menu.sliderContainer);
+        const requested = mode.requestedMode ?? mode;
+        const actual = clampChatGptEffort(requested, state.available);
+        if (actual.uiEffortIndex !== mode.uiEffortIndex) {
+          // Close the owned menu before reselecting. Mutate the caller's mode so
+          // usage, context limits and response metadata all follow the new proof.
+          await page.keyboard.press("Escape");
+          await readClosedChatGptEffortLabel(control, mode.modelFamily);
+          this.verifiedEffortSelections?.delete(page);
+          const selected = await this.selectModelAndEffort(page, requested.modelId, requested.effort,
+            { localToolsEnabled: requested.localTools, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+            undefined, Boolean(mode.usageModel), mode.modelFamily);
+          Object.assign(mode, selected);
+          return;
         }
         await assertChatGptModelFamily(menu, mode.modelFamily, mode.effort, mode.uiEffortIndex, CHATGPT_MODEL_SELECTION_SETTLE_MS);
       } finally {
@@ -2986,6 +3015,7 @@ export class ChatGptBrowserWorker {
         || await control.getAttribute("aria-expanded") !== "false" || !await composer.isEditable()) {
         throw chatGptModelControlUnavailableAdapterError("ChatGPT changed the model while checking its family before submission");
       }
+      await this.observeEffort(page, mode, state.available);
     }
   }
 
@@ -5615,25 +5645,15 @@ export class ChatGptBrowserWorker {
         );
       } };
       validateInput();
-      const applyAccountFallback = (selected: SelectedChatGptWebModelMode) => {
-        if (!selected.accountFallback) return;
-        browserCapabilities = selected.accountFallback.capabilities;
-        requestedMode = resolveChatGptWebModelMode(turn.modelId, selected.effort, browserCapabilities);
-        requestedFamily = selected.modelFamily;
-        try {
-          stagingMode = multipartStages ? resolveChatGptWebMultipartStagingMode(
-            turn.modelId, browserCapabilities, maxStageMessageTokens!, maxStageChars!,
-          ) : requestedMode;
-          stagingFamily = requestedFamily;
-          // A downgrade cannot inherit Pro's larger context/composer limits.
-          validateInput();
-        } catch (error) {
-          if (!(error instanceof ChatGptWebAdapterError) || error.code !== "context_length_exceeded") throw error;
-          throw new ChatGptWebAdapterError("Reprepare the unsent prompt for the confirmed Plus account at High effort", {
-            status: 409, errorType: "invalid_request_error",
-            code: requestedFamily === "6" ? "chatgpt_plus_reprepare_6_high" : "chatgpt_plus_reprepare_56_high", retryable: false,
-          });
-        }
+      const applyEffortClamp = (selected: SelectedChatGptWebModelMode) => {
+        // The original request remains intact so later parts can recover it. Validate
+        // the actual mode's limits before any physical Send (especially Instant).
+        if (!selected.requestedMode || selected.effort === selected.requestedMode.effort) return;
+        const original = requestedMode;
+        const originalStaging = stagingMode;
+        if (selected.requestedMode.effort === requestedMode.effort) requestedMode = selected;
+        if (selected.requestedMode.effort === stagingMode.effort) stagingMode = selected;
+        try { validateInput(); } finally { requestedMode = original; stagingMode = originalStaging; }
       };
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
@@ -5664,6 +5684,8 @@ export class ChatGptBrowserWorker {
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
+      this.effortContexts ??= new WeakMap();
+      this.effortContexts.set(page, turn);
       const rebindLauncherPage = async (
         attempt: number,
         cause: Error,
@@ -5718,6 +5740,7 @@ export class ChatGptBrowserWorker {
         turnConnection = connection.browser;
         inheritChatGptPageObservationBudget(page, connection.page);
         page = connection.page;
+        this.effortContexts!.set(page, turn);
         diagnosticPage = page;
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
@@ -5805,7 +5828,7 @@ export class ChatGptBrowserWorker {
             trackUsage, turn.modelFamily, reuseConversation,
           ),
         );
-        applyAccountFallback(preflight);
+        applyEffortClamp(preflight);
       }
       const selectStagingMode = () => (
         this.selectModelAndEffortWithRecovery(
@@ -5820,7 +5843,7 @@ export class ChatGptBrowserWorker {
         )
       );
       let mode = await this.runStage(turn.traceId, multipartStages ? "multipart_staging_effort_selection" : "effort_selection", browserStageTimeouts.effortSelection, selectStagingMode);
-      applyAccountFallback(mode);
+      applyEffortClamp(mode);
       await diagnostics.capture(page, "effort-selection-complete");
 
       // One receipt per physical Send, not per native tool call or stream attachment.
@@ -5896,6 +5919,8 @@ export class ChatGptBrowserWorker {
               undefined,
               { onSubmitted: recordStageUsage, onSendActivated: async () => {
                 await this.assertSelectedEffort(page, mode);
+                applyEffortClamp(mode);
+                this.reportSelectedEffort(page, mode);
                 submissionRejection.begin(page);
               } },
               undefined,
@@ -6071,6 +6096,8 @@ export class ChatGptBrowserWorker {
             return turn.onSubmitted?.();
           }, onSendActivated: async () => {
             await this.assertSelectedEffort(page, mode);
+            applyEffortClamp(mode);
+            this.reportSelectedEffort(page, mode);
             submissionRejection.begin(page);
             await turn.onSendActivated?.();
           } },
@@ -6277,7 +6304,10 @@ export class ChatGptBrowserWorker {
                 page, nextBaseline, checkpoint => diagnostics.capture(page, `${label}-${checkpoint}`),
                 continuationSignal ? AbortSignal.any([stageSignal, continuationSignal]) : stageSignal, turn.externalProgress,
                 { traceId: turn.traceId, onSendActivated: async () => {
-                  await this.assertSelectedEffort(page, mode); submissionRejection.begin(page); await turn.onSendActivated?.();
+                  await this.assertSelectedEffort(page, mode);
+                  applyEffortClamp(mode);
+                  this.reportSelectedEffort(page, mode);
+                  submissionRejection.begin(page); await turn.onSendActivated?.();
                   recoverySendActivated = true;
                 } },
                 completionTracker, launcherObservationRecovery ? async (...args) => {

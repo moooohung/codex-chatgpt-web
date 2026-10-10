@@ -84,7 +84,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the $
   } finally { await browser.close(); }
 }, 30_000);
 
-test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot hide a changed slider or newly locked option", async () => {
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot hide a changed slider", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
   try {
     const page = await browser.newPage();
@@ -104,14 +104,10 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot h
     let changed: any;
     try { await worker.assertSelectedEffort(page, reused); } catch (error) { changed = error; }
     expect(changed).toMatchObject({ code: "chatgpt_effort_verification_failed" });
-    await page.evaluate(() => { (window as any).selectedValue = 2; (window as any).locked = true; });
-    let locked: any;
-    try { await worker.assertSelectedEffort(page, reused); } catch (error) { locked = error; }
-    expect(locked).toMatchObject({ code: "chatgpt_effort_locked" });
-    await page.evaluate(() => { (window as any).locked = false; });
+    await page.evaluate(() => { (window as any).selectedValue = 2; });
     await page.locator('button').evaluate(el => { el.textContent = 'Instant'; });
     await worker.selectModelAndEffort(page, "gpt-5.6-sol", "high", caps, undefined, false, "5.6");
-    expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(6);
+    expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(5);
   } finally { await browser.close(); }
 }, 30_000);
 
