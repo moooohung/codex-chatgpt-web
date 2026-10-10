@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import type { Page } from "playwright-core";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { throwIfChatGptRateLimitNotice } from "../src/adapters/chatgpt-web/rate-limit-notice";
@@ -6,6 +6,9 @@ import { throwIfChatGptRateLimitNotice } from "../src/adapters/chatgpt-web/rate-
 // Only the provided sanitized notice, never the saved page or account/transcript data.
 const savedNotice = "We're doing a quick check to keep ChatGPT reliable. Try again after 8:27 PM.";
 const { createWindow } = require("@mixmark-io/domino") as { createWindow(html: string): { document: Document } };
+let noticeClock: ReturnType<typeof spyOn>;
+beforeEach(() => { noticeClock = spyOn(Date, "now").mockReturnValue(new Date(2026, 9, 10, 20, 0).getTime()); });
+afterEach(() => { noticeClock.mockRestore(); });
 
 function fixture(html: string) {
   const window = createWindow(html), document = window.document;
