@@ -1,20 +1,39 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { _electron } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import { activateChatGptEffortMenu } from "../src/chatgpt-session";
+
+async function removeOwnedProfile(directory: string) {
+  if (dirname(resolve(directory)) !== resolve(tmpdir()) || !basename(directory).startsWith("launcher-navigation-")) {
+    throw new Error(`Refusing to remove a profile outside this fixture: ${directory}`);
+  }
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    try { rmSync(directory, { recursive: true, force: true }); return; }
+    catch (error) {
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '') || Date.now() >= deadline) throw error;
+      await Bun.sleep(100);
+    }
+  }
+}
 
 test.skipIf(!process.env.LAUNCHER_TEST_ELECTRON)("navigated Electron task pages stay usable before delayed resources finish", async () => {
   const userData = mkdtempSync(join(tmpdir(), "launcher-navigation-"));
   const env = Object.fromEntries(Object.entries(process.env)
     .filter(([key, value]) => key !== "ELECTRON_RUN_AS_NODE" && value !== undefined)) as Record<string, string>;
-  const app = await _electron.launch({
-    executablePath: process.env.LAUNCHER_TEST_ELECTRON,
-    args: [resolve("launcher/tests/fixtures/navigation-viewport.cjs"), `--user-data-dir=${userData}`], env,
-  });
+  let app: Awaited<ReturnType<typeof _electron.launch>> | undefined;
+  let stderr = "";
   try {
+    app = await _electron.launch({
+      executablePath: process.env.LAUNCHER_TEST_ELECTRON,
+      args: [resolve(import.meta.dir, "../launcher/tests/fixtures/navigation-viewport.cjs"), `--user-data-dir=${userData}`], env,
+      timeout: 10_000,
+    });
+    app.process().stderr?.on("data", chunk => { stderr += chunk.toString(); });
+    app.context().setDefaultTimeout(5_000);
     const deadline = Date.now() + 5_000;
     while (!await app.evaluate(() => Boolean((globalThis as any).navigationFixture)) && Date.now() < deadline) {
       await Bun.sleep(20);
@@ -39,7 +58,12 @@ test.skipIf(!process.env.LAUNCHER_TEST_ELECTRON)("navigated Electron task pages 
           }, { zoom, shown, selected });
           await page.goto(`${url}?navigation=${++navigation}`, { waitUntil: "domcontentloaded" });
           const expectedSize = [Math.round(840 / zoom), Math.round(656 / zoom)];
-          expect(await page.evaluate(() => [innerWidth, innerHeight])).toEqual(expectedSize);
+          const expectViewport = async () => {
+            const actual = await page.evaluate(() => [innerWidth, innerHeight]);
+            // CSS pixel conversion can round a fractional device-emulated dimension down.
+            for (let axis = 0; axis < 2; axis++) expect(Math.abs(actual[axis]! - expectedSize[axis]!)).toBeLessThanOrEqual(1);
+          };
+          await expectViewport();
           expect(await page.evaluate(() => document.readyState)).toBe("interactive");
           expect(await (await worker.activeComposer(page, 1_000)).count()).toBe(1);
           const activation = await activateChatGptEffortMenu(page, page.getByRole("button", { name: "Models", exact: true }), { settleMs: 1_000 });
@@ -53,13 +77,18 @@ test.skipIf(!process.env.LAUNCHER_TEST_ELECTRON)("navigated Electron task pages 
           expect(await page.getByRole("menu").isVisible()).toBe(true);
           await app.evaluate(() => (globalThis as any).navigationFixture.release());
           await page.waitForLoadState("load");
-          expect(await page.evaluate(() => [innerWidth, innerHeight])).toEqual(expectedSize);
+          await expectViewport();
           expect(await page.getByRole("menu").isVisible()).toBe(true);
         }
       }
     }
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : error}\nElectron fixture stderr: ${stderr.slice(-2000)}`, { cause: error });
   } finally {
-    await app.close();
-    rmSync(userData, { recursive: true, force: true });
+    try {
+      if (app) await app.close();
+    } finally {
+      await removeOwnedProfile(userData);
+    }
   }
-}, 30_000);
+}, 45_000);

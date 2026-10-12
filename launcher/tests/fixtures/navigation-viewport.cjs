@@ -1,7 +1,20 @@
 // Delayed-resource navigation reproduction reported in issue #804 by @xianengqi.
 const { app, BrowserWindow, WebContentsView } = require("electron");
 const { createServer } = require("node:http");
+let shutdown = () => {};
+let failing = false;
+const fail = error => {
+  if (failing) return;
+  failing = true;
+  console.error("NAVIGATION_FIXTURE_ERROR " + (error?.stack || String(error)));
+  try { shutdown(); } catch (cleanupError) { console.error(cleanupError); }
+  app.exit(1);
+};
+// A fixture failure must reach the runner, never a modal Electron error dialog.
+process.on("uncaughtException", fail);
+process.on("unhandledRejection", fail);
 const { BrowserHost } = require("../../electron/browser-host.cjs");
+const watchdog = setTimeout(() => fail(Error("Synthetic navigation fixture exceeded its 30 second budget")), 30_000);
 
 app.whenReady().then(async () => {
   const pending = new Set();
@@ -18,7 +31,7 @@ app.whenReady().then(async () => {
         style="width:300px;height:80px">Synthetic prompt</div>
       <button type="button" aria-haspopup="menu" aria-controls="models" aria-expanded="false"
         style="position:fixed;right:40px;bottom:40px">Models</button></form>
-      <div id="models" role="menu" hidden>Model choices</div><img src="/delayed${request.url}">
+      <div id="models" role="menu" hidden>Model choices</div><img src="/delayed-fixture">
       <script>
         window.clicks=0;
         document.querySelector('button').onclick=()=>{
@@ -29,7 +42,7 @@ app.whenReady().then(async () => {
       </script>`);
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const window = new BrowserWindow({ width: 1120, height: 760, show: false });
+  const window = new BrowserWindow({ width: 1120, height: 760, x: 10000, y: 10000, show: false, skipTaskbar: true });
   await window.loadURL("about:blank");
   const view = new WebContentsView();
   window.contentView.addChildView(view);
@@ -61,9 +74,17 @@ app.whenReady().then(async () => {
       pending.clear();
     },
   };
-  app.on("before-quit", () => {
+  shutdown = () => {
+    clearTimeout(watchdog);
+    host.destroyed = true;
     global.navigationFixture.release();
     server.close();
     server.closeAllConnections();
-  });
-});
+    // WebContentsViews are not owned by BrowserWindow's renderer lifecycle.
+    // Explicitly close all fixture views so their profiles/stdio handles can be released.
+    for (const view of [host.view, ...[...host.turnTabs.values()].map(tab => tab.view)]) {
+      if (!view.webContents.isDestroyed()) view.webContents.close({ waitForBeforeUnload: false });
+    }
+  };
+  app.on("before-quit", shutdown);
+}).catch(fail);
