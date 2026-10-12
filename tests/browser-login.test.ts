@@ -42,7 +42,7 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
 });
 
 test("passkey login authenticates in normal Chrome before isolated offline pipe capture", async () => {
-  if (process.platform !== "darwin") return;
+  if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-passkey-login-"));
   const executable = join(root, "fake-chrome");
   const argsLog = join(root, "args.log");

@@ -431,7 +431,7 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
  * Unknown profiles/fields are deliberately not classified as permission-neutral updates.
  */
 export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): {
-  workspaceRoots?: string[];
+  workspaceRoots: string[][];
   nativeMessages?: ChatGptUnattributedEnvironmentMessage[];
   startClaim?: ChatGptEnvironmentClaim;
 } | undefined {
@@ -458,7 +458,7 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
     catch { return undefined; }
   }
   let deltas = 0;
-  let workspaceRoots: string[] | undefined;
+  const workspaceRoots: string[][] = [];
   const nativeMessages: ChatGptUnattributedEnvironmentMessage[] = [];
   for (let index = activeIndex + 1; index < input.length; index += 1) {
     const item = record(input[index]);
@@ -475,7 +475,7 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
       deltas += 1;
       continue;
     }
-    if (itemTurnId(item) !== turnId || !hasAssistantOutputBetween(input, activeIndex + 1, index)) return undefined;
+    if (itemTurnId(item) !== turnId) return undefined;
     // Match the whole native fragment, not just the presence of a disabled profile: another
     // profile, a malformed cwd, or any additional permission declaration must fail closed.
     const calendar = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*(?:<workspace_roots>\s*((?:<root>[^<>]+<\/root>\s*)+)<\/workspace_roots>\s*)?<permission_profile type="disabled">\s*<file_system type="unrestricted"\s*\/>\s*<\/permission_profile>\s*<\/filesystem>\s*<\/environment_context>$/.exec(text);
@@ -488,16 +488,13 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
       const roots = [...calendar[1].matchAll(/<root>([^<>]+)<\/root>/g)]
         .map(match => decodeXmlText(match[1]!.trim()));
       if (roots.some(root => !isAbsolute(root))) return undefined;
-      const identities = roots.map(pathIdentity).sort();
-      if (new Set(identities).size !== identities.length
-        || (workspaceRoots && JSON.stringify(identities) !== JSON.stringify(workspaceRoots.map(pathIdentity).sort()))) return undefined;
-      workspaceRoots = roots;
+      workspaceRoots.push([...new Set(roots.map(pathIdentity))]);
     }
     deltas += 1;
   }
   return deltas > 0 ? {
     ...(startClaim ? { startClaim } : {}),
-    ...(workspaceRoots ? { workspaceRoots } : {}),
+    workspaceRoots,
     ...(nativeMessages.length ? { nativeMessages: [{ id: active.id, content: active.content }, ...nativeMessages] } : {}),
   } : undefined;
 }

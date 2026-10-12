@@ -287,15 +287,21 @@ class RuntimeHost {
   }
 
   passkeyChromeExecutable() {
-    if (this.platform !== "darwin") throw new Error("Passkey sign-in is currently supported only on macOS");
+    if (!["darwin", "win32", "linux"].includes(this.platform)) throw new Error("System-browser sign-in is unsupported on this platform");
     const setupConfig = this.supervisor.readSetupConfig
-      ? this.supervisor.readSetupConfig()
-      : this.supervisor.readConfig();
-    const candidate = setupConfig?.chromeExecutablePath
-      || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-    if (!usableExecutable(candidate, this.platform)) {
-      throw new Error(`Google Chrome is unavailable at ${candidate}`);
-    }
+      ? this.supervisor.readSetupConfig() : this.supervisor.readConfig();
+    const defaultChrome = this.platform === "darwin"
+      ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      : this.platform === "win32"
+        ? path.win32.join(process.env.ProgramFiles || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe")
+        : "/usr/bin/google-chrome";
+    const candidates = setupConfig?.chromeExecutablePath ? [setupConfig.chromeExecutablePath]
+      : this.platform === "win32" ? [defaultChrome,
+        path.win32.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
+        ...(process.env.LOCALAPPDATA ? [path.win32.join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe")] : [])]
+        : [defaultChrome];
+    const candidate = candidates.find(value => usableExecutable(value, this.platform));
+    if (!candidate) throw new Error("Google Chrome is unavailable. Install Chrome or configure its executable path.");
     return candidate;
   }
 
@@ -371,7 +377,7 @@ class RuntimeHost {
             return true;
           }
         },
-        message: "Sign in with your passkey in Chrome, then return here and choose Continue",
+        message: "Sign in to ChatGPT in Chrome, then return here and choose Continue",
         successMessage: "Passkey session captured for private Launcher verification",
         timeoutMs: PASSKEY_LOGIN_TIMEOUT_MS,
       });

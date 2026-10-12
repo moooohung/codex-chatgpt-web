@@ -12,6 +12,7 @@ import {
   detectChatGptAccountCapabilities,
 } from "./chatgpt-session";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
+import { requestOwnedLoginBrowserClose } from "./system-login-process";
 
 export interface BrowserLoginResult {
   storageStatePath: string;
@@ -208,8 +209,8 @@ export async function captureSystemBrowserLogin(
   config: Pick<AppConfig, "chromeExecutablePath" | "storageStatePath">,
   options: SystemBrowserLoginOptions,
 ): Promise<SystemBrowserLoginCapture> {
-  if (process.platform !== "darwin") {
-    throw new Error("Passkey sign-in is currently supported only on macOS");
+  if (!["darwin", "win32", "linux"].includes(process.platform)) {
+    throw new Error("System-browser sign-in is unsupported on this platform");
   }
   if (!existsSync(config.chromeExecutablePath)) {
     throw new Error(`Google Chrome was not found at ${config.chromeExecutablePath}`);
@@ -231,7 +232,7 @@ export async function captureSystemBrowserLogin(
   const profileDir = mkdtempSync(join(profileParent, "login-profile-"));
   try { chmodSync(profileDir, 0o700); } catch {}
   process.stdout.write(
-    "Sign in with your passkey in the dedicated Chrome window. When Temporary Chat is ready, return to Codex Web GPT and choose Continue.\n",
+    "Sign in to ChatGPT in the dedicated Chrome window (Google, password or passkey). When Temporary Chat is ready, return to Codex Web GPT and choose Continue.\n",
   );
 
   let capture: SystemBrowserLoginCapture | undefined;
@@ -256,9 +257,8 @@ export async function captureSystemBrowserLogin(
         });
         void options.continuation.then(() => {
           continuationRequested = true;
-          if (!loginBrowser.kill() && !browserProcessExited(loginBrowser)) {
-            reject(new Error("The dedicated Chrome login process refused the Continue request"));
-          }
+          try { requestOwnedLoginBrowserClose(loginBrowser, config.chromeExecutablePath, profileDir); }
+          catch (error) { reject(error); }
         }, reject);
         loginBrowser.once("error", reject);
         loginBrowser.once("exit", (code, signal) => {

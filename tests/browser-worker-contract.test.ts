@@ -11,7 +11,7 @@ import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adap
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
-import { CHATGPT_SEND_BUTTON_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
+import { CHATGPT_SEND_BUTTON_SELECTOR, CHATGPT_THINK_BUTTON_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import { ChatGptExternalTurnProgress, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import type { CodexProviderConfig } from "../src/types";
 import { compileChatGptWebPrompt, formatChatGptWebMultipartCommit, formatChatGptWebMultipartStage } from "../src/adapters/chatgpt-web/prompt";
@@ -813,19 +813,14 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
 
   expect(evidence).toBe("mcp_tool_call");
   expect(sendPresses).toBe(1);
-  expect(domObservations).toBe(2);
+  expect(domObservations).toBe(1);
   expect(recoveries).toBe(1);
   expect(lifecycle).toEqual(["activated", "submitted"]);
+  // Acceptance must not dispatch tools before a pre-tool answer boundary can be read.
   const acknowledgementDeadline = new AbortController();
-  const timer = setTimeout(() => acknowledgementDeadline.abort(), 100);
-  try {
-    await expect(progress.waitForToolBatchObservation(
-      toolBatchRevision,
-      acknowledgementDeadline.signal,
-    )).resolves.toBeUndefined();
-  } finally {
-    clearTimeout(timer);
-  }
+  const observation = progress.waitForToolBatchObservation(toolBatchRevision, acknowledgementDeadline.signal);
+  acknowledgementDeadline.abort();
+  await expect(observation).rejects.toMatchObject({ name: "AbortError" });
 });
 
 test("Bigger Context send activation keeps the outer stage budget instead of restoring a nested 20-second timeout", async () => {
@@ -892,25 +887,25 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
   expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
 });
 
-test("GPT-6 Sol rejects a staged prompt before opening a browser and releases its preparation", async () => {
-  const root = mkdtempSync(join(tmpdir(), "gpt6-standard-context-"));
+test.each(["low", "high"] as const)("GPT-6 Plus stages High but keeps the Instant exclusion (%s)", async reasoning => {
+  const root = mkdtempSync(join(tmpdir(), "gpt6-context-"));
   const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
   let released = false;
   let browserStages = 0;
   const prepared = { ...compileChatGptWebPrompt({
-    modelId: CHATGPT_WEB_MODEL_ID, stream: true, options: { reasoning: "high" },
+    modelId: CHATGPT_WEB_MODEL_ID, stream: true, options: { reasoning },
     context: { messages: [{ role: "user", content: "Keep the entire task.", timestamp: 1 }] },
   }, capabilities, undefined, { experimentalMultipartParts: 2 }), release() { released = true; } };
   const worker: any = ChatGptBrowserWorker.forProvider({
     adapter: "chatgpt-web", baseUrl: `browser://${root}`, chatgptWeb: { browserDiagnosticsPath: root },
   });
-  worker.runStage = async () => { browserStages++; throw new Error("Browser must not be opened"); };
+  worker.runStage = async () => { browserStages++; throw new Error("Test reached browser acquisition"); };
   try {
     await expect(worker.runBrowserTurn({
-      traceId: "six_standard", modelId: CHATGPT_WEB_MODEL_ID, modelFamily: "6", reasoning: "high", capabilities,
+      traceId: "six_context", modelId: CHATGPT_WEB_MODEL_ID, modelFamily: "6", reasoning, capabilities,
       prepare: async () => prepared, onTextDelta() {}, onReasoningSummary() {},
-    })).rejects.toThrow("GPT-6 Sol uses standard context");
-    expect(browserStages).toBe(0);
+    })).rejects.toThrow(reasoning === "low" ? "GPT-6 Instant uses standard context" : "Test reached browser acquisition");
+    expect(browserStages).toBe(reasoning === "low" ? 0 : 1);
     expect(released).toBeTrue();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -2547,6 +2542,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
       return composerForm;
     },
   };
+  let uploadEvent: (event: { method: string; params: unknown }) => void = () => {};
   const input = {
     waitFor: async (state: { state: string; timeout: number }) => {
       expect(state).toEqual({ state: "attached", timeout: 20_000 });
@@ -2554,9 +2550,18 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     },
     setInputFiles: async (files: Array<{ name: string }>) => {
       calls.push(["setFiles", files.map(file => file.name).join(",")]);
+      uploadEvent({ method: "Network.requestWillBeSent", params: { frameId: "owned", requestId: "upload", request: { method: "POST", url: "https://chatgpt.com/backend-api/files/process_upload_stream", postData: JSON.stringify({ file_name: files[0]!.name }) } } });
+      uploadEvent({ method: "Network.responseReceived", params: { requestId: "upload", response: { status: 200 } } });
     },
   };
   const page = {
+    url: () => "https://chatgpt.com/",
+    context: () => ({ newCDPSession: async () => ({
+      on: (_name: string, listener: typeof uploadEvent) => { uploadEvent = listener; },
+      off: () => {}, detach: async () => {},
+      send: async (method: string) => method === "Page.getFrameTree" ? { frameTree: { frame: { id: "owned" } } }
+        : method === "Network.streamResourceContent" ? { bufferedData: Buffer.from(JSON.stringify({ event: "file.processing.completed" }) + "\n").toString("base64") } : {},
+    }) }),
     locator: (selector: string) => {
       if (selector === 'input[data-testid="upload-photos-input"], form[data-chatgpt-composer] input[type="file"][multiple]:not([accept])') return input;
       if (selector === '[role="alert"]') {
@@ -2658,7 +2663,10 @@ function thinkSlashFixture() {
       }
     },
   };
-  const composerForm = { getByRole: () => ({ filter: () => controls }), locator: () => composer, page: () => page };
+  const composerForm = {
+    locator: (selector: string) => selector === CHATGPT_THINK_BUTTON_SELECTOR ? { filter: () => controls } : composer,
+    page: () => page,
+  };
   return { state, composer, composerForm, page, control };
 }
 
@@ -3036,7 +3044,7 @@ test("only a size rejection of the current owned browser submission is non-retry
   expect(page.listenerCount("response")).toBe(0);
 });
 
-test("only the current conversation POST can report a security or HTTP submission rejection", async () => {
+test("only the current conversation POST can report a security challenge; unrelated HTTP status is left to the UI observer", async () => {
   const frame = {}, page = Object.assign(new EventEmitter(), { mainFrame: () => frame });
   const failures: unknown[] = [];
   const observer = new ChatGptSubmissionRejectionObserver(error => failures.push(error));
@@ -3046,12 +3054,12 @@ test("only the current conversation POST can report a security or HTTP submissio
   observer.begin(page as unknown as Page);
   page.emit("response", response); expect(await observer.failure()).toBeUndefined();
   page.emit("request", request); page.emit("response", response);
-  expect(await observer.failure()).toMatchObject({ code: "chatgpt_security_check_required", retryable: false });
+  expect(await observer.failure()).toMatchObject({ code: "chatgpt_security_check", retryable: false });
   expect(failures).toHaveLength(1);
   for (const status of [400, 401, 429, 500, 503]) {
     observer.begin(page as unknown as Page); page.emit("request", request);
     page.emit("response", { ...response, status: () => status, headers: () => ({}) });
-    expect(await observer.failure()).toMatchObject({ code: "chatgpt_submission_failed", status, retryable: false });
+    expect(await observer.failure()).toBeUndefined();
   }
   observer.dispose();
 });
@@ -3710,21 +3718,27 @@ test("GPT-6 staged input enforces its measured account and effort ceiling before
   const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
   for (const effort of ["medium", "high", "xhigh"] as const) {
     expect(() => assertChatGptWebMultipartInputWithinLimits(
-      239_999, 40_000, "gpt-5.6-sol", effort, pro, 200_000, 6, undefined, "6",
+      239_999, 40_000, "gpt-5.6-sol", effort, pro, 50_000, 6, undefined, "6",
     )).not.toThrow();
     expect(() => assertChatGptWebMultipartInputWithinLimits(
-      240_000, 40_000, "gpt-5.6-sol", effort, pro, 200_000, 6, undefined, "6",
+      240_000, 40_000, "gpt-5.6-sol", effort, pro, 50_000, 6, undefined, "6",
     )).toThrow("240,000-token six-part ceiling");
     expect(() => assertChatGptWebMultipartInputWithinLimits(
-      222_386, 40_000, "gpt-5.6-sol", effort, pro, 200_000, 2, undefined, "6",
+      222_386, 40_000, "gpt-5.6-sol", effort, pro, 50_000, 2, undefined, "6",
     )).toThrow("222,386-token two-part ceiling");
     expect(() => assertChatGptWebMultipartInputWithinLimits(
-      100_000, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 200_000, 6, undefined, "6",
-    )).toThrow("GPT-6 Sol uses standard context");
+      119_999, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 50_000, 6, undefined, "6",
+    )).not.toThrow();
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      120_000, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 50_000, 6, undefined, "6",
+    )).toThrow("120,000-token six-part ceiling");
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      120_000, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 50_000, 2, undefined, "6",
+    )).toThrow("120,000-token two-part ceiling");
   }
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    100_000, 40_000, "gpt-5.6-sol", "low", pro, 200_000, 6, undefined, "6",
-  )).toThrow("GPT-6 Sol uses standard context");
+    100_000, 40_000, "gpt-5.6-sol", "low", pro, 50_000, 6, undefined, "6",
+  )).toThrow("GPT-6 Instant uses standard context");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     333_578, 60_000, "gpt-5.6-sol", "high", pro, 250_000, 6, undefined, "5.6",
   )).not.toThrow();
@@ -4882,7 +4896,7 @@ test("a staged Bigger Context part gets an acknowledgement window sized to its p
 
   // No MCP activity exists while an inert part is being ingested, so the response and send budgets
   // bound the same exchange.
-  expect(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS).toBe(browserStageTimeouts.multipartStageSend);
+  expect(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS).toBe(browserStageTimeouts.send);
   expect(browserStageTimeouts.multipartStageAcknowledgement).toBe(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS);
 
 });

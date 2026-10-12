@@ -33,9 +33,10 @@ function fixture(recordCount = 24): CodexParsedRequest {
 test.each([false, true])("large Plus history respects every server message boundary (compaction=%s)", compaction => {
   const parsed = fixture();
   if (compaction) parsed._compactionRequest = true;
-  const parts = resolveBiggerContextMultipartParts(parsed, plus);
+  const transport = { ...parsed, _compactionRequest: false };
+  const parts = resolveBiggerContextMultipartParts(transport, plus);
   expect(parts).toBeGreaterThan(6);
-  const compiled = compileChatGptWebPrompt(parsed, plus, compaction ? undefined : "turn_00000000000000000000000000000000", { experimentalMultipartParts: parts });
+  const compiled = compileChatGptWebPrompt(parsed, plus, compaction ? undefined : "turn_00000000000000000000000000000000", { experimentalMultipartParts: parts, preserveCompactionHistory: compaction });
   const messages = compiledChatGptWebMessages(compiled);
   expect(Math.max(...messages.map(m => m.length))).toBeLessThanOrEqual(60_000);
   expect(compiled.multipart!.parts.flatMap(p => JSON.parse(p).records).map(r => r.message.content))
@@ -57,10 +58,11 @@ test("thirty-two transport parts do not enlarge the advertised total context", (
 test.each([false, true])("history beyond twelve transport parts preserves whole records (compaction=%s)", compaction => {
   const parsed = fixture(44);
   if (compaction) parsed._compactionRequest = true;
-  const parts = resolveBiggerContextMultipartParts(parsed, plus, true);
+  const transport = { ...parsed, _compactionRequest: false };
+  const parts = resolveBiggerContextMultipartParts(transport, plus, true);
   expect(parts).toBeGreaterThan(12);
   const compiled = compileChatGptWebPrompt(parsed, plus, compaction ? undefined : "turn_00000000000000000000000000000000", {
-    experimentalMultipartParts: parts, experimentalSkillAttachments: true,
+    experimentalMultipartParts: parts, experimentalSkillAttachments: true, preserveCompactionHistory: compaction,
   });
   const messages = compiledChatGptWebMessages(compiled);
   expect(Math.max(...messages.map(message => message.length))).toBeLessThanOrEqual(60_000);

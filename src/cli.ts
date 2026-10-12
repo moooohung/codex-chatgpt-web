@@ -245,7 +245,7 @@ async function loginCommand(args: string[]): Promise<void> {
   const storageStatePath = takeOption(args, "--storage-state");
   assertNoArgs(args);
   authorizeLauncherControl("passkey login");
-  if (process.platform !== "darwin") throw new Error("Passkey sign-in is currently supported only on macOS");
+  if (!["darwin", "win32", "linux"].includes(process.platform)) throw new Error("System-browser sign-in is unsupported on this platform");
   if (!chromeExecutablePath || !isAbsolute(chromeExecutablePath)) {
     throw new Error("Launcher passkey sign-in requires --chrome with an absolute path");
   }

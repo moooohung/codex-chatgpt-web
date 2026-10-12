@@ -271,10 +271,10 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.doesNotMatch(electronMain, /IS_DEV_PROFILE && key === "experimentalBiggerContext"/);
 });
 
-test("macOS passkey sign-in is additive to the unchanged embedded login action", () => {
+test("system Chrome sign-in is additive to the unchanged embedded login action", () => {
   assert.match(appSource, /onAction=\{openLogin\}/);
   assert.match(appSource, /<BrowserSurface[\s\S]*?operation=\{operation\}[\s\S]*?platform=\{snapshot\.platform\}/);
-  assert.match(appSource, /const passkeyAvailable = !manualInteraction[\s\S]*?platform === "darwin"[\s\S]*?browser\?\.authenticated !== true/);
+  assert.match(appSource, /const passkeyAvailable = !manualInteraction[\s\S]*?\["darwin", "win32", "linux"\]\.includes\(platform\)[\s\S]*?browser\?\.authenticated !== true/);
   assert.match(appSource, /\{passkeyAvailable \? \([\s\S]*?className="toolbar-text-button"[\s\S]*?passkeyLabel/);
   assert.match(appSource, /className="browser-empty-actions"[\s\S]*?passkeyLabel/);
   assert.match(appSource, /passkeyWaiting \? continuePasskeyLogin : openPasskeyLogin/);
@@ -314,6 +314,15 @@ test("passkey buttons show launch progress, wait for Chrome, and preserve import
     ? [tree, ...visit(tree.children ?? [])] : [];
   const render = () => { cursor = 0; return visit(sandbox.render(props)); };
   const action = () => render().find(node => node.type === "SecondaryButton");
+  for (const platform of ["win32", "darwin", "linux"]) {
+    props.platform = platform;
+    assert.deepEqual(action().children, [copy.passkeySignIn]);
+    assert.equal(action().props.disabled, false);
+  }
+  props.platform = "freebsd";
+  assert.equal(action(), undefined);
+  props.platform = "win32";
+
   props.operation = { status: "running", name: "doctor", message: "Checking runtime" };
   assert.equal(action().props.disabled, true);
   props.operation = null;

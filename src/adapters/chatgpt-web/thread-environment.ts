@@ -214,15 +214,14 @@ export class ChatGptThreadEnvironmentStore {
           tools: parsed.context.tools,
         });
         if (rolloutEnvironment) {
-          if (calendarDelta && !calendarDelta.nativeMessages && rolloutEnvironment.sandboxPolicy.type !== "dangerFullAccess") {
-            throw new Error("Calendar environment delta conflicts with its current Codex rollout");
+          if (calendarDelta) {
+            const nativeRoots = new Set(rolloutEnvironment.roots.map(pathIdentity));
+            if ((!calendarDelta.nativeMessages && rolloutEnvironment.sandboxPolicy.type !== "dangerFullAccess")
+              || calendarDelta.workspaceRoots.some(roots => roots.length !== nativeRoots.size
+                || roots.some(root => !nativeRoots.has(root)))) {
+              throw new Error("Calendar environment delta conflicts with its current Codex rollout");
+            }
           }
-          if (calendarDelta?.workspaceRoots && (
-            calendarDelta.workspaceRoots.length !== rolloutEnvironment.roots.length
-            || calendarDelta.workspaceRoots.some(root => !rolloutEnvironment.roots.some(nativeRoot => (
-              contains(root, nativeRoot) && contains(nativeRoot, root)
-            )))
-          )) throw new Error("Calendar workspace roots conflict with its current Codex rollout");
           if (currentClaim && !sameAuthority(currentClaim, rolloutEnvironment,
             initialClaim !== undefined || steeringClaim !== undefined || calendarDelta?.startClaim !== undefined)) {
             const source = currentCompaction ? "Compaction continuation" : initialClaim ? "Current" : "Steering";

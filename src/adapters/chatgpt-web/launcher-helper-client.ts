@@ -28,7 +28,7 @@ interface PendingTurn {
 
 type HelperMessage =
   | { type: "ready"; features?: string[] }
-  | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
+  | { type: "event"; id: string; event: "heartbeat" | "generation_progress" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
   | { type: "event"; id: string; event: "response_wait"; state: ChatGptResponseWaitState | null }
   | { type: "event"; id: string; event: "effort"; selection: ChatGptEffortSelection }
@@ -131,7 +131,7 @@ function parseHelperMessage(line: string): HelperMessage {
       }
       return { type: "event", id: message.id, event, reused: message.reused };
     }
-    if (!["heartbeat", "send_activated", "submitted", "reasoning", "commentary", "text"].includes(String(event))) {
+    if (!["heartbeat", "generation_progress", "send_activated", "submitted", "reasoning", "commentary", "text"].includes(String(event))) {
       throw new Error("Launcher browser helper emitted an unknown event");
     }
     if (text !== undefined && typeof text !== "string") {
@@ -143,7 +143,7 @@ function parseHelperMessage(line: string): HelperMessage {
     return {
       type: "event",
       id: message.id,
-      event: event as "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text",
+      event: event as "heartbeat" | "generation_progress" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text",
       ...(text !== undefined ? { text: text as string } : {}),
       ...(continuation !== undefined ? { continuation: continuation as boolean } : {}),
     };
@@ -444,6 +444,7 @@ export class LauncherBrowserHelperClient {
     }
     if (message.type === "event") {
       if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
+      else if (message.event === "generation_progress") pending.turn.onGenerationProgress?.();
       else if (message.event === "tool_batch_observed") {
         logChatGptToolBoundary("ack_received", pending.turn.traceId, message.revision);
         const progress = pending.turn.externalProgress;

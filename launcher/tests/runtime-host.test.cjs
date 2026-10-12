@@ -1347,10 +1347,25 @@ test("passkey Continue is delivered only to the active owned login child", async
   assert.throws(() => fixture.continuePasskeyLogin(), /No passkey sign-in is waiting/);
 });
 
-test("passkey sign-in is rejected outside macOS even if IPC is invoked directly", () => {
-  const fixture = hostFor(null).host;
-  fixture.platform = "win32";
-  assert.throws(() => fixture.passkeyChromeExecutable(), /supported only on macOS/);
+test("system Chrome sign-in accepts configured Chrome on supported platforms and fails closed", () => {
+  const originalStat = fs.statSync, originalAccess = fs.accessSync;
+  let executable;
+  try {
+    fs.statSync = value => value === executable ? { isFile: () => true } : originalStat(value);
+    fs.accessSync = value => { if (value !== executable) originalAccess(value); };
+    for (const platform of ["win32", "darwin", "linux"]) {
+      executable = platform === "win32" ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" : "/opt/private Chrome/chrome";
+      const fixture = hostFor({ chromeExecutablePath: executable }).host;
+      fixture.platform = platform;
+      assert.equal(fixture.passkeyChromeExecutable(), executable);
+      const invalid = hostFor({ chromeExecutablePath: "relative/absent-chrome" }).host;
+      invalid.platform = platform;
+      assert.throws(() => invalid.passkeyChromeExecutable(), /Google Chrome is unavailable/);
+    }
+    const unsupported = hostFor({ chromeExecutablePath: executable }).host;
+    unsupported.platform = "freebsd";
+    assert.throws(() => unsupported.passkeyChromeExecutable(), /unsupported on this platform/);
+  } finally { fs.statSync = originalStat; fs.accessSync = originalAccess; }
 });
 
 test("skill file experiment uses the setup transaction in production and DEV, and rejects manual mode", async () => {

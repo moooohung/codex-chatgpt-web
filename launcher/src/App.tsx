@@ -956,7 +956,7 @@ function BrowserSurface({
   const idleSurface = isIdleBrowserSurface(browser?.url);
   const manualInteraction = interactionMode === "manual";
   const passkeyAvailable = !manualInteraction
-    && platform === "darwin"
+    && ["darwin", "win32", "linux"].includes(platform)
     && (browser?.authenticated !== true || passkeyActive);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = passkeyActive || browser?.status === "running" || browser?.status === "testing";

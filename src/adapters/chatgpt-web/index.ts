@@ -551,6 +551,11 @@ export function createChatGptWebAdapter(
       void runtime.physicalSettlement.then(() => clearInterval(timer), () => clearInterval(timer));
       return runtime;
     };
+    const onGenerationProgress = (): void => {
+      // v6.1.8's owned active response stream is generation progress, unlike a transport heartbeat.
+      trace.recordProgress();
+      hooks.onCompactionProgress?.();
+    };
     const observedCapabilityTokens = new Set<string>();
     const observeCapabilityRetirement = (
       turnToken: string,
@@ -786,11 +791,11 @@ export function createChatGptWebAdapter(
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
         ...multipartProgressLifecycle,
-        onResponseWait: state => progressTracker?.observeResponseWait(state),
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
-        onTextDelta: delta => text.push(delta),
-        onEffortSelected: selection => Object.assign(responseMetadata, chatGptEffortMetadata(selection)),
+        onTextDelta: delta => { text.push(delta); onGenerationProgress(); },
+        onGenerationProgress,
+        onResponseWait: state => progressTracker?.observeResponseWait(state),
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
@@ -859,11 +864,11 @@ export function createChatGptWebAdapter(
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
       ...multipartProgressLifecycle,
-      onResponseWait: state => progressTracker?.observeResponseWait(state),
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
-      onTextDelta: delta => text.push(delta),
-      onEffortSelected: selection => Object.assign(responseMetadata, chatGptEffortMetadata(selection)),
+      onTextDelta: delta => { text.push(delta); onGenerationProgress(); },
+      onGenerationProgress,
+      onResponseWait: state => progressTracker?.observeResponseWait(state),
       externalProgress,
       completionFence: {
         begin: async () => broker.beginCompletionFence(await token.promise),
@@ -1137,6 +1142,7 @@ export function createChatGptWebAdapter(
                     return canonicalizeCompactionHandoff(parsed, rawSummary);
                   };
                   let source: ChatGptTurnSession | undefined;
+                  let stopSourceProgress: (() => void) | undefined;
                   let preserveFinalResponse = false;
                   try {
                     if (freshConversationPerTurn || largeCompaction) {
@@ -1169,6 +1175,8 @@ export function createChatGptWebAdapter(
                     if (!source || !retainedKey) {
                       return await runFreshCompaction("source_unavailable_before_handoff");
                     }
+                    // Renew only for observed source activity, never an idle helper heartbeat.
+                    stopSourceProgress = source.runtime.trace.observeProgress(armHandoffDeadline);
                     let rawSummary: string;
                     if (manualRequest && source.isActive() && source.runtime.mode === "tools") {
                       const zeroRiskSummary = await settleActiveZeroRiskCompactionSource(
@@ -1201,6 +1209,7 @@ export function createChatGptWebAdapter(
                       preserveFinalResponse = !settlement.compactionInstructionDelivered;
                       // The previous response has physically settled. Its waiting time must not
                       // consume the independent, bounded request for the retained checkpoint.
+                      stopSourceProgress?.();
                       handoffPhase = "retained_checkpoint";
                       armHandoffDeadline();
                       rawSummary = await requestRetainedCompactionHandoff(
@@ -1220,6 +1229,7 @@ export function createChatGptWebAdapter(
                         await withAbort(source.physicalSettlement, operationSignal);
                         preserveFinalResponse = true;
                       }
+                      stopSourceProgress?.();
                       handoffPhase = "retained_checkpoint";
                       armHandoffDeadline();
                       rawSummary = await requestRetainedCompactionHandoff(
@@ -1271,6 +1281,7 @@ export function createChatGptWebAdapter(
                     }
                     throw handoffError;
                   } finally {
+                    stopSourceProgress?.();
                     if (handoffTimer) clearTimeout(handoffTimer);
                   }
                 },
@@ -1471,6 +1482,7 @@ export function createChatGptWebAdapter(
                   roundStage = "tool_result_delivery";
                   await broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
                   session.runtime.externalProgress.recordToolResult();
+                  session.runtime.trace.recordProgress();
                   session.markResultDelivered(message.toolCallId);
                 }
               }
@@ -1505,7 +1517,8 @@ export function createChatGptWebAdapter(
                   }
                   let boundaryRevision = 0;
                   if (requests.length > 0) {
-                    const revision = boundaryRevision = externalProgress.recordToolBatch(requests.length);
+                    const revision = externalProgress.recordToolBatch(requests.length);
+                    session.runtime.trace.recordProgress();
                     if (!session.runtime.manualControl) {
                       // The 30s receipt budget exceeds the largest 20s capture budget. A lost ACK
                       // is a boundary failure, never permission to emit tools or wait for MCP retirement.
