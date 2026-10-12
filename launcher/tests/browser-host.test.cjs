@@ -536,6 +536,39 @@ test("browser surface visibility requires both requested and active state", () =
   assert.equal(browserViewVisible(true, true, true), true);
 });
 
+test("late navigation visibility events never touch a destroyed window or host", () => {
+  for (const destroyedHost of [false, true]) {
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      destroyed: destroyedHost,
+      window: {
+        isDestroyed: () => !destroyedHost,
+        isVisible: () => assert.fail("closed window visibility was read"),
+      },
+    });
+    assert.doesNotThrow(() => fixture.syncViewVisibility());
+  }
+});
+
+test("login presentation skips destroyed home, turn and auth views while preserving live views", () => {
+  const calls = [];
+  const deadView = {
+    webContents: { isDestroyed: () => true, getURL: () => assert.fail("closed contents URL was read") },
+    setVisible: () => assert.fail("closed view was presented"),
+  };
+  const liveView = { webContents: { isDestroyed: () => false, getURL: () => "https://chatgpt.com" } };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    window: { isDestroyed: () => false, isVisible: () => true, isMinimized: () => false },
+    visible: true, surfaceActive: true, boundsReady: true,
+    view: deadView, authView: deadView,
+    turnTabs: new Map([["dead", { id: "dead", view: deadView }], ["live", { id: "live", view: liveView }]]),
+    selectedTurnTab: () => null,
+    presentPrimaryView: () => assert.fail("closed primary view was presented"),
+    presentTurnView: tab => calls.push(tab.id),
+  });
+  assert.doesNotThrow(() => fixture.syncViewVisibility());
+  assert.deepEqual(calls, ["live"]);
+});
+
 test("descriptor-owned home surface stays attached offscreen while another launcher surface is active", () => {
   const calls = [];
   const hiddenBounds = { x: 1201, y: 801, width: 1200, height: 800 };
@@ -875,7 +908,7 @@ test("navigation restores the task viewport at DOM readiness without completing 
   const emulations = [];
   let ownershipMarks = 0;
   const contents = Object.assign(new EventEmitter(), {
-    setWindowOpenHandler() {}, getURL: () => "https://chatgpt.com/?temporary-chat=true",
+    setWindowOpenHandler() {}, isDestroyed: () => false, getURL: () => "https://chatgpt.com/?temporary-chat=true",
     enableDeviceEmulation: options => emulations.push(options.viewSize),
   });
   const tab = {
@@ -914,6 +947,28 @@ test("navigation restores the task viewport at DOM readiness without completing 
   assert.equal(emulations.length, 1);
   contents.emit("dom-ready");
   assert.equal(emulations.length, 2, "each new document needs its viewport restored");
+});
+
+test("late turn load events do not inspect destroyed contents or present a destroyed host", () => {
+  let destroyed = false;
+  let syncs = 0;
+  const contents = Object.assign(new EventEmitter(), {
+    setWindowOpenHandler() {}, isDestroyed: () => destroyed,
+    getURL: () => assert.fail("late event read contents URL"),
+  });
+  const tab = { view: { webContents: contents } };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    syncViewVisibility: () => { syncs++; },
+  });
+  host.bindTurnContents(tab);
+  for (const destroyedHost of [false, true]) {
+    host.destroyed = destroyedHost;
+    destroyed = !destroyedHost;
+    for (const event of ["dom-ready", "did-finish-load", "did-stop-loading"]) {
+      assert.doesNotThrow(() => contents.emit(event));
+    }
+  }
+  assert.equal(syncs, 0);
 });
 
 test("visible turn tabs keep the explicit viewport across background transitions", () => {

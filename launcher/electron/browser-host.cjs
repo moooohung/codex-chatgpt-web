@@ -1402,6 +1402,7 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-stop-loading", () => {
+      if (this.destroyed || contents.isDestroyed()) return;
       tab.loading = false;
       tab.url = contents.getURL();
       this.publishState?.(this.snapshot());
@@ -1410,10 +1411,12 @@ class BrowserHost {
       // Automation starts at DOMContentLoaded. A pending image can delay did-finish-load
       // while this new document already exposes controls in a collapsed offscreen viewport.
       // Restore only rendering here; load completion still owns bootstrap and surface marking.
+      if (this.destroyed || contents.isDestroyed()) return;
       tab.rendererReady = true;
       this.syncViewVisibility();
     });
     contents.on("did-finish-load", () => {
+      if (this.destroyed || contents.isDestroyed()) return;
       injectDomStealth(contents);
       tab.url = contents.getURL();
       tab.loading = false;
@@ -2493,23 +2496,29 @@ class BrowserHost {
   }
 
   syncViewVisibility() {
+    // Navigation events may arrive after the native window or one of its views closed.
+    if (this.destroyed || this.window.isDestroyed?.()) return;
     const windowVisible = this.window.isVisible() && !this.window.isMinimized();
     const visible = windowVisible
       && browserViewVisible(this.visible, this.surfaceActive, this.boundsReady);
     const selected = this.selectedTurnTab();
+    const isLiveView = view => view && !view.webContents?.isDestroyed?.();
     const hasDocument = contents => {
       const url = contents?.getURL?.();
       return url !== IDLE_BROWSER_URL && url !== "about:blank";
     };
     // Keep the exact owned CDP target drawable offscreen during idle/bootstrap. The launcher
     // shows its preparation/empty state instead of putting an empty native document over it.
-    this.presentPrimaryView(visible && !this.authView && !selected && hasDocument(this.view.webContents));
+    if (isLiveView(this.view)) {
+      this.presentPrimaryView(visible && !this.authView && !selected && hasDocument(this.view.webContents));
+    }
     for (const tab of this.turnTabs.values()) {
+      if (!isLiveView(tab.view)) continue;
       const tabVisible = visible && !this.authView && selected?.id === tab.id
         && hasDocument(tab.view.webContents);
       this.presentTurnView(tab, tabVisible);
     }
-    this.authView?.setVisible(visible);
+    if (isLiveView(this.authView)) this.authView.setVisible(visible);
     BrowserHost.prototype.restoreSelectedRetainedTab.call(this);
   }
 
