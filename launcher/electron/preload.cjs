@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   addAccount: (input) => ipcRenderer.invoke("launcher:account-add", input),
   removeAccount: (name) => ipcRenderer.invoke("launcher:account-remove", name),
   openAccountLogin: (name) => ipcRenderer.invoke("launcher:account-login", name),
+  openAccountPasskeyLogin: (name) => ipcRenderer.invoke("launcher:account-passkey-login", name),
   toggleAccount: (input) => ipcRenderer.invoke("launcher:account-toggle", input),
   windowState: () => ipcRenderer.invoke("launcher:window-state"),
   windowControl: (action) => ipcRenderer.send("launcher:window-control", action),

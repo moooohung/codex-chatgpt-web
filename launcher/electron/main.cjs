@@ -561,7 +561,7 @@ function registerIpc({ logger, stateStore }) {
     "launcher:use-saved-chats", "launcher:zero-risk-pro", "launcher:browser-interaction-mode",
     "launcher:auto-approve-tool-calls",
     "launcher:connector-name", "launcher:mcp-verify", "launcher:doctor", "launcher:cancel-turns",
-    "launcher:browser-passkey-login", "launcher:browser-logout", "launcher:browser-smoke",
+    "launcher:browser-passkey-login", "launcher:account-passkey-login", "launcher:browser-logout", "launcher:browser-smoke",
     "launcher:limits-setup", "launcher:update-install", "launcher:complete-onboarding",
   ]);
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, async (...args) => {
@@ -1045,6 +1045,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:account-add", (_event, input) => accountApi.add(input));
   handle("launcher:account-remove", (_event, input) => accountApi.remove(input));
   handle("launcher:account-login", (_event, input) => accountApi.login(input));
+  handle("launcher:account-passkey-login", (_event, input) => accountApi.passkeyLogin(input));
   handle("launcher:account-toggle", (_event, input) => accountApi.toggle(input));
   void runtimeStartup.then(() => accountApi.resume()).catch(error => logger.warn("account.resume_failed", { error: String(error) }));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));

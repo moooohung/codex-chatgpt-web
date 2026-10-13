@@ -828,7 +828,9 @@ function LauncherShell({
             ) : null}
             {surface === "accounts" ? (
               <AccountsSurface
+                browser={browser}
                 copy={copy}
+                operation={operation}
                 setError={setError}
                 snapshot={snapshot}
               />
@@ -950,14 +952,19 @@ function BrowserSurface({
 }) {
   const [passkeyStarting, setPasskeyStarting] = useState(false);
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  const [passkeyStartingAccount, setPasskeyStartingAccount] = useState<string | null>(null);
   const passkeyPhase = browser?.passkeyPhase;
   const passkeyActive = passkeyStarting || Boolean(passkeyPhase);
   const visible = browser?.visible === true;
   const idleSurface = isIdleBrowserSurface(browser?.url);
   const manualInteraction = interactionMode === "manual";
+  const selectedAccountSignInTab = browser?.tabs.find(tab => tab.active
+    && (tab.isSignInTab || tab.authenticationRequired) && tab.accountName);
+  const passkeyAccount = passkeyPhase ? browser?.passkeyAccount
+    : passkeyStarting ? passkeyStartingAccount : selectedAccountSignInTab?.accountName;
   const passkeyAvailable = !manualInteraction
     && ["darwin", "win32", "linux"].includes(platform)
-    && (browser?.authenticated !== true || passkeyActive);
+    && (browser?.authenticated !== true || Boolean(selectedAccountSignInTab) || passkeyActive);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = passkeyActive || browser?.status === "running" || browser?.status === "testing";
   const passkeyWaiting = passkeyAvailable && passkeyPhase === "waiting";
@@ -968,6 +975,7 @@ function BrowserSurface({
     : passkeyWaiting ? copy.passkeyContinue : passkeyActive ? copy.passkeyOpening : copy.passkeySignIn;
   const passkeyTitle = passkeyImporting ? copy.passkeyImporting
     : passkeyWaiting ? copy.passkeyWaitingTitle : copy.passkeyOpening;
+  const passkeyStatusTitle = passkeyAccount ? `${passkeyTitle} · ${copy.accountName}: ${passkeyAccount}` : passkeyTitle;
   const passkeyBody = passkeyImporting ? copy.passkeyImportingBody
     : passkeyWaiting ? copy.passkeyContinueBody : copy.passkeyOpeningBody;
   useEffect(() => {
@@ -1019,13 +1027,17 @@ function BrowserSurface({
   const openPasskeyLogin = async () => {
     if (passkeyActive || passkeyBlocked) return;
     setPasskeyStarting(true);
+    const accountName = selectedAccountSignInTab?.accountName;
+    setPasskeyStartingAccount(accountName ?? null);
     setError(null);
     try {
-      await api!.openPasskeyLogin();
+      if (accountName) await api!.openAccountPasskeyLogin(accountName);
+      else await api!.openPasskeyLogin();
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
       setPasskeyStarting(false);
+      setPasskeyStartingAccount(null);
     }
   };
   const continuePasskeyLogin = async () => {
@@ -1124,7 +1136,7 @@ function BrowserSurface({
           <button
             className="toolbar-text-button"
             disabled={passkeyDisabled}
-            title={passkeyBlocked ? operation?.message : copy.passkeyOpeningBody}
+            title={passkeyBlocked ? operation?.message : passkeyAccount ? `${copy.passkeyOpeningBody} · ${copy.accountName}: ${passkeyAccount}` : copy.passkeyOpeningBody}
             onClick={() => void (passkeyWaiting ? continuePasskeyLogin() : openPasskeyLogin())}
             type="button"
           >
@@ -1138,7 +1150,7 @@ function BrowserSurface({
       </div>
       {passkeyActive && visible ? (
         <div className="passkey-login-guide" role="status">
-          <strong>{passkeyTitle}</strong>
+          <strong>{passkeyStatusTitle}</strong>
           <p>{passkeyBody}</p>
         </div>
       ) : null}
@@ -1156,7 +1168,7 @@ function BrowserSurface({
         {!visible || idleSurface ? (
           <div className="browser-empty">
             <BrandMark />
-            <h1>{passkeyActive ? passkeyTitle : visible && idleSurface && (navigationLocked || browser?.loading)
+            <h1>{passkeyActive ? passkeyStatusTitle : visible && idleSurface && (navigationLocked || browser?.loading)
               ? copy.loading
               : manualInteraction
               ? copy.browserReady

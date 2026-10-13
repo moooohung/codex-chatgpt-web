@@ -66,6 +66,7 @@ function createAccountApi({ profile, getHost, getSupervisor, logger }) {
     },
     remove(input) { return removals().request(nameFrom(input)); },
     login(input) { getHost().openAccountLoginTab(nameFrom(input)); return { ok: true }; },
+    passkeyLogin(input) { return getHost().openAccountPasskeyLogin(nameFrom(input)); },
     toggle(input) {
       const name = nameFrom(input);
       const data = readAccountConfig(paths.config);

@@ -23,6 +23,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
+const { startAccountPasskeyLogin } = require("./account-passkey-login.cjs");
 const { configureChatGptAnnouncementDismissal } = require("./browser-announcements.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { resolveBrowserMemoryPolicy } = require("./browser-memory-policy.cjs");
@@ -566,7 +567,8 @@ class BrowserHost {
   }
 
   currentOperation() {
-    return this.manualOperation || (this.loginOperation ? "ChatGPT login" : null);
+    return this.manualOperation || (this.loginOperation ? "ChatGPT login" : null)
+      || (this.accountPasskeyLogin ? "ChatGPT account Chrome login" : null);
   }
 
   assertTurnTabsCanResetForInteractionModeChange() {
@@ -579,6 +581,7 @@ class BrowserHost {
     if (mode !== "automatic" && mode !== "manual") {
       throw new Error("Browser interaction mode must be automatic or manual");
     }
+    if (this.accountPasskeyLogin) throw new Error("Finish the selected account's Chrome sign-in first");
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
     }
@@ -643,6 +646,8 @@ class BrowserHost {
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
       closable: true,
+      accountName: accountNameForTab(tab),
+      isSignInTab: tab.isSignInTab === true,
       ...(tab.status === "running" && tab.authenticationRequired ? { authenticationRequired: true } : {}),
       ...(tab.status === "running" && !tab.authenticationRequired && tab.activity
         ? { activity: { ...tab.activity } } : {}),
@@ -782,17 +787,18 @@ class BrowserHost {
   }
 
   resolveAccountForConversation(conversationKey) {
+    const pending = new Set([...(this.pendingRemovalAccounts || []), ...(this.accountLoginReservations || [])]);
     if (this.accountCooldowns && this.browserInteractionMode() !== "manual"
       && this.routingAccountPool().some(name => this.accountCooldowns.get(name))) {
       const account = resolveCooldownRoute({ pool: this.routingAccountPool(), statuses: this.accountStatuses,
-        disabled: this.disabledAccounts, pending: this.pendingRemovalAccounts,
+        disabled: this.disabledAccounts, pending,
         unusualActivityDisabled: new Set(this.unusualActivityDisabledAccounts?.keys?.() || []),
         preferred: this.stickyConversations?.get(conversationKey), cooldowns: this.accountCooldowns,
         tabs: [...(this.turnTabs?.values() || [])], roundRobin: this.accountRoundRobinIndex || 0 });
       return account === PRIMARY_ACCOUNT ? null : account;
     }
     return selectAccount({ pool: this.accountPool, configured: this.accountConfigPresent,
-      disabled: this.disabledAccounts, pending: this.pendingRemovalAccounts, statuses: this.accountStatuses,
+      disabled: this.disabledAccounts, pending, statuses: this.accountStatuses,
       tabs: [...(this.turnTabs?.values() || [])], bound: this.stickyConversations?.get(conversationKey),
       roundRobin: this.accountRoundRobinIndex || 0 });
   }
@@ -824,7 +830,7 @@ class BrowserHost {
     if (!this.accountCooldowns || !this.routingAccountPool().some(name => this.accountCooldowns.get(name))) return;
     const now = Date.now();
     await Promise.all(this.routingAccountPool().map(async name => {
-      if (this.disabledAccounts?.has(name) || this.pendingRemovalAccounts?.has(name)
+      if (this.disabledAccounts?.has(name) || this.pendingRemovalAccounts?.has(name) || this.accountLoginReservations?.has(name)
         || this.accountCooldowns.get(name)) return;
       const status = this.accountStatuses.get(name);
       if (status?.routingAuthCheckedAt > now - 30_000) return;
@@ -918,7 +924,8 @@ class BrowserHost {
   }
 
   isAccountBusy(name) {
-    return [...this.turnTabs.values()].some(tab => accountNameForTab(tab) === name && tab.status === "running")
+    return this.accountLoginReservations?.has(name) === true
+      || [...this.turnTabs.values()].some(tab => accountNameForTab(tab) === name && tab.status === "running")
       || [...(this.accountCleanup?.values() || [])].some(tab => accountNameForTab(tab) === name);
   }
 
@@ -1483,6 +1490,7 @@ class BrowserHost {
 
   recordAccountAuthFailure(accountName) {
     if (!accountName) return;
+    if (this.accountLoginReservations?.has(accountName)) return;
     const now = Date.now();
     if (!this.accountStatuses) this.accountStatuses = new Map();
     const existing = this.accountStatuses.get(accountName);
@@ -1523,6 +1531,7 @@ class BrowserHost {
 
   recordAccountAuthSuccess(accountName) {
     if (!accountName) return;
+    if (this.accountLoginReservations?.has(accountName)) return;
     if (!this.accountStatuses) this.accountStatuses = new Map();
     const existing = this.accountStatuses.get(accountName);
     if (existing && existing.authenticated === true && (!existing.cooldownUntil || existing.cooldownUntil <= 0)) {
@@ -1546,6 +1555,7 @@ class BrowserHost {
 
   async auditAccountCookie(accountName) {
     if (!accountName) return false;
+    if (this.accountLoginReservations?.has(accountName)) return false;
     const now = Date.now();
     try {
       const sessionApi = this.session || session;
@@ -1985,7 +1995,7 @@ class BrowserHost {
           let anyAuthed = false;
           for (const acc of this.accountPool) {
             try {
-              if (this.disabledAccounts?.has(acc) || this.pendingRemovalAccounts?.has(acc)) continue;
+              if (this.disabledAccounts?.has(acc) || this.pendingRemovalAccounts?.has(acc) || this.accountLoginReservations?.has(acc)) continue;
               const partSession = session.fromPartition(this.accountPaths.partition(acc));
               this.configureLocalePreferences(partSession);
               const res = await readChatGptAuthSession(partSession.fetch.bind(partSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
@@ -3642,6 +3652,7 @@ class BrowserHost {
 
   openLogin() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT sign-in verification");
+    if (this.accountPasskeyLogin) throw new Error("Finish the selected account's Chrome sign-in first");
     if (this.state.authenticated && !this.primaryNavigationError) {
       this.activateHomeSurface();
       this.show();
@@ -3693,6 +3704,7 @@ class BrowserHost {
 
   openPasskeyLogin() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT passkey import");
+    if (this.accountPasskeyLogin) throw new Error("Finish the selected account's Chrome sign-in first");
     if (this.state.authenticated) {
       this.activateHomeSurface();
       this.show();
@@ -3743,6 +3755,13 @@ class BrowserHost {
     await this.installPasskeyLogin(transfer);
     this.setState({ passkeyPhase: null, loading: false });
     return this.snapshot();
+  }
+
+  openAccountPasskeyLogin(accountName) {
+    return startAccountPasskeyLogin(this, accountName, this.session || session, {
+      idleUrl: IDLE_BROWSER_URL,
+      composerSelector: COMPOSER_SELECTOR,
+    });
   }
 
   async clearOwnedSessionForPasskey() {
@@ -4151,6 +4170,7 @@ class BrowserHost {
 
   async withManualOperation(name, action) {
     await this.ready();
+    if (this.accountPasskeyLogin) throw new Error("Finish the selected account's Chrome sign-in first");
     if (this.activeTraceId) {
       throw new Error(`ChatGPT browser is running Codex turn ${this.activeTraceId}`);
     }

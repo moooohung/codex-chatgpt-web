@@ -64,6 +64,7 @@ export interface BrowserState {
   title: string;
   authenticated: boolean;
   passkeyPhase?: "opening" | "waiting" | "importing" | null;
+  passkeyAccount?: string | null;
   visible: boolean;
   surfaceActive: boolean;
   loading: boolean;
@@ -81,6 +82,8 @@ export interface BrowserState {
 
 export interface BrowserTabState {
   id: string;
+  accountName?: string | null;
+  isSignInTab?: boolean;
   traceId: string | null;
   title: string;
   status: "idle" | "loading" | "signed-out" | "ready" | "testing" | "running" | "error" | "aborted";
@@ -222,6 +225,7 @@ export interface LauncherApi {
   addAccount(input: AccountAddInput): Promise<{ ok: boolean; name: string }>;
   removeAccount(name: string): Promise<{ ok: boolean; deferred?: boolean }>;
   openAccountLogin(name: string): Promise<{ ok: boolean }>;
+  openAccountPasskeyLogin(name: string): Promise<BrowserState>;
   toggleAccount(input: { name: string; enabled: boolean }): Promise<{ ok: boolean; name: string; enabled: boolean }>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
