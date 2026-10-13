@@ -404,12 +404,12 @@ export function AccountsSurface({
               } else if (!isEnabled) {
                 statusClass = "status-disabled";
                 statusLabel = copy.accountStatusDisabled;
-              } else if (acc.cooling) {
-                statusClass = "status-cooling";
-                statusLabel = copy.accountStatusCooling;
               } else if (!acc.authenticated) {
                 statusClass = "status-signed-out";
                 statusLabel = copy.accountStatusSignedOut;
+              } else if (acc.cooling) {
+                statusClass = "status-cooling";
+                statusLabel = copy.accountStatusCooling;
               }
 
               return (

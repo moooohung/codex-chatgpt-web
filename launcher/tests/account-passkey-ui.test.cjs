@@ -99,6 +99,37 @@ test("account cards render normal Chrome login even while another account is aut
   assert.equal(chromeButton(h.render()), undefined);
 });
 
+test("signed-out account displays sign-in required before an auth retry delay or saved provider cooldown", async () => {
+  const before = { name: "beta", authenticated: false, cooling: true, enabled: true, activeTabs: 0,
+    retryAt: Date.now() + 30 * 60 * 1000 };
+  const h = await accountsHarness({ listAccounts: async () => ({ accounts: [before] }) });
+  const rendered = card(h.render(), "beta");
+  const pill = visit(rendered).find(node => String(node.props.className || "").includes("account-status-pill"));
+  assert.equal(textOf(pill), copy.accountStatusSignedOut);
+  assert.match(pill.props.className, /status-signed-out/);
+  assert.equal(chromeButton(rendered).props.disabled, false);
+  assert.equal(before.cooling, true, "rendering must preserve the provider cooldown");
+});
+
+test("authenticated account still displays its real cooldown", async () => {
+  const h = await accountsHarness({ listAccounts: async () => ({ accounts: [
+    { name: "beta", authenticated: true, cooling: true, enabled: true, activeTabs: 0 },
+  ] }) });
+  const pill = visit(card(h.render(), "beta")).find(node => String(node.props.className || "").includes("account-status-pill"));
+  assert.equal(textOf(pill), copy.accountStatusCooling);
+  assert.match(pill.props.className, /status-cooling/);
+});
+
+test("disabled and pending-removal account labels retain priority over sign-in and cooldown", async () => {
+  const h = await accountsHarness({ listAccounts: async () => ({ accounts: [
+    { name: "alpha", authenticated: false, cooling: true, enabled: false, activeTabs: 0 },
+    { name: "beta", authenticated: false, cooling: true, enabled: true, pendingRemoval: true, activeTabs: 0 },
+  ] }) });
+  const status = name => visit(card(h.render(), name)).find(node => String(node.props.className || "").includes("account-status-pill"));
+  assert.equal(textOf(status("alpha")), copy.accountStatusDisabled);
+  assert.equal(textOf(status("beta")), copy.accountRemovalPending);
+});
+
 test("account launch targets beta, locks neighbors, and Continue remains usable during the runtime operation", async () => {
   const calls = [];
   let finish;
