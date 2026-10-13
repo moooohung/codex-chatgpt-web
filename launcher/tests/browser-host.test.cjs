@@ -25,6 +25,28 @@ const {
   navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
 
+const FAKE_ACCOUNT_CONTEXT = Object.freeze({ accountKey: "a".repeat(64), planType: "plus" });
+
+async function readFakeAccountContext(browserSession) {
+  assert.ok(browserSession && [...this.turnTabs.values()].some(tab => (
+    tab.status === "running" && tab.interactionMode === "automatic"
+    && tab.view?.webContents.session === browserSession
+  )), "account proof must read the owned automatic tab's session");
+  return FAKE_ACCOUNT_CONTEXT;
+}
+
+function registerAutomaticTurnTabFixture(host, tab, traceId, helperPid, conversationKey, connectorIdentity) {
+  Object.assign(tab, {
+    traceId, helperPid, conversationKey, connectorIdentity,
+    status: "running", interactionMode: "automatic",
+    view: { webContents: {
+      session: {}, isDestroyed: () => false, setBackgroundThrottling() {},
+    } },
+  });
+  host.turnTabs.set(tab.id, tab);
+  return tab;
+}
+
 function primaryLoginFixture() {
   let loads = 0;
   let probes = 0;
@@ -2213,6 +2235,7 @@ test("a replacement helper takes over only after the previous owner exited", asy
     message: "ChatGPT is working",
     view: {
       webContents: {
+        session: {},
         isDestroyed: () => false,
         setBackgroundThrottling() {},
       },
@@ -2223,6 +2246,7 @@ test("a replacement helper takes over only after the previous owner exited", asy
     manualOperation: null,
     turnTabs: new Map([[tab.id, tab]]),
     userCancelledTurnOwners: new Map(),
+    readAccountContext: readFakeAccountContext,
     selectedTabId: "home",
     syncViewVisibility() {},
     snapshot: () => ({ tabs: [] }),
@@ -2238,6 +2262,7 @@ test("a replacement helper takes over only after the previous owner exited", asy
     tabId: tab.id,
     reused: false,
     connectorBound: false,
+    accountContext: FAKE_ACCOUNT_CONTEXT,
   });
   assert.equal(tab.helperPid, process.pid);
   assert.equal(warnings.length, 1);
@@ -2900,6 +2925,7 @@ test("a later provider round reuses only its exact connector-bound conversation"
     bootstrapReady: true,
     view: {
       webContents: {
+        session: {},
         isDestroyed: () => false,
         setBackgroundThrottling: (enabled) => throttling.push(enabled),
       },
@@ -2910,6 +2936,7 @@ test("a later provider round reuses only its exact connector-bound conversation"
     manualOperation: null,
     turnTabs: new Map([[tab.id, tab]]),
     userCancelledTurnOwners: new Map(),
+    readAccountContext: readFakeAccountContext,
     selectedTabId: "home",
     syncViewVisibility: () => events.push("visible"),
     snapshot: () => ({ tabs: [] }),
@@ -2932,6 +2959,7 @@ test("a later provider round reuses only its exact connector-bound conversation"
     tabId: "tab-reused",
     reused: true,
     connectorBound: true,
+    accountContext: FAKE_ACCOUNT_CONTEXT,
   });
   assert.equal(tab.traceId, "trace_next");
   assert.equal(tab.helperPid, 222);
@@ -2960,9 +2988,10 @@ test("a retained conversation is not reused for a different connector identity",
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
-    createTurnTab: (...args) => {
+    readAccountContext: readFakeAccountContext,
+    createTurnTab(...args) {
       assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector", undefined]);
-      return created;
+      return registerAutomaticTurnTabFixture(this, created, ...args);
     },
     writeDescriptor() {},
     syncViewVisibility() {},
@@ -2985,6 +3014,7 @@ test("a retained conversation is not reused for a different connector identity",
     tabId: "fresh",
     reused: false,
     connectorBound: false,
+    accountContext: FAKE_ACCOUNT_CONTEXT,
   });
   assert.equal(retained.status, "ready");
 });
@@ -3004,7 +3034,10 @@ test("an Automatic turn never reuses a retained Zero Risk conversation", async (
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
-    createTurnTab: () => ({ id: "automatic-fresh", surfaceId: "surface-fresh" }),
+    readAccountContext: readFakeAccountContext,
+    createTurnTab(...args) {
+      return registerAutomaticTurnTabFixture(this, { id: "automatic-fresh", surfaceId: "surface-fresh" }, ...args);
+    },
     writeDescriptor() {},
     syncViewVisibility() {},
     publishState() {},
@@ -3026,6 +3059,7 @@ test("an Automatic turn never reuses a retained Zero Risk conversation", async (
       tabId: "automatic-fresh",
       reused: false,
       connectorBound: false,
+      accountContext: FAKE_ACCOUNT_CONTEXT,
     },
   );
   assert.equal(retained.status, "ready");
@@ -3057,7 +3091,10 @@ test("a connector conversation is not reused until its connector was bound", asy
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
-    createTurnTab: () => ({ id: "fresh", surfaceId: "surface-fresh" }),
+    readAccountContext: readFakeAccountContext,
+    createTurnTab(...args) {
+      return registerAutomaticTurnTabFixture(this, { id: "fresh", surfaceId: "surface-fresh" }, ...args);
+    },
     writeDescriptor() {},
     syncViewVisibility() {},
     publishState() {},
@@ -3079,6 +3116,7 @@ test("a connector conversation is not reused until its connector was bound", asy
       tabId: "fresh",
       reused: false,
       connectorBound: false,
+      accountContext: FAKE_ACCOUNT_CONTEXT,
     },
   );
 });
@@ -3492,16 +3530,15 @@ function failedAutomaticTurnFixture() {
   };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]), userCancelledTurnOwners: new Map(), closedTurnOwners: new Map(),
+    readAccountContext: readFakeAccountContext,
     selectedTabId: tab.id, manualOperation: null,
     window: { contentView: { removeChildView() {} } },
     syncViewVisibility() {}, presentTurnView() {}, writeDescriptor() {}, publishState() {}, snapshot: () => ({ tabs: [] }),
     hide() { throw new Error("do not hide the failed page the user is inspecting"); },
     logger: { info() {} },
     createTurnTab: async (traceId, helperPid, conversationKey, connectorIdentity) => {
-      const fresh = { id: "fresh-tab", surfaceId: "fresh-surface", traceId, helperPid,
-        conversationKey, connectorIdentity, status: "running", interactionMode: "automatic" };
-      fixture.turnTabs.set(fresh.id, fresh);
-      return fresh;
+      return registerAutomaticTurnTabFixture(fixture, { id: "fresh-tab", surfaceId: "fresh-surface" },
+        traceId, helperPid, conversationKey, connectorIdentity);
     },
   });
   return { fixture, tab, closed };
@@ -3547,10 +3584,12 @@ test("failed pages cannot supply retained history and a same-trace retry gets a 
   assert.deepEqual(closed, []);
   const next = await fixture.beginTurn("next-trace", false, 778, tab.conversationKey, tab.connectorIdentity);
   assert.equal(next.reused, false);
+  assert.deepEqual(next.accountContext, FAKE_ACCOUNT_CONTEXT);
   assert.equal(fixture.turnTabs.get(tab.id), tab, "another turn does not immediately erase failure evidence");
   fixture.turnTabs.delete(next.tabId);
   const retry = await fixture.beginTurn(tab.traceId, false, 778, tab.conversationKey, tab.connectorIdentity);
   assert.equal(retry.reused, false);
+  assert.deepEqual(retry.accountContext, FAKE_ACCOUNT_CONTEXT);
   assert.notEqual(retry.tabId, tab.id);
   assert.deepEqual(closed, [tab.id]);
   assert.equal([...fixture.turnTabs.values()].filter(item => item.traceId === tab.traceId).length, 1);
@@ -4218,6 +4257,7 @@ test("off-on-off fresh conversation changes retire completed history before it c
     const fixture = Object.assign(Object.create(BrowserHost.prototype), {
       manualOperation: null, turnTabs: new Map([[stale.id, stale], [manual.id, manual]]),
       userCancelledTurnOwners: new Map(), selectedTabId: "home", logger: { info() {} },
+      readAccountContext: readFakeAccountContext,
       syncViewVisibility() {}, snapshot: () => ({}), publishState() {}, writeDescriptor() {},
       removeTurnTab(tab, abortRunning) {
         assert.equal(abortRunning, false);
@@ -4225,7 +4265,9 @@ test("off-on-off fresh conversation changes retire completed history before it c
         removed.push(tab.id);
         this.turnTabs.delete(tab.id);
       },
-      createTurnTab: async () => ({ id: "new-chat", surfaceId: "new-surface" }),
+      async createTurnTab(...args) {
+        return registerAutomaticTurnTabFixture(this, { id: "new-chat", surfaceId: "new-surface" }, ...args);
+      },
     });
     vm.runInNewContext(main.slice(main.indexOf("function syncBrowserPreferences("), main.indexOf("function registerIpc(")) +
       main.slice(main.indexOf(`handle("${channel}",`),
@@ -4259,6 +4301,7 @@ test("off-on-off fresh conversation changes retire completed history before it c
     const lease = await fixture.beginTurn("new-turn", false, 123, key, "Codex Native2");
     assert.equal(lease.reused, false);
     assert.equal(lease.tabId, "new-chat");
+    assert.deepEqual(lease.accountContext, FAKE_ACCOUNT_CONTEXT);
     assert.equal(state[property], false);
     assert.equal(fixture.turnTabs.get(manual.id), savedChats ? undefined : manual);
   }

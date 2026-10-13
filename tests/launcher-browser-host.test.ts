@@ -49,7 +49,7 @@ test("launcher activity follows actual send callbacks and current-turn tool coun
     const message = await request.json() as typeof messages[number];
     messages.push(message);
     return Response.json(message.phase === "start"
-      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
       : { cancelledByUser: false });
   } });
   const waitForStage = async (stage: string) => {
@@ -113,7 +113,7 @@ test.each(["failed", "cancelled", "handoff", "release-error"])(
         return Response.json({ error: "fixture control unavailable" }, { status: 503 });
       }
       return Response.json(message.phase === "start"
-        ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+        ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
         : { cancelledByUser: false });
     } });
     const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
@@ -180,7 +180,7 @@ test("a blocked sign-in replaces an opaque navigation abort with a non-retryable
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const activity = await req.json() as { phase: string };
     return Response.json(activity.phase === "start"
-      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
       : { cancelledByUser: false, authenticationRequired: needsSignIn });
   } });
   try {
@@ -206,7 +206,7 @@ test("startup waits beyond five seconds and distinguishes its deadline from call
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch() {
     calls++;
     await Bun.sleep(calls === 1 ? 5_100 : 80);
-    return Response.json({ surfaceId: "a".repeat(32), reused: false, connectorBound: false });
+    return Response.json({ surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } });
   } });
   try {
     const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);

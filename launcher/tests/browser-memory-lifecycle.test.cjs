@@ -3,9 +3,19 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { BrowserHost, IDLE_BROWSER_URL } = require("../electron/browser-host.cjs");
 
+const FAKE_ACCOUNT_CONTEXT = Object.freeze({ accountKey: "a".repeat(64), planType: "plus" });
+
+async function readFakeAccountContext(browserSession) {
+  assert.ok(browserSession && [...this.turnTabs.values()].some(tab => (
+    tab.status === "running" && tab.interactionMode === "automatic"
+    && tab.view?.webContents.session === browserSession
+  )), "account proof must read the owned automatic tab's session");
+  return FAKE_ACCOUNT_CONTEXT;
+}
+
 function fixture(url = "https://chatgpt.com/c/saved") {
   const contents = Object.assign(new EventEmitter(), {
-    isDestroyed: () => false, getURL: () => url,
+    session: {}, isDestroyed: () => false, getURL: () => url,
     loadURL: async next => { url = next; },
     getProcessMemoryInfo: async () => ({ private: 100 * 1024 }),
     setBackgroundThrottling() {},
@@ -19,6 +29,7 @@ function fixture(url = "https://chatgpt.com/c/saved") {
     userCancelledTurnOwners: new Map(), closedTurnOwners: new Map(), selectedTabId: "another",
     memoryPolicy: { releaseIdleTabMemory: true, recycleAfterTurns: 8, recycleRendererMb: 512, maxTabs: 4 },
     resolveAccountForConversation: () => null, markTurnTabSurface: async () => {},
+    readAccountContext: readFakeAccountContext,
     syncPowerSaveBlocker() {}, writeDescriptor() {}, presentTurnView() {}, syncViewVisibility() {},
     publishState() {}, snapshot: () => ({}),
     logger: { info: (...args) => events.push(args), warn: (...args) => events.push(args) },

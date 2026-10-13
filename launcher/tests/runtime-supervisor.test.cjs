@@ -2079,11 +2079,29 @@ test("observed CLI fresh-conversation changes retire completed tabs once and def
   const manual = { id: "manual", status: "ready", interactionMode: "manual", conversationKey: "b".repeat(64) };
   let operation = null, updates = 0;
   const removed = [];
+  const accountContext = Object.freeze({ accountKey: "a".repeat(64), planType: "plus" });
   const browserHost = Object.assign(Object.create(BrowserHost.prototype), {
     manualOperation: null, turnTabs: new Map([[old.id, old], [active.id, active], [manual.id, manual]]),
     userCancelledTurnOwners: new Map(), logger: { info() {} },
     removeTurnTab(tab, abort) { assert.equal(abort, false); removed.push(tab.id); this.turnTabs.delete(tab.id); },
-    createTurnTab: async () => ({ id: "new", surfaceId: "new-surface" }),
+    async readAccountContext(browserSession) {
+      assert.ok(browserSession && [...this.turnTabs.values()].some(tab => (
+        tab.status === "running" && tab.interactionMode === "automatic"
+        && tab.view?.webContents.session === browserSession
+      )), "account proof must read the owned automatic tab's session");
+      return accountContext;
+    },
+    async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity) {
+      const tab = {
+        id: "new", surfaceId: "new-surface", traceId, helperPid, conversationKey, connectorIdentity,
+        status: "running", interactionMode: "automatic",
+        view: { webContents: {
+          session: {}, isDestroyed: () => false, setBackgroundThrottling() {},
+        } },
+      };
+      this.turnTabs.set(tab.id, tab);
+      return tab;
+    },
     syncViewVisibility() {}, snapshot: () => ({}), publishState() {}, writeDescriptor() {},
   });
   const sandbox = {

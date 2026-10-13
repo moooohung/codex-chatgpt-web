@@ -119,10 +119,14 @@ test("automatic and legacy manual auth failures affect their own account and lea
 
 test("disable blocks new work while an existing automatic turn can reconnect", async () => {
   const tab = { id: "active", traceId: "trace", helperPid: process.pid, accountName: "alpha", conversationKey: "conversation",
-    interactionMode: "automatic", status: "running", view: { webContents: { isDestroyed: () => true } } };
+    interactionMode: "automatic", status: "running", view: { webContents: { session: {}, isDestroyed: () => false, setBackgroundThrottling() {} } } };
   const host = Object.assign(Object.create(BrowserHost.prototype), {
     accountPool: ["alpha"], accountConfigPresent: true, disabledAccounts: new Set(["alpha"]),
     turnTabs: new Map([[tab.id, tab]]), userCancelledTurnOwners: new Map(), selectedTabId: tab.id,
+    readAccountContext: async session => {
+      assert.equal(session, tab.view.webContents.session);
+      return { accountKey: "a".repeat(64), planType: "plus" };
+    },
     logger: { info() {} }, snapshot: () => ({}), writeDescriptor() {}, presentTurnView() {},
   });
   await host.beginTurn("trace", false, process.pid, "conversation");

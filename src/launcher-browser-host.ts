@@ -5,6 +5,7 @@ import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 import { createOwnedTargetCdpTransport } from "./launcher-owned-cdp";
+import type { ChatGptAccountContext } from "./adapters/chatgpt-web/account-context";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 export const LAUNCHER_BROWSER_IDLE_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
@@ -693,6 +694,7 @@ export async function notifyLauncherTurn(
   surfaceId?: string;
   reused?: boolean;
   connectorBound?: boolean;
+  accountContext?: ChatGptAccountContext;
   cancelledByUser?: boolean;
   authenticationRequired?: boolean;
   trackUsage?: boolean;
@@ -752,11 +754,23 @@ export async function notifyLauncherTurn(
       if (typeof body.connectorBound !== "boolean") {
         throw new Error("Launcher browser control channel returned an invalid connector state");
       }
+      let accountContext: ChatGptAccountContext | undefined;
+      if (body.accountContext !== undefined) {
+        const context = body.accountContext as Partial<ChatGptAccountContext>;
+        if (!context || typeof context !== "object" || Array.isArray(context)
+          || Object.keys(context).length !== 2
+          || typeof context.accountKey !== "string" || !/^[a-f0-9]{64}$/.test(context.accountKey)
+          || typeof context.planType !== "string" || !["plus", "pro", "prolite", "free"].includes(context.planType)) {
+          throw new Error("Launcher browser control channel returned invalid account plan evidence");
+        }
+        accountContext = { accountKey: context.accountKey, planType: context.planType as ChatGptAccountContext["planType"] };
+      }
       return {
         surfaceId: body.surfaceId,
         reused: body.reused,
         connectorBound: body.connectorBound,
         trackUsage: body.trackUsage === true,
+        ...(accountContext ? { accountContext } : {}),
       };
     }
     if (activity.phase === "end") {

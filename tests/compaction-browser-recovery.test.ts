@@ -173,7 +173,8 @@ test.each([
     ]);
     expect(sendBudgets).toEqual(Array(multipart ? 6 : 1).fill(180_000));
     expect(released).toBe(true);
-    expect(activated).toBe(1);
+    // Every physical multipart Send must cross the activation gate, including early parts.
+    expect(activated).toBe(multipart ? 6 : 1);
     expect(page.listenerCount("request")).toBe(0);
     expect(page.listenerCount("response")).toBe(0);
   } finally {

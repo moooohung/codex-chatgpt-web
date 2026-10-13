@@ -26,6 +26,7 @@ const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const { startAccountPasskeyLogin } = require("./account-passkey-login.cjs");
 const { configureChatGptAnnouncementDismissal } = require("./browser-announcements.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
+const { readAccountContext, readLeasedAccountContext } = require("./account-context.cjs");
 const { resolveBrowserMemoryPolicy } = require("./browser-memory-policy.cjs");
 const { bindBrowserResourceBudget, takeContentsResourceBudgetCounts } = require("./browser-resource-budget.cjs");
 const {
@@ -3261,6 +3262,10 @@ class BrowserHost {
     return { cancelledByUser: true };
   }
 
+  readAccountContext(browserSession, options) {
+    return readAccountContext(browserSession, options);
+  }
+
   async beginTurn(
     traceId,
     reveal,
@@ -3351,6 +3356,9 @@ class BrowserHost {
           throw unavailable;
         }
       }
+      const accountContext = await readLeasedAccountContext(this, existing, {
+        traceId, helperPid, conversationKey, connectorIdentity,
+      }, signal);
       existing.approvalPending = false;
       existing.turnProgress = undefined;
       existing.activity = undefined;
@@ -3383,6 +3391,7 @@ class BrowserHost {
         tabId: existing.id,
         reused,
         connectorBound: existing.connectorBound === true,
+        accountContext,
       };
     }
     if (requireRetainedConversation) {
@@ -3393,6 +3402,9 @@ class BrowserHost {
     // A retry may reuse the trace, but never the failed document or its incremental history.
     if (sameTrace?.failedAt !== undefined) this.removeTurnTab(sameTrace, false);
     const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal);
+    const accountContext = await readLeasedAccountContext(this, tab, {
+      traceId, helperPid, conversationKey, connectorIdentity,
+    }, signal);
     if (reveal) {
       this.selectedTabId = tab.id;
       this.show();
@@ -3407,7 +3419,7 @@ class BrowserHost {
       tabId: tab.id, traceId, rendererPid: rendererPidFor(tab.view?.webContents), tabCount: this.turnTabs.size,
     });
     this.writeDescriptor();
-    return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
+    return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false, accountContext };
   }
 
   async endTurn(

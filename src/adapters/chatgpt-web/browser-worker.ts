@@ -98,6 +98,7 @@ import {
   type ChatGptWebModelFamily,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
+import { resolveChatGptAccountPreparation, type ChatGptAccountPreparation } from "./account-context";
 import { observeSubmissionDuringActivation } from "./submission-activation";
 import {
   chatGptPageObservationTimeoutMs,
@@ -1409,14 +1410,15 @@ export interface BrowserTurn {
   reasoning?: string;
   modelFamily?: "5.6" | "6";
   capabilities: ChatGptWebCapabilities;
-  prepare: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
-  prepareResume?: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
+  prepare: (account?: ChatGptAccountPreparation) => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
+  prepareResume?: (account?: ChatGptAccountPreparation) => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
   /** Select the Codex Native connector without advertising the ordinary turn tool environment. */
   nativeConnector?: boolean;
   retainConversation?: boolean;
   requireRetainedConversation?: boolean;
   conversationKey?: string;
-  onPreparedSelected?: (reused: boolean) => void | Promise<void>;
+  onPreparedSelected?: (reused: boolean, account?: ChatGptAccountPreparation) => void | Promise<void>;
+  onAccountSelected?: (account: ChatGptAccountPreparation) => void | Promise<void>;
   abortSignal?: AbortSignal;
   onHeartbeat?: () => void;
   /** Positive generation evidence, distinct from an idle helper heartbeat. */
@@ -5540,7 +5542,21 @@ export class ChatGptBrowserWorker {
       if (reused && !turn.prepareResume) {
         throw new Error("Launcher reused a ChatGPT conversation without a continuation prompt");
       }
-      await turn.onPreparedSelected?.(reused);
+      if (!lease.accountContext) throw new ChatGptWebAdapterError(
+        "The launcher did not verify the selected ChatGPT account plan. No message was sent; update the launcher and retry.",
+        { status: 409, errorType: "invalid_request_error", code: "chatgpt_account_context_unavailable", retryable: false },
+      );
+      const accountPreparation = resolveChatGptAccountPreparation(turn, lease.accountContext);
+      const originalTurn = turn;
+      await turn.onAccountSelected?.(accountPreparation);
+      turn = { ...turn, ...accountPreparation,
+        prepare: () => originalTurn.prepare(accountPreparation),
+        ...(originalTurn.prepareResume ? { prepareResume: () => originalTurn.prepareResume!(accountPreparation) } : {}),
+      };
+      console.info(`[chatgpt-web] account_context_selected ${JSON.stringify({ traceId: turn.traceId,
+        account: accountPreparation.accountKey.slice(0, 12), plan: accountPreparation.planType,
+        family: turn.modelFamily, effort: turn.reasoning })}`);
+      await turn.onPreparedSelected?.(reused, accountPreparation);
       heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref?.();
       sendHeartbeat();
@@ -6000,6 +6016,7 @@ export class ChatGptBrowserWorker {
                 applyEffortClamp(mode);
                 this.reportSelectedEffort(page, mode);
                 submissionRejection.begin(page);
+                await turn.onSendActivated?.();
               } },
               undefined,
               launcherObservationRecovery

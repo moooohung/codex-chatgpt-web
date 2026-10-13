@@ -47,7 +47,7 @@ test.each([false, true])("account fallback only replays a prompt that never acti
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const body = await request.json() as { phase: string };
     phases.push(body.phase);
-    return Response.json(body.phase === "start" ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+    return Response.json(body.phase === "start" ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
       : body.phase === "cooldown" ? { ok: true, alternateAvailable: true } : { cancelledByUser: false });
   } });
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
@@ -79,7 +79,7 @@ test("unusual activity never resubmits the blocked turn on another account", asy
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const body = await request.json() as { phase: string };
     phases.push(body.phase);
-    return Response.json(body.phase === "start" ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+    return Response.json(body.phase === "start" ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
       : body.phase === "cooldown" ? { ok: true, alternateAvailable: true } : { cancelledByUser: false });
   } });
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {

@@ -179,6 +179,7 @@ test("accepted compaction retires through the helper as completed without hiding
       const body = await request.json() as Record<string, unknown>;
       if (body.phase === "start") return Response.json({
         ok: true, surfaceId: "launcher_surface_id_0123456789AB", reused: true, connectorBound: true,
+        accountContext: { accountKey: "a".repeat(64), planType: "pro" },
       });
       if (body.phase === "end") ended.set(body.traceId as string, body);
       return Response.json({ ok: true, cancelledByUser: false });
