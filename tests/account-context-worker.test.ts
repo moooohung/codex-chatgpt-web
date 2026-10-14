@@ -23,7 +23,7 @@ test.each([false, true])("actual fresh/resumed lease plan reaches preparation be
   writeFileSync(descriptor, JSON.stringify({ version: 3, kind: "codex-web-gpt-launcher", profile: "production", pid: process.pid,
     endpoint, control: { endpoint, token: "t".repeat(43) }, partition: "persist:codex-web-gpt-chatgpt",
     helper: { executable: process.execPath, script: import.meta.path }, idleUrl: LAUNCHER_BROWSER_IDLE_URL,
-    surfaceId: "a".repeat(32), surfaceTargets: {}, createdAt: new Date().toISOString() }));
+    surfaceId: "a".repeat(32), surfaceTargets: {}, createdAt: new Date().toISOString() }), { mode: 0o600 });
   const caps = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: false };
   const prepare = async (account: any) => {
     events.push(`prepare:${account.planType}:${account.capabilities.proAvailable}`);
@@ -64,7 +64,7 @@ test("missing actual account proof releases the exact lease without preparing or
   writeFileSync(descriptor, JSON.stringify({ version: 3, kind: "codex-web-gpt-launcher", profile: "production", pid: process.pid,
     endpoint, control: { endpoint, token: "t".repeat(43) }, partition: "persist:codex-web-gpt-chatgpt",
     helper: { executable: process.execPath, script: import.meta.path }, idleUrl: LAUNCHER_BROWSER_IDLE_URL,
-    surfaceId: "a".repeat(32), surfaceTargets: {}, createdAt: new Date().toISOString() }));
+    surfaceId: "a".repeat(32), surfaceTargets: {}, createdAt: new Date().toISOString() }), { mode: 0o600 });
   let prepares = 0;
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { browserHost: "launcher", browserHostDescriptorPath: descriptor },

@@ -32,7 +32,8 @@ test("adapter recomputes unsent Pro-to-Plus transport without changing the next 
     return "offline fixture complete";
   });
   const adapter = createChatGptWebAdapter({ adapter: "chatgpt-web", baseUrl: `browser://account-context-adapter-${Date.now()}`,
-    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false,
+    chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(tmpdir(), "account-context-adapter-inert.json"),
+      localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false,
       experimentalBiggerContext: true, experimentalMinimalContextTransport: true } });
   const parsed = parseRequest({ model: "gpt-5.6-sol", reasoning: { effort: "high" },
     input: Array.from({ length: 8 }, (_, index) => ({ type: "message", role: "user",

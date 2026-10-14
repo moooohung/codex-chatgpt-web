@@ -52,7 +52,7 @@ function fixture(options: { failurePart?: number; activation?: BrowserTurn["onSe
   writeFileSync(descriptor, JSON.stringify({ version: 3, kind: "codex-web-gpt-launcher", profile: "production",
     pid: process.pid, endpoint, control: { endpoint, token: "t".repeat(43) },
     partition: "persist:codex-web-gpt-chatgpt", helper: { executable: process.execPath, script: import.meta.path },
-    idleUrl: LAUNCHER_BROWSER_IDLE_URL, surfaceId: "a".repeat(32), surfaceTargets: {}, createdAt: new Date().toISOString() }));
+    idleUrl: LAUNCHER_BROWSER_IDLE_URL, surfaceId: "a".repeat(32), surfaceTargets: {}, createdAt: new Date().toISOString() }), { mode: 0o600 });
   const page = Object.assign(new EventEmitter(), {
     evaluate: async () => ({}), isClosed: () => false, mainFrame: () => ({}),
   });
