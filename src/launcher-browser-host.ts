@@ -387,6 +387,12 @@ export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
   | {
+      phase: "capability-error";
+      traceId: string;
+      helperPid: number;
+      proUnavailable?: boolean;
+    }
+  | {
       phase: "effort";
       traceId: string;
       helperPid: number;
@@ -428,6 +434,7 @@ export type LauncherTurnActivity =
       conversationKey?: string;
       connectorIdentity?: string;
       requireRetainedConversation?: boolean;
+      modelRequest?: { requiresPro: boolean; reasoning?: string };
     }
   | {
       phase: "heartbeat";
@@ -740,7 +747,7 @@ export async function notifyLauncherTurn(
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    if (activity.phase === "cooldown") {
+    if (activity.phase === "cooldown" || activity.phase === "capability-error") {
       if (body.ok !== true || typeof body.alternateAvailable !== "boolean") throw new Error("Launcher returned an invalid account cooldown acknowledgement");
       return { alternateAvailable: body.alternateAvailable };
     }
@@ -758,12 +765,15 @@ export async function notifyLauncherTurn(
       if (body.accountContext !== undefined) {
         const context = body.accountContext as Partial<ChatGptAccountContext>;
         if (!context || typeof context !== "object" || Array.isArray(context)
-          || Object.keys(context).length !== 2
+          || Object.keys(context).some(key => !["accountKey", "planType", "extraHighAvailable"].includes(key))
           || typeof context.accountKey !== "string" || !/^[a-f0-9]{64}$/.test(context.accountKey)
-          || typeof context.planType !== "string" || !["plus", "pro", "prolite", "free"].includes(context.planType)) {
+          || typeof context.planType !== "string" || !["plus", "pro", "prolite", "free"].includes(context.planType)
+          || (context.extraHighAvailable !== undefined && typeof context.extraHighAvailable !== "boolean")
+          || (context.planType === "free" && context.extraHighAvailable === true)) {
           throw new Error("Launcher browser control channel returned invalid account plan evidence");
         }
-        accountContext = { accountKey: context.accountKey, planType: context.planType as ChatGptAccountContext["planType"] };
+        accountContext = { accountKey: context.accountKey, planType: context.planType as ChatGptAccountContext["planType"],
+          ...(context.extraHighAvailable !== undefined ? { extraHighAvailable: context.extraHighAvailable } : {}) };
       }
       return {
         surfaceId: body.surfaceId,

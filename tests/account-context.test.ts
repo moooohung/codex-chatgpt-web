@@ -65,3 +65,13 @@ test("account evidence never grants unknown, contradictory or mismatched Free mo
   expect(() => resolveChatGptAccountPreparation(turn, { accountKey: "a".repeat(64), planType: "free" }))
     .toThrow("cannot run this model");
 });
+
+test("leased account picker evidence overrides another account's Extra High setting", () => {
+  const request = { ...turn, reasoning: "xhigh" };
+  const plus = { accountKey: "d".repeat(64), planType: "plus" as const, extraHighAvailable: false };
+  expect(resolveChatGptAccountPreparation(request, plus)).toMatchObject({
+    modelFamily: "6", reasoning: "high", capabilities: { extraHighAvailable: false, proAvailable: false },
+  });
+  expect(resolveChatGptAccountPreparation({ ...request, capabilities: { ...base, extraHighAvailable: false } },
+    { ...plus, extraHighAvailable: true })).toMatchObject({ reasoning: "xhigh", capabilities: { extraHighAvailable: true } });
+});

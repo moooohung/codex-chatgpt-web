@@ -105,6 +105,7 @@ class BrowserControlServer {
       || request.url === "/v1/turn/usage"
       || request.url === "/v1/turn/approval"
       || request.url === "/v1/turn/cooldown"
+      || request.url === "/v1/turn/capability-error"
       || request.url === "/v1/turn/effort"
       || request.url === "/v1/turn/end";
     const isAccountAdmission = request.url === "/v1/account/admit";
@@ -191,6 +192,16 @@ class BrowserControlServer {
       if (body.requireRetainedConversation !== undefined
         && typeof body.requireRetainedConversation !== "boolean") {
         throw new Error("requireRetainedConversation is invalid");
+      }
+      if (body.modelRequest !== undefined && (request.url !== "/v1/turn/start"
+        || !body.modelRequest || typeof body.modelRequest !== "object" || Array.isArray(body.modelRequest)
+        || Object.keys(body.modelRequest).some(key => !["requiresPro", "reasoning"].includes(key))
+        || typeof body.modelRequest.requiresPro !== "boolean"
+        || (body.modelRequest.reasoning !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(body.modelRequest.reasoning)))) {
+        throw new Error("modelRequest is invalid");
+      }
+      if (body.proUnavailable !== undefined && (request.url !== "/v1/turn/capability-error" || typeof body.proUnavailable !== "boolean")) {
+        throw new Error("proUnavailable is invalid");
       }
       if (body.requireRetainedConversation === true && body.conversationKey === undefined) {
         throw new Error("requireRetainedConversation requires conversationKey");
@@ -323,6 +334,7 @@ class BrowserControlServer {
           && v.helperPid === body.helperPid && v.status === "running");
         if (!tab || !this.stateStore) throw new Error("Effort observation requires the exact active browser turn owner");
         const result = observeEffortCeiling(this.stateStore, accountNameForTab(tab) || PRIMARY_ACCOUNT, body);
+        host.observeAccountPickerCapabilities?.(tab, body.available);
         if (result.event) this.logger.info(result.event.event, result.event);
         this.publishState?.(this.stateStore.read());
         writeJson(response, 200, { ok: true, ceiling: result.ceiling });
@@ -331,6 +343,12 @@ class BrowserControlServer {
       if (request.url === "/v1/turn/cooldown") {
         if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
         const result = await host.recordTurnCooldown(body.traceId, body.helperPid, body.retryAt, body.message, body.code);
+        writeJson(response, 200, { ok: true, ...result });
+        return;
+      }
+      if (request.url === "/v1/turn/capability-error") {
+        if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
+        const result = await host.refreshTurnCapabilities(body.traceId, body.helperPid, body.proUnavailable === true);
         writeJson(response, 200, { ok: true, ...result });
         return;
       }
@@ -363,6 +381,7 @@ class BrowserControlServer {
             body.connectorIdentity,
             body.requireRetainedConversation === true,
             acquisition.signal,
+            ...(body.modelRequest ? [body.modelRequest] : []),
           );
         } finally {
           response.off("close", onClose);

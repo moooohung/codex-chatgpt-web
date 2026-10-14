@@ -5,6 +5,7 @@ import { ChatGptWebAdapterError } from "./adapter-error";
 export interface ChatGptAccountContext {
   accountKey: string;
   planType: "plus" | "pro" | "prolite" | "free";
+  extraHighAvailable?: boolean;
 }
 
 export interface ChatGptAccountPreparation extends ChatGptAccountContext {
@@ -39,7 +40,7 @@ export function resolveChatGptAccountPreparation(
   const pro = account.planType === "pro" || account.planType === "prolite";
   const capabilities = { ...turn.capabilities, proAvailable: pro,
     solAvailable: account.planType !== "free",
-    extraHighAvailable: pro || (account.planType === "plus" && turn.capabilities.extraHighAvailable) };
+    extraHighAvailable: pro || (account.planType === "plus" && (account.extraHighAvailable ?? turn.capabilities.extraHighAvailable)) };
   let reasoning = turn.reasoning;
   let modelFamily = turn.modelFamily;
   if (account.planType === "plus" && reasoning === "max") {

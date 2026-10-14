@@ -28,6 +28,8 @@ for (const event of ["file.processing.completed", "file.processing.error", "file
       const context = page.context();
       const createSession = context.newCDPSession.bind(context);
       let activationError = "";
+      let finishActivation!: () => void;
+      const activationSettled = new Promise<void>(resolve => { finishActivation = resolve; });
       // Delay only command dispatch until the real response has finished. All protocol
       // events, the CDP error and the response-body read still come from actual Electron.
       context.newCDPSession = async target => {
@@ -44,6 +46,7 @@ for (const event of ["file.processing.completed", "file.processing.error", "file
             if (!finished.has(params.requestId)) await new Promise<void>(resolve => waiting.set(params.requestId, resolve));
             try { return await send(method, params); }
             catch (error) { activationError = String(error); throw error; }
+            finally { finishActivation(); }
           }
           return send(method as any, params);
         }) as typeof session.send;
@@ -54,6 +57,8 @@ for (const event of ["file.processing.completed", "file.processing.error", "file
         await page.evaluate(async () => {
           await fetch("/backend-api/files/process_upload_stream", { method: "POST", body: JSON.stringify({ file_name: "wanted.png", file_id: "owned" }) });
         });
+        // An error event can reject the observer before the delayed CDP command settles.
+        await activationSettled;
         if (event === "file.processing.completed") await observer.wait(AbortSignal.timeout(3000));
         else await expect(observer.wait(AbortSignal.timeout(3000))).rejects.toThrow(
           event === "file.processing.error" ? "file.processing.error" : "without a completion event",
