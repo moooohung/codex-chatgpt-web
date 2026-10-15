@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
 import { Icon } from "./icons";
 import type { Copy } from "./i18n";
-import type { AccountItem, LauncherSnapshot } from "./types";
+import type { AccountItem, BrowserState, LauncherSnapshot, OperationState } from "./types";
 import "./accounts.css";
 
 export function AccountsSurface({
+  browser,
   copy,
+  operation,
   snapshot,
   setError,
 }: {
+  browser: BrowserState | null;
   copy: Copy;
+  operation: OperationState | null;
   snapshot: LauncherSnapshot;
   setError: (error: string | null) => void;
 }) {
@@ -18,6 +22,8 @@ export function AccountsSurface({
   const [showAddForm, setShowAddForm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [actionBusyAccount, setActionBusyAccount] = useState<string | null>(null);
+  const [passkeyStartingAccount, setPasskeyStartingAccount] = useState<string | null>(null);
+  const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "warning"; text: string } | null>(null);
 
   // Form state
@@ -25,6 +31,22 @@ export function AccountsSurface({
   const [email, setEmail] = useState("");
   const [tunnelId, setTunnelId] = useState("");
   const [runtimeKey, setRuntimeKey] = useState("");
+  const passkeyPhase = browser?.passkeyPhase;
+  const passkeyActive = Boolean(passkeyPhase) || passkeyStartingAccount !== null;
+  const passkeyAccount = passkeyPhase ? browser?.passkeyAccount : passkeyStartingAccount;
+  const passkeyWaiting = passkeyPhase === "waiting";
+  const passkeyImporting = passkeyPhase === "importing" || passkeyContinuationRequested;
+  const passkeyAvailable = snapshot.state.browserInteractionMode !== "manual"
+    && ["darwin", "win32", "linux"].includes(snapshot.platform);
+  const accountActionsLocked = submitting || actionBusyAccount !== null || passkeyActive || operation?.status === "running";
+  const passkeyLabel = passkeyImporting ? copy.passkeyImporting
+    : passkeyWaiting ? copy.passkeyContinue : copy.passkeyOpening;
+  const passkeyBody = passkeyImporting ? copy.passkeyImportingBody
+    : passkeyWaiting ? copy.passkeyContinueBody : copy.passkeyOpeningBody;
+
+  useEffect(() => {
+    if (!passkeyWaiting) setPasskeyContinuationRequested(false);
+  }, [passkeyWaiting]);
 
   const loadAccounts = async () => {
     try {
@@ -57,6 +79,7 @@ export function AccountsSurface({
 
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (accountActionsLocked) return;
     const cleanName = name.trim();
     const cleanEmail = email.trim();
     const cleanTunnel = tunnelId.trim();
@@ -99,6 +122,7 @@ export function AccountsSurface({
   };
 
   const handleOpenLogin = async (accName: string) => {
+    if (accountActionsLocked) return;
     setActionBusyAccount(accName);
     setError(null);
     try {
@@ -110,7 +134,34 @@ export function AccountsSurface({
     }
   };
 
+  const handlePasskeyLogin = async (accName: string) => {
+    if (accountActionsLocked || !passkeyAvailable) return;
+    setPasskeyStartingAccount(accName);
+    setError(null);
+    try {
+      await window.codexWebLauncher?.openAccountPasskeyLogin(accName);
+      await loadAccounts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPasskeyStartingAccount(null);
+    }
+  };
+
+  const handleContinuePasskeyLogin = async (accName: string) => {
+    if (passkeyAccount !== accName || !passkeyWaiting || passkeyImporting) return;
+    setPasskeyContinuationRequested(true);
+    setError(null);
+    try {
+      await window.codexWebLauncher?.continuePasskeyLogin();
+    } catch (err) {
+      setPasskeyContinuationRequested(false);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleRemove = async (accName: string) => {
+    if (accountActionsLocked) return;
     if (!window.confirm(copy.confirmRemoveAccount)) {
       return;
     }
@@ -131,6 +182,7 @@ export function AccountsSurface({
   };
 
   const handleToggle = async (accName: string, currentlyEnabled: boolean) => {
+    if (accountActionsLocked) return;
     setActionBusyAccount(accName);
     setError(null);
     setNotice(null);
@@ -193,7 +245,7 @@ export function AccountsSurface({
           <div className="accounts-toolbar">
             <button
               className="button-primary"
-              disabled={submitting}
+              disabled={accountActionsLocked}
               onClick={() => setShowAddForm(prev => !prev)}
               type="button"
             >
@@ -238,7 +290,7 @@ export function AccountsSurface({
                     id="account-name-input"
                     autoCapitalize="none"
                     autoCorrect="off"
-                    disabled={submitting}
+                    disabled={accountActionsLocked}
                     onChange={e => setName(e.target.value)}
                     placeholder={copy.accountNamePlaceholder}
                     required
@@ -253,7 +305,7 @@ export function AccountsSurface({
                     id="account-email-input"
                     autoCapitalize="none"
                     autoCorrect="off"
-                    disabled={submitting}
+                    disabled={accountActionsLocked}
                     onChange={e => setEmail(e.target.value)}
                     placeholder={copy.accountEmailPlaceholder}
                     spellCheck={false}
@@ -268,7 +320,7 @@ export function AccountsSurface({
                     id="account-tunnel-input"
                     autoCapitalize="none"
                     autoCorrect="off"
-                    disabled={submitting}
+                    disabled={accountActionsLocked}
                     onChange={e => setTunnelId(e.target.value)}
                     placeholder="tunnel_..."
                     required
@@ -283,7 +335,7 @@ export function AccountsSurface({
                     id="account-key-input"
                     autoCapitalize="none"
                     autoCorrect="off"
-                    disabled={submitting}
+                    disabled={accountActionsLocked}
                     onChange={e => setRuntimeKey(e.target.value)}
                     placeholder="sk-..."
                     required
@@ -297,7 +349,7 @@ export function AccountsSurface({
               <div className="accounts-form-actions">
                 <button
                   className="button-secondary"
-                  disabled={submitting}
+                  disabled={accountActionsLocked}
                   onClick={() => setShowAddForm(false)}
                   type="button"
                 >
@@ -305,7 +357,7 @@ export function AccountsSurface({
                 </button>
                 <button
                   className="button-primary"
-                  disabled={submitting}
+                  disabled={accountActionsLocked}
                   type="submit"
                 >
                   <Icon name="check" />
@@ -323,6 +375,7 @@ export function AccountsSurface({
                 <p>No multi-login accounts configured yet.</p>
                 <button
                   className="button-primary"
+                  disabled={accountActionsLocked}
                   onClick={() => setShowAddForm(true)}
                   type="button"
                 >
@@ -340,7 +393,7 @@ export function AccountsSurface({
             ) : null}
 
             {accounts.map(acc => {
-              const isBusy = actionBusyAccount === acc.name;
+              const isPasskeyAccount = passkeyActive && passkeyAccount === acc.name;
               const isEnabled = acc.enabled !== false;
               let statusClass = "status-ready";
               let statusLabel = copy.accountStatusReady;
@@ -351,12 +404,12 @@ export function AccountsSurface({
               } else if (!isEnabled) {
                 statusClass = "status-disabled";
                 statusLabel = copy.accountStatusDisabled;
-              } else if (acc.cooling) {
-                statusClass = "status-cooling";
-                statusLabel = copy.accountStatusCooling;
               } else if (!acc.authenticated) {
                 statusClass = "status-signed-out";
                 statusLabel = copy.accountStatusSignedOut;
+              } else if (acc.cooling) {
+                statusClass = "status-cooling";
+                statusLabel = copy.accountStatusCooling;
               }
 
               return (
@@ -376,6 +429,12 @@ export function AccountsSurface({
                         <span>Tunnel: <span className="account-tunnel-id">{acc.tunnelId || "None"}</span></span>
                         <span>Partition: <code>{acc.partition || `codex-web-gpt-chatgpt-${acc.name}`}</code></span>
                       </div>
+                      {isPasskeyAccount ? (
+                        <div role="status">
+                          <strong>{passkeyLabel} · {copy.accountName}: {acc.name}</strong>
+                          <p>{passkeyBody}</p>
+                        </div>
+                      ) : null}
                     </div>
                   </div>
 
@@ -394,7 +453,7 @@ export function AccountsSurface({
                   <div className="account-card-actions">
                     <button
                       className={isEnabled ? "button-secondary" : "button-primary"}
-                      disabled={isBusy || acc.pendingRemoval === true}
+                      disabled={accountActionsLocked || acc.pendingRemoval === true}
                       onClick={() => void handleToggle(acc.name, isEnabled)}
                       title={isEnabled ? copy.disableAccount : copy.enableAccount}
                       type="button"
@@ -404,7 +463,7 @@ export function AccountsSurface({
                     </button>
                     <button
                       className="button-secondary"
-                      disabled={isBusy || acc.pendingRemoval === true}
+                      disabled={accountActionsLocked || acc.pendingRemoval === true}
                       onClick={() => void handleOpenLogin(acc.name)}
                       title={copy.openLoginTab}
                       type="button"
@@ -412,9 +471,23 @@ export function AccountsSurface({
                       <Icon name="external" />
                       <span>{copy.openLoginTab}</span>
                     </button>
+                    {passkeyAvailable ? (
+                      <button
+                        className="button-secondary"
+                        disabled={acc.pendingRemoval === true || (isPasskeyAccount
+                          ? !passkeyWaiting || passkeyImporting : accountActionsLocked)}
+                        onClick={() => void (isPasskeyAccount && passkeyWaiting
+                          ? handleContinuePasskeyLogin(acc.name) : handlePasskeyLogin(acc.name))}
+                        title={isPasskeyAccount ? passkeyBody : `${copy.passkeyOpeningBody} · ${copy.accountName}: ${acc.name}`}
+                        type="button"
+                      >
+                        <Icon name="external" />
+                        <span>{isPasskeyAccount ? passkeyLabel : copy.passkeySignIn}</span>
+                      </button>
+                    ) : null}
                     <button
                       className="button-danger"
-                      disabled={isBusy || acc.pendingRemoval === true}
+                      disabled={accountActionsLocked || acc.pendingRemoval === true}
                       onClick={() => void handleRemove(acc.name)}
                       title={copy.removeAccount}
                       type="button"

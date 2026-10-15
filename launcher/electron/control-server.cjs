@@ -1,6 +1,9 @@
 const { createServer } = require("node:http");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
+const { observeEffortCeiling } = require("./effort-ceiling.cjs");
+const { accountNameForTab } = require("./account-policy.cjs");
+const { PRIMARY_ACCOUNT } = require("./account-cooldown-store.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_MANUAL_START_BODY_BYTES = 3 * 1024 * 1024;
@@ -38,12 +41,14 @@ function writeJson(response, status, body) {
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits, stateStore, publishState }) {
     this.logger = logger;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
     this.resolveProxy = resolveProxy;
     this.limits = limits;
+    this.stateStore = stateStore;
+    this.publishState = publishState;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
     this.server = createServer((request, response) => {
@@ -99,7 +104,11 @@ class BrowserControlServer {
       || request.url === "/v1/turn/heartbeat"
       || request.url === "/v1/turn/usage"
       || request.url === "/v1/turn/approval"
+      || request.url === "/v1/turn/cooldown"
+      || request.url === "/v1/turn/capability-error"
+      || request.url === "/v1/turn/effort"
       || request.url === "/v1/turn/end";
+    const isAccountAdmission = request.url === "/v1/account/admit";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
     const isProxyResolution = request.url === "/v1/network/resolve-proxy";
@@ -111,7 +120,7 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isAccountAdmission && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -136,6 +145,14 @@ class BrowserControlServer {
       const preferences = this.getPreferences();
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
+      if (isAccountAdmission) {
+        if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
+        if (body.conversationKey !== undefined && !/^[a-f0-9]{64}$/.test(body.conversationKey)) throw new Error("conversationKey is invalid");
+        if (body.traceId !== undefined && !/^[A-Za-z0-9_-]{6,128}$/.test(body.traceId)) throw new Error("traceId is invalid");
+        if (!Number.isInteger(body.helperPid) || body.helperPid < 1) throw new Error("browser helper pid is invalid");
+        writeJson(response, 200, await host.admitAccount(body.conversationKey, body.traceId, body.helperPid));
+        return;
+      }
       if (isSessionInspect) {
         if (host.browserInteractionMode() === "manual") {
           const error = new Error(
@@ -175,6 +192,16 @@ class BrowserControlServer {
       if (body.requireRetainedConversation !== undefined
         && typeof body.requireRetainedConversation !== "boolean") {
         throw new Error("requireRetainedConversation is invalid");
+      }
+      if (body.modelRequest !== undefined && (request.url !== "/v1/turn/start"
+        || !body.modelRequest || typeof body.modelRequest !== "object" || Array.isArray(body.modelRequest)
+        || Object.keys(body.modelRequest).some(key => !["requiresPro", "reasoning"].includes(key))
+        || typeof body.modelRequest.requiresPro !== "boolean"
+        || (body.modelRequest.reasoning !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(body.modelRequest.reasoning)))) {
+        throw new Error("modelRequest is invalid");
+      }
+      if (body.proUnavailable !== undefined && (request.url !== "/v1/turn/capability-error" || typeof body.proUnavailable !== "boolean")) {
+        throw new Error("proUnavailable is invalid");
       }
       if (body.requireRetainedConversation === true && body.conversationKey === undefined) {
         throw new Error("requireRetainedConversation requires conversationKey");
@@ -301,6 +328,30 @@ class BrowserControlServer {
         writeJson(response, 200, { ok: true });
         return;
       }
+      if (request.url === "/v1/turn/effort") {
+        if (host.browserInteractionMode() === "manual") throw new Error("Automatic effort selection is disabled in Zero Risk mode");
+        const tab = [...host.turnTabs.values()].find(v => v.traceId === body.traceId
+          && v.helperPid === body.helperPid && v.status === "running");
+        if (!tab || !this.stateStore) throw new Error("Effort observation requires the exact active browser turn owner");
+        const result = observeEffortCeiling(this.stateStore, accountNameForTab(tab) || PRIMARY_ACCOUNT, body);
+        host.observeAccountPickerCapabilities?.(tab, body.available);
+        if (result.event) this.logger.info(result.event.event, result.event);
+        this.publishState?.(this.stateStore.read());
+        writeJson(response, 200, { ok: true, ceiling: result.ceiling });
+        return;
+      }
+      if (request.url === "/v1/turn/cooldown") {
+        if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
+        const result = await host.recordTurnCooldown(body.traceId, body.helperPid, body.retryAt, body.message, body.code);
+        writeJson(response, 200, { ok: true, ...result });
+        return;
+      }
+      if (request.url === "/v1/turn/capability-error") {
+        if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
+        const result = await host.refreshTurnCapabilities(body.traceId, body.helperPid, body.proUnavailable === true);
+        writeJson(response, 200, { ok: true, ...result });
+        return;
+      }
       if (request.url === "/v1/turn/usage") {
         if (host.browserInteractionMode() === "manual") throw new Error("Limits tracking is disabled in Zero Risk mode");
         // The same owner check as a heartbeat prevents another helper from charging this tab.
@@ -330,6 +381,7 @@ class BrowserControlServer {
             body.connectorIdentity,
             body.requireRetainedConversation === true,
             acquisition.signal,
+            ...(body.modelRequest ? [body.modelRequest] : []),
           );
         } finally {
           response.off("close", onClose);
@@ -367,9 +419,11 @@ class BrowserControlServer {
       const manualOwnerLost = error?.code === "manual_turn_owner_lost";
       const manualTimedOut = error?.code === "manual_turn_timed_out";
       const surfaceNotReady = error?.code === "browser_surface_not_ready";
+      const accountCooldown = error?.code === "chatgpt_account_cooldown" || error?.code === "chatgpt_unusual_activity";
+      if (accountCooldown) response.setHeader("retry-after", String(error.retryAfterSeconds));
       writeJson(
         response,
-        cancelled || retainedUnavailable || accountUnavailable || manualInspectionDisabled || manualOwnerLost
+        accountCooldown ? 429 : cancelled || retainedUnavailable || accountUnavailable || manualInspectionDisabled || manualOwnerLost
           ? 409
           : surfaceNotReady ? 503 : manualTimedOut ? 408 : 400,
         {
@@ -381,6 +435,7 @@ class BrowserControlServer {
         ...(manualOwnerLost ? { code: "manual_turn_owner_lost" } : {}),
         ...(manualTimedOut ? { code: "manual_turn_timed_out" } : {}),
         ...(surfaceNotReady ? { code: "browser_surface_not_ready" } : {}),
+        ...(accountCooldown ? { code: error.code, retryAt: error.retryAt, retry_after_seconds: error.retryAfterSeconds } : {}),
         },
       );
     }

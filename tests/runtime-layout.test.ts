@@ -413,3 +413,24 @@ test("stored names survive config loading without an additional naming preferenc
   writeFileSync(join(root, "config.json"), JSON.stringify({ ...config, automaticAppName: "Codex Zero Risk", manualAppName: "Codex Manual", appName: "Codex Manual" }));
   expect(loadConfigForSetup().automaticAppName).toBe("Codex Zero Risk");
 });
+
+
+test("composer predictions default on for existing configurations and persist an explicit opt-out", () => {
+  const root = join(tmpdir(), `codex-predictions-config-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  mkdirSync(root, { recursive: true });
+  const config: Record<string, unknown> = { ...defaultConfig("browser-only") };
+  expect(config.composerPredictionsEnabled).toBe(true);
+  delete config.composerPredictionsEnabled;
+  const persist = () => writeFileSync(join(root, "config.json"), JSON.stringify(config));
+  persist();
+  expect(loadConfig().composerPredictionsEnabled).toBe(true);
+  config.composerPredictionsEnabled = false;
+  persist();
+  expect(loadConfig().composerPredictionsEnabled).toBe(false);
+  expect(loadConfigForSetup().composerPredictionsEnabled).toBe(false);
+  config.composerPredictionsEnabled = "false";
+  persist();
+  expect(() => loadConfig()).toThrow("composerPredictionsEnabled");
+});

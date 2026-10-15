@@ -17,6 +17,7 @@ import { Icon, type IconName } from "./icons";
 import { AccountsSurface } from "./AccountsSurface";
 import { LimitsSurface } from "./LimitsSurface";
 import { limitsCopyFor } from "./limits-copy";
+import { effortCeilingNotice } from "./effort-notice";
 import { useLimits } from "./useLimits";
 import { describeTurnActivity } from "./turn-activity";
 import { isIdleBrowserSurface } from "./browser-surface";
@@ -384,6 +385,7 @@ function LauncherShell({
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
+  const [cooldownNow, setCooldownNow] = useState(Date.now());
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
     snapshot.state.browserInteractionMode === "automatic"
@@ -487,6 +489,18 @@ function LauncherShell({
     return () => window.clearTimeout(timer);
   }, [browser?.authenticated, snapshot.state.sessionRefreshReminderAt]);
 
+  useEffect(() => {
+    const retryAt = browser?.unusualActivityCooldown?.retryAt;
+    setCooldownNow(Date.now());
+    if (!retryAt || retryAt <= Date.now()) return;
+    const interval = window.setInterval(() => setCooldownNow(Date.now()), 60_000);
+    const expiry = window.setTimeout(() => setCooldownNow(Date.now()), Math.max(1, retryAt - Date.now() + 25));
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(expiry);
+    };
+  }, [browser?.unusualActivityCooldown?.retryAt]);
+
   const activateBrowser = useCallback(async (show = false) => {
     setSurface("browser");
     await api!.setBrowserSurfaceActive(true);
@@ -559,6 +573,11 @@ function LauncherShell({
       setBiggerContextRecommendationBusy(false);
     }
   };
+
+  const unusualActivityMinutes = browser?.unusualActivityCooldown
+    && browser.unusualActivityCooldown.retryAt > cooldownNow
+    ? Math.max(1, Math.ceil((browser.unusualActivityCooldown.retryAt - cooldownNow) / 60_000))
+    : 0;
 
   return (
     <motion.main
@@ -689,6 +708,21 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        {unusualActivityMinutes > 0 ? (
+          <div className="tool-approval-notice unusual-activity-notice" role="status">
+            <Icon name="alert" />
+            <div>
+              <strong>ChatGPT 비정상 활동 감지: {unusualActivityMinutes}분 대기 중</strong>
+            </div>
+          </div>
+        ) : null}
+        {(snapshot.state.effortCeilings ?? []).map(ceiling => (
+          <div className="tool-approval-notice" key={`effort-${ceiling.account}-${ceiling.family}`} role="status">
+            <Icon name="alert" />
+            <div><strong>{effortCeilingNotice(ceiling, language)}</strong>
+              <p>{ceiling.account} · GPT-{ceiling.family}</p></div>
+          </div>
+        ))}
         {approvalTabs.map(tab => (
           <div className="tool-approval-notice" key={tab.id} role="status">
             <Icon name="alert" />
@@ -794,7 +828,9 @@ function LauncherShell({
             ) : null}
             {surface === "accounts" ? (
               <AccountsSurface
+                browser={browser}
                 copy={copy}
+                operation={operation}
                 setError={setError}
                 snapshot={snapshot}
               />
@@ -916,14 +952,19 @@ function BrowserSurface({
 }) {
   const [passkeyStarting, setPasskeyStarting] = useState(false);
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  const [passkeyStartingAccount, setPasskeyStartingAccount] = useState<string | null>(null);
   const passkeyPhase = browser?.passkeyPhase;
   const passkeyActive = passkeyStarting || Boolean(passkeyPhase);
   const visible = browser?.visible === true;
   const idleSurface = isIdleBrowserSurface(browser?.url);
   const manualInteraction = interactionMode === "manual";
+  const selectedAccountSignInTab = browser?.tabs.find(tab => tab.active
+    && (tab.isSignInTab || tab.authenticationRequired) && tab.accountName);
+  const passkeyAccount = passkeyPhase ? browser?.passkeyAccount
+    : passkeyStarting ? passkeyStartingAccount : selectedAccountSignInTab?.accountName;
   const passkeyAvailable = !manualInteraction
-    && platform === "darwin"
-    && (browser?.authenticated !== true || passkeyActive);
+    && ["darwin", "win32", "linux"].includes(platform)
+    && (browser?.authenticated !== true || Boolean(selectedAccountSignInTab) || passkeyActive);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = passkeyActive || browser?.status === "running" || browser?.status === "testing";
   const passkeyWaiting = passkeyAvailable && passkeyPhase === "waiting";
@@ -934,6 +975,7 @@ function BrowserSurface({
     : passkeyWaiting ? copy.passkeyContinue : passkeyActive ? copy.passkeyOpening : copy.passkeySignIn;
   const passkeyTitle = passkeyImporting ? copy.passkeyImporting
     : passkeyWaiting ? copy.passkeyWaitingTitle : copy.passkeyOpening;
+  const passkeyStatusTitle = passkeyAccount ? `${passkeyTitle} · ${copy.accountName}: ${passkeyAccount}` : passkeyTitle;
   const passkeyBody = passkeyImporting ? copy.passkeyImportingBody
     : passkeyWaiting ? copy.passkeyContinueBody : copy.passkeyOpeningBody;
   useEffect(() => {
@@ -985,13 +1027,17 @@ function BrowserSurface({
   const openPasskeyLogin = async () => {
     if (passkeyActive || passkeyBlocked) return;
     setPasskeyStarting(true);
+    const accountName = selectedAccountSignInTab?.accountName;
+    setPasskeyStartingAccount(accountName ?? null);
     setError(null);
     try {
-      await api!.openPasskeyLogin();
+      if (accountName) await api!.openAccountPasskeyLogin(accountName);
+      else await api!.openPasskeyLogin();
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
       setPasskeyStarting(false);
+      setPasskeyStartingAccount(null);
     }
   };
   const continuePasskeyLogin = async () => {
@@ -1090,7 +1136,7 @@ function BrowserSurface({
           <button
             className="toolbar-text-button"
             disabled={passkeyDisabled}
-            title={passkeyBlocked ? operation?.message : copy.passkeyOpeningBody}
+            title={passkeyBlocked ? operation?.message : passkeyAccount ? `${copy.passkeyOpeningBody} · ${copy.accountName}: ${passkeyAccount}` : copy.passkeyOpeningBody}
             onClick={() => void (passkeyWaiting ? continuePasskeyLogin() : openPasskeyLogin())}
             type="button"
           >
@@ -1104,7 +1150,7 @@ function BrowserSurface({
       </div>
       {passkeyActive && visible ? (
         <div className="passkey-login-guide" role="status">
-          <strong>{passkeyTitle}</strong>
+          <strong>{passkeyStatusTitle}</strong>
           <p>{passkeyBody}</p>
         </div>
       ) : null}
@@ -1122,7 +1168,7 @@ function BrowserSurface({
         {!visible || idleSurface ? (
           <div className="browser-empty">
             <BrandMark />
-            <h1>{passkeyActive ? passkeyTitle : visible && idleSurface && (navigationLocked || browser?.loading)
+            <h1>{passkeyActive ? passkeyStatusTitle : visible && idleSurface && (navigationLocked || browser?.loading)
               ? copy.loading
               : manualInteraction
               ? copy.browserReady
@@ -1833,6 +1879,17 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setComposerPredictions = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setComposerPredictions(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setSkillAttachments = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -1979,6 +2036,13 @@ function SettingsSurface({
               || (snapshot.state.biggerContextAvailable !== true && !snapshot.state.experimentalBiggerContext)
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={copy.composerPredictionsBody} label={copy.composerPredictions}>
+          <Switch
+            checked={snapshot.state.composerPredictionsEnabled}
+            disabled={busy || !snapshot.state.coreSetupComplete}
+            onChange={(checked) => void setComposerPredictions(checked)}
           />
         </SettingRow>
         <SettingRow body={snapshot.state.browserInteractionMode === "manual"

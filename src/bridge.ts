@@ -52,6 +52,8 @@ function adapterFailureFromEvent(event: Extract<AdapterEvent, { type: "error" }>
   const error = classifyError(httpStatus, event.errorType ?? fallback.error.type, event.message);
   if (event.errorType !== undefined) error.type = event.errorType;
   if (event.code !== undefined) error.code = event.code;
+  if (event.retryAt !== undefined) error.retryAt = event.retryAt;
+  if (event.retryAfterSeconds !== undefined) error.retryAfterSeconds = event.retryAfterSeconds;
   return { httpStatus, error };
 }
 
@@ -192,10 +194,12 @@ export function bridgeToResponsesSSE(
       const createdAt = Math.floor(Date.now() / 1000);
       let outputIndex = 0;
       const finishedItems: OutputItem[] = [];
+      let responseMetadata: Record<string, string> | undefined;
 
       const responseSnapshot = (status: string, output: OutputItem[], endTurn?: boolean) => ({
         id: responseId, object: "response", created_at: createdAt,
         status, model: modelId, output, usage: null,
+        ...(responseMetadata ? { metadata: responseMetadata } : {}),
         ...(endTurn !== undefined ? { end_turn: endTurn } : {}),
       });
 
@@ -435,6 +439,10 @@ export function bridgeToResponsesSSE(
             if (event.type !== "done" && event.type !== "incomplete" && event.type !== "error") continue;
           }
           switch (event.type) {
+            case "response_metadata": {
+              responseMetadata = { ...responseMetadata, ...event.metadata };
+              break;
+            }
             case "assistant_boundary": {
               // A guarded continuation starts a fresh assistant output item while keeping the
               // intermediate, suspicious text in the same Responses turn.
@@ -865,6 +873,7 @@ export function buildResponseJSON(
   let usage: CodexUsage | undefined;
   let errorEvent: Extract<AdapterEvent, { type: "error" }> | undefined;
   let incompleteEvent: Extract<AdapterEvent, { type: "incomplete" }> | undefined;
+  let responseMetadata: Record<string, string> | undefined;
   let endTurn: boolean | undefined;
   let stopReason: string | undefined;
   let compactionText = "";
@@ -967,6 +976,9 @@ export function buildResponseJSON(
 
   for (const e of events) {
     switch (e.type) {
+      case "response_metadata":
+        responseMetadata = { ...responseMetadata, ...e.metadata };
+        break;
       case "assistant_boundary":
         flushText();
         flushSummaryReasoning();
@@ -1060,6 +1072,7 @@ export function buildResponseJSON(
     created_at: Math.floor(Date.now() / 1000),
     status,
     model: modelId, output,
+    ...(responseMetadata ? { metadata: responseMetadata } : {}),
     ...(endTurn !== undefined ? { end_turn: endTurn } : {}),
     ...(failure ? { error: failure.error, last_error: failure.error } : {}),
     ...(errorEvent?.retryable !== undefined ? { retryable: errorEvent.retryable } : {}),

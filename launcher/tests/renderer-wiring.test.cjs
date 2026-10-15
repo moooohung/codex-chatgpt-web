@@ -271,10 +271,10 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.doesNotMatch(electronMain, /IS_DEV_PROFILE && key === "experimentalBiggerContext"/);
 });
 
-test("macOS passkey sign-in is additive to the unchanged embedded login action", () => {
+test("system Chrome sign-in is additive to the unchanged embedded login action", () => {
   assert.match(appSource, /onAction=\{openLogin\}/);
   assert.match(appSource, /<BrowserSurface[\s\S]*?operation=\{operation\}[\s\S]*?platform=\{snapshot\.platform\}/);
-  assert.match(appSource, /const passkeyAvailable = !manualInteraction[\s\S]*?platform === "darwin"[\s\S]*?browser\?\.authenticated !== true/);
+  assert.match(appSource, /const passkeyAvailable = !manualInteraction[\s\S]*?\["darwin", "win32", "linux"\]\.includes\(platform\)[\s\S]*?browser\?\.authenticated !== true/);
   assert.match(appSource, /\{passkeyAvailable \? \([\s\S]*?className="toolbar-text-button"[\s\S]*?passkeyLabel/);
   assert.match(appSource, /className="browser-empty-actions"[\s\S]*?passkeyLabel/);
   assert.match(appSource, /passkeyWaiting \? continuePasskeyLogin : openPasskeyLogin/);
@@ -314,6 +314,15 @@ test("passkey buttons show launch progress, wait for Chrome, and preserve import
     ? [tree, ...visit(tree.children ?? [])] : [];
   const render = () => { cursor = 0; return visit(sandbox.render(props)); };
   const action = () => render().find(node => node.type === "SecondaryButton");
+  for (const platform of ["win32", "darwin", "linux"]) {
+    props.platform = platform;
+    assert.deepEqual(action().children, [copy.passkeySignIn]);
+    assert.equal(action().props.disabled, false);
+  }
+  props.platform = "freebsd";
+  assert.equal(action(), undefined);
+  props.platform = "win32";
+
   props.operation = { status: "running", name: "doctor", message: "Checking runtime" };
   assert.equal(action().props.disabled, true);
   props.operation = null;
@@ -525,6 +534,7 @@ test("catalog verification reports a failed request instead of requesting anothe
 test("browser preference IPC commits only after setup succeeds and refuses active browser work", async () => {
   const vm = require("node:vm");
   for (const [property, method, channel, nextChannel] of [
+    ["composerPredictionsEnabled", "setComposerPredictions", "launcher:composer-predictions", "launcher:skill-attachments"],
     ["experimentalFreshConversationPerTurn", "setFreshConversationPerTurn", "launcher:fresh-conversation-per-turn", "launcher:use-saved-chats"],
     ["useSavedChats", "setUseSavedChats", "launcher:use-saved-chats", "launcher:auto-approve-tool-calls"],
     ["autoApproveToolCalls", "setAutoApproveToolCalls", "launcher:auto-approve-tool-calls", "launcher:zero-risk-pro"],
@@ -533,8 +543,8 @@ test("browser preference IPC commits only after setup succeeds and refuses activ
       electronMain.indexOf(`handle("${channel}",`),
       electronMain.indexOf(`handle("${nextChannel}",`),
     );
-    const state = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
-    const config = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
+    const state = { composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
+    const config = { composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
     const events = [];
     let handler, finishSetup, setupFailure, calls = 0;
     const browserHost = { activeTraceId: "running-turn", currentOperation: () => null, turnTabs: new Map() };

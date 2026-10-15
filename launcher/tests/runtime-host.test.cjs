@@ -60,6 +60,22 @@ function devHostFor(existingConfig, interactionMode = "automatic") {
   return { host, invocation: () => invocation };
 }
 
+test("prediction preference uses the owned setup flow and preserves approvals without refreshing models", async () => {
+  for (const factory of [hostFor, devHostFor]) {
+    const fixture = factory({ mode: "full", appName: "Codex Native2", autoApproveToolCalls: true });
+    for (const enabled of [false, true]) {
+      assert.equal((await fixture.host.setComposerPredictions(enabled)).enabled, enabled);
+      const args = fixture.invocation().args;
+      assert.equal(args.includes(enabled ? "--composer-predictions" : "--no-composer-predictions"), true);
+      assert.equal(args.includes("--full"), true);
+      assert.equal(args.includes("--auto-approve-tool-calls"), factory === hostFor);
+      assert.equal(args.includes("--refresh-account-capabilities"), false);
+      assert.equal(args.includes("--bigger-context"), false);
+    }
+    await assert.rejects(() => fixture.host.setComposerPredictions("false"), /must be a boolean/);
+  }
+});
+
 test("core setup preserves an existing full-harness installation", async () => {
   const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
   const result = await fixture.host.setupCore();
@@ -1347,10 +1363,25 @@ test("passkey Continue is delivered only to the active owned login child", async
   assert.throws(() => fixture.continuePasskeyLogin(), /No passkey sign-in is waiting/);
 });
 
-test("passkey sign-in is rejected outside macOS even if IPC is invoked directly", () => {
-  const fixture = hostFor(null).host;
-  fixture.platform = "win32";
-  assert.throws(() => fixture.passkeyChromeExecutable(), /supported only on macOS/);
+test("system Chrome sign-in accepts configured Chrome on supported platforms and fails closed", () => {
+  const originalStat = fs.statSync, originalAccess = fs.accessSync;
+  let executable;
+  try {
+    fs.statSync = value => value === executable ? { isFile: () => true } : originalStat(value);
+    fs.accessSync = value => { if (value !== executable) originalAccess(value); };
+    for (const platform of ["win32", "darwin", "linux"]) {
+      executable = platform === "win32" ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" : "/opt/private Chrome/chrome";
+      const fixture = hostFor({ chromeExecutablePath: executable }).host;
+      fixture.platform = platform;
+      assert.equal(fixture.passkeyChromeExecutable(), executable);
+      const invalid = hostFor({ chromeExecutablePath: "relative/absent-chrome" }).host;
+      invalid.platform = platform;
+      assert.throws(() => invalid.passkeyChromeExecutable(), /Google Chrome is unavailable/);
+    }
+    const unsupported = hostFor({ chromeExecutablePath: executable }).host;
+    unsupported.platform = "freebsd";
+    assert.throws(() => unsupported.passkeyChromeExecutable(), /unsupported on this platform/);
+  } finally { fs.statSync = originalStat; fs.accessSync = originalAccess; }
 });
 
 test("skill file experiment uses the setup transaction in production and DEV, and rejects manual mode", async () => {

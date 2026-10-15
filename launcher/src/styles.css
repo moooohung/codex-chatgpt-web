@@ -485,6 +485,10 @@ code {
   flex: none;
 }
 
+.tool-approval-notice.unusual-activity-notice > svg {
+  color: var(--color-text-warning);
+}
+
 .tool-approval-notice > div {
   flex: 1;
   min-width: 0;

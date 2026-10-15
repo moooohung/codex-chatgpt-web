@@ -35,7 +35,7 @@ test("semantic acceptance is observed while the Enter acknowledgement is stalled
   } finally { release?.(); }
 });
 
-test("a current MCP batch confirms a stalled Enter after capturing and ACKing an empty assistant boundary", async () => {
+test("a current MCP batch confirms a stalled Enter, then captures and ACKs before response probes", async () => {
   const progress = new ChatGptExternalTurnProgress();
   let release!: () => void;
   let presses = 0;
@@ -47,14 +47,26 @@ test("a current MCP batch confirms a stalled Enter after capturing and ACKing an
   worker.currentSubmissionEvidence = async () => { throw new Error("renderer DOM unavailable"); };
   worker.submissionDomState = async () => ({ responseIdentities: [] });
   const tracker = new ChatGptCompletionTracker();
+  const responseAbort = new AbortController();
   try {
     await expect(worker.runStage("mcp_during_enter", "send", 600, (signal: AbortSignal) =>
       worker.sendAttachedPrompt(page, { initialTurnIdentities: [], domCache: {} }, undefined, signal, progress, undefined, tracker),
     )).resolves.toBe("mcp_tool_call");
     expect(presses).toBe(1);
-    expect(tracker.needsToolBatchObservation(1)).toBeFalse();
+    // Upstream accepts the exact MCP turn independently of the renderer. Acceptance
+    // alone cannot release tools: the response loop still owns capture -> observe -> ACK.
+    expect(tracker.needsToolBatchObservation(1)).toBeTrue();
+    worker.waitForTurnDomOrExternalProgress = async () => {
+      await new Promise((_resolve, reject) => responseAbort.signal.addEventListener("abort", () =>
+        reject(new DOMException("response cancelled", "AbortError")), { once: true }));
+    };
+    const response = worker.waitForNewAssistantTurn(page, { initialTurnIdentities: [], domCache: {} },
+      undefined, responseAbort.signal, progress, 60000, tracker);
     await progress.waitForToolBatchObservation(1);
-  } finally { release?.(); }
+    expect(tracker.needsToolBatchObservation(1)).toBeFalse();
+    responseAbort.abort();
+    await expect(response).rejects.toMatchObject({ name: "AbortError" });
+  } finally { responseAbort.abort(); release?.(); }
 });
 
 test("Enter completion alone never confirms a prompt and abort cancels semantic observation", async () => {

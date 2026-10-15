@@ -85,10 +85,8 @@ export function resolveBiggerContextMultipartParts(
     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
   }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  if (!supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, capabilities, parsed._chatgptModelFamily)) return undefined;
-  if (parsed._compactionRequest && (!minimalTransport || parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID)) {
-    return CHATGPT_BIGGER_CONTEXT_PARTS;
-  }
+  if (!supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, parsed._chatgptModelFamily)) return undefined;
+  if (parsed._compactionRequest) return CHATGPT_BIGGER_CONTEXT_PARTS;
   const backendModel = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID ? CHATGPT_WEB_LUNA_MODEL_ID : CHATGPT_WEB_BACKEND_MODEL;
   const preparation = prepared ?? createChatGptWebPromptPreparation(parsed);
   if (preparation.request !== parsed) throw new Error("Prompt preparation belongs to another request");

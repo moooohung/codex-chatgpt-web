@@ -336,6 +336,7 @@ test("launcher repairs its runtime before building the tunnel MCP command", asyn
       runtimeRepairs += 1;
       return repairedRuntime;
     },
+    resolveProxy: async () => "DIRECT",
     coreHome: root,
     browserDescriptorPath: config.browserHostDescriptorPath,
     runtimeInvocationFactory: ({ installedRuntimeRoot, args }) => ({
@@ -859,6 +860,7 @@ if (args[1] === "connect") {
     app: { getVersion: () => "0.2.0", isPackaged: false },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: root, coreHome: root, browserDescriptorPath: path.join(root, "launcher.json"),
+    resolveProxy: async () => "DIRECT",
   });
   let monitored = false;
   const config = { mode: "full", brokerSocketPath: path.join(root, "broker.sock"), tunnel: {
@@ -2070,8 +2072,10 @@ test("observed CLI fresh-conversation changes retire completed tabs once and def
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-fresh-config-"));
   const descriptorPath = path.join(root, "launcher.json");
   const configPath = path.join(root, "config.json");
-  const state = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false,
-    biggerContextAvailable: true, experimentalBiggerContext: false };
+  // Start with the same initialized defaults as the launcher, so adding a setting
+  // cannot be mistaken for a fresh-conversation update after setup rolls back.
+  const state = { ...require("../electron/state.cjs").createStateStore(path.join(root, "state.json")).read(),
+    biggerContextAvailable: true };
   const key = "a".repeat(64);
   const old = { id: "old", traceId: "old-trace", status: "ready", interactionMode: "automatic", conversationKey: key,
     connectorIdentity: "Codex Native2", connectorBound: true };
@@ -2079,11 +2083,29 @@ test("observed CLI fresh-conversation changes retire completed tabs once and def
   const manual = { id: "manual", status: "ready", interactionMode: "manual", conversationKey: "b".repeat(64) };
   let operation = null, updates = 0;
   const removed = [];
+  const accountContext = Object.freeze({ accountKey: "a".repeat(64), planType: "plus" });
   const browserHost = Object.assign(Object.create(BrowserHost.prototype), {
     manualOperation: null, turnTabs: new Map([[old.id, old], [active.id, active], [manual.id, manual]]),
     userCancelledTurnOwners: new Map(), logger: { info() {} },
     removeTurnTab(tab, abort) { assert.equal(abort, false); removed.push(tab.id); this.turnTabs.delete(tab.id); },
-    createTurnTab: async () => ({ id: "new", surfaceId: "new-surface" }),
+    async readAccountContext(browserSession) {
+      assert.ok(browserSession && [...this.turnTabs.values()].some(tab => (
+        tab.status === "running" && tab.interactionMode === "automatic"
+        && tab.view?.webContents.session === browserSession
+      )), "account proof must read the owned automatic tab's session");
+      return accountContext;
+    },
+    async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity) {
+      const tab = {
+        id: "new", surfaceId: "new-surface", traceId, helperPid, conversationKey, connectorIdentity,
+        status: "running", interactionMode: "automatic",
+        view: { webContents: {
+          session: {}, isDestroyed: () => false, setBackgroundThrottling() {},
+        } },
+      };
+      this.turnTabs.set(tab.id, tab);
+      return tab;
+    },
     syncViewVisibility() {}, snapshot: () => ({}), publishState() {}, writeDescriptor() {},
   });
   const sandbox = {

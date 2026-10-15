@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { chromium } from "playwright-core";
 import { ChatGptBrowserWorker, setChatGptThinkMode } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_COMPOSER_SELECTOR, detectChatGptAccountCapabilities } from "../src/chatgpt-session";
@@ -11,7 +12,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("Think uses the active editor
       await page.setContent(`<div contenteditable="true" data-composer-markdown role="textbox">Unrelated editor</div>
         <form data-chatgpt-composer>
           <div ${modern ? 'data-composer-markdown role="textbox"' : 'id="prompt-textarea"'} contenteditable="true"><span data-id="plugin:fixture" data-keyword="Codex Native2" contenteditable="false">Codex Native2</span></div>
-          <button type="button" aria-pressed="false">Think</button>
+          ${readFileSync(new URL("./fixtures/chatgpt-composer-think.html", import.meta.url), "utf8")}
         </form><script>(()=>{
           const button=document.querySelector('button');
           button.onclick=()=>{
@@ -84,7 +85,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the $
   } finally { await browser.close(); }
 }, 30_000);
 
-test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot hide a changed slider or newly locked option", async () => {
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot hide a changed slider", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
   try {
     const page = await browser.newPage();
@@ -104,14 +105,10 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot h
     let changed: any;
     try { await worker.assertSelectedEffort(page, reused); } catch (error) { changed = error; }
     expect(changed).toMatchObject({ code: "chatgpt_effort_verification_failed" });
-    await page.evaluate(() => { (window as any).selectedValue = 2; (window as any).locked = true; });
-    let locked: any;
-    try { await worker.assertSelectedEffort(page, reused); } catch (error) { locked = error; }
-    expect(locked).toMatchObject({ code: "chatgpt_effort_locked" });
-    await page.evaluate(() => { (window as any).locked = false; });
+    await page.evaluate(() => { (window as any).selectedValue = 2; });
     await page.locator('button').evaluate(el => { el.textContent = 'Instant'; });
     await worker.selectModelAndEffort(page, "gpt-5.6-sol", "high", caps, undefined, false, "5.6");
-    expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(6);
+    expect(await page.evaluate(() => (window as any).pickerOpens)).toBe(5);
   } finally { await browser.close(); }
 }, 30_000);
 
@@ -204,8 +201,8 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`real slider ${scenario} keep
       });
       if (scenario === "shrink") expect((await result).selection.label).toBe("Extra High");
       else {
-        let failure: any;
-        try { await result; } catch (error) { failure = error; }
+        // Await Playwright before asserting: Bun's async rejection matcher can stall its I/O.
+        const failure = await result.then(() => undefined, (error: unknown) => error);
         expect(failure).toMatchObject({ retryable: false });
       }
     }

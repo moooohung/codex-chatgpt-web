@@ -32,10 +32,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
       }
       await turn.onSendActivated();
       turn.onSubmitted();
-      turn.onResponseWait("connection_interrupted");
-      turn.onResponseWait("connection_interrupted_and_service_thinking");
-      turn.onResponseWait("service_thinking");
-      turn.onResponseWait(null);
+      turn.onHeartbeat();
+      turn.onGenerationProgress();
       turn.onReasoningSummary("Reading project");
       turn.onReasoningSummary(" files", true);
       turn.onTextDelta("done");
@@ -93,6 +91,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
   const acknowledgedStages: number[] = [];
   let sendActivated = false;
   let submitted = false;
+  let heartbeats = 0;
+  let generationProgress = 0;
   let released = false;
   const client = new LauncherBrowserHelperClient(config);
   try {
@@ -113,7 +113,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
       onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
-      onResponseWait: state => responseWaits.push(state),
+      onHeartbeat: () => { heartbeats++; },
+      onGenerationProgress: () => { generationProgress++; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
       captureLunaCheckpoint: true,
@@ -127,7 +128,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
-    expect(responseWaits).toEqual(["connection_interrupted", "connection_interrupted_and_service_thinking", "service_thinking", null]);
+    expect(heartbeats).toBe(1);
+    expect(generationProgress).toBe(1);
     expect(acknowledgedStages).toEqual([1, 2, 3, 4, 5]);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
@@ -177,6 +179,7 @@ test("accepted compaction retires through the helper as completed without hiding
       const body = await request.json() as Record<string, unknown>;
       if (body.phase === "start") return Response.json({
         ok: true, surfaceId: "launcher_surface_id_0123456789AB", reused: true, connectorBound: true,
+        accountContext: { accountKey: "a".repeat(64), planType: "pro" },
       });
       if (body.phase === "end") ended.set(body.traceId as string, body);
       return Response.json({ ok: true, cancelledByUser: false });
@@ -409,6 +412,8 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
     retryable: true,
+    retryAt: 1_791_644_820_000,
+    retryAfterSeconds: 600,
   }));
 
   const error = await result.then(() => undefined, failure => failure);
@@ -418,6 +423,8 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
     retryable: true,
+    retryAt: 1_791_644_820_000,
+    retryAfterSeconds: 600,
   });
 });
 

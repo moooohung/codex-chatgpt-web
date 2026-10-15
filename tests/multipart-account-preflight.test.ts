@@ -13,6 +13,7 @@ test(`multipart preflight checks requested ${family} Extra High before any stagi
   let closed = false, released = false;
   const page = Object.assign(new EventEmitter(), {
     isClosed: () => closed,
+    locator: () => ({ evaluateAll: async () => [] }),
     evaluate: async () => { if (closed) throw new Error("page was closed"); return {}; },
   });
   const unavailable = new ChatGptWebAdapterError("Extra High is unavailable in the current browser account", {

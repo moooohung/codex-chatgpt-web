@@ -5,6 +5,7 @@ import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 import { createOwnedTargetCdpTransport } from "./launcher-owned-cdp";
+import type { ChatGptAccountContext } from "./adapters/chatgpt-web/account-context";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 export const LAUNCHER_BROWSER_IDLE_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
@@ -386,6 +387,29 @@ export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
   | {
+      phase: "capability-error";
+      traceId: string;
+      helperPid: number;
+      proUnavailable?: boolean;
+    }
+  | {
+      phase: "effort";
+      traceId: string;
+      helperPid: number;
+      family: "5.6" | "6";
+      requestedPosition: number;
+      actualPosition: number;
+      available: boolean[];
+    }
+  | {
+      phase: "cooldown";
+      traceId: string;
+      helperPid: number;
+      retryAt: number;
+      message: string;
+      code?: "rate_limit_exceeded" | "chatgpt_unusual_activity";
+    }
+  | {
       phase: "approval";
       traceId: string;
       helperPid: number;
@@ -410,6 +434,7 @@ export type LauncherTurnActivity =
       conversationKey?: string;
       connectorIdentity?: string;
       requireRetainedConversation?: boolean;
+      modelRequest?: { requiresPro: boolean; reasoning?: string };
     }
   | {
       phase: "heartbeat";
@@ -676,9 +701,11 @@ export async function notifyLauncherTurn(
   surfaceId?: string;
   reused?: boolean;
   connectorBound?: boolean;
+  accountContext?: ChatGptAccountContext;
   cancelledByUser?: boolean;
   authenticationRequired?: boolean;
   trackUsage?: boolean;
+  alternateAvailable?: boolean;
 }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
@@ -695,6 +722,9 @@ export async function notifyLauncherTurn(
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (response.status === 429 && (body.code === "chatgpt_account_cooldown" || body.code === "chatgpt_unusual_activity")) {
+        throw launcherAccountCooldownError(body);
+      }
       if (response.status === 503 && body.code === "browser_surface_not_ready") throw new ChatGptWebAdapterError(
         typeof body.error === "string" ? body.error : "Launcher browser surface is not ready",
         { status: 503, errorType: "server_error", code: "browser_surface_not_ready", retryable: true },
@@ -717,6 +747,10 @@ export async function notifyLauncherTurn(
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (activity.phase === "cooldown" || activity.phase === "capability-error") {
+      if (body.ok !== true || typeof body.alternateAvailable !== "boolean") throw new Error("Launcher returned an invalid account cooldown acknowledgement");
+      return { alternateAvailable: body.alternateAvailable };
+    }
     if (activity.phase === "start") {
       if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
         throw new Error("Launcher browser control channel returned an invalid turn surface id");
@@ -727,11 +761,26 @@ export async function notifyLauncherTurn(
       if (typeof body.connectorBound !== "boolean") {
         throw new Error("Launcher browser control channel returned an invalid connector state");
       }
+      let accountContext: ChatGptAccountContext | undefined;
+      if (body.accountContext !== undefined) {
+        const context = body.accountContext as Partial<ChatGptAccountContext>;
+        if (!context || typeof context !== "object" || Array.isArray(context)
+          || Object.keys(context).some(key => !["accountKey", "planType", "extraHighAvailable"].includes(key))
+          || typeof context.accountKey !== "string" || !/^[a-f0-9]{64}$/.test(context.accountKey)
+          || typeof context.planType !== "string" || !["plus", "pro", "prolite", "free"].includes(context.planType)
+          || (context.extraHighAvailable !== undefined && typeof context.extraHighAvailable !== "boolean")
+          || (context.planType === "free" && context.extraHighAvailable === true)) {
+          throw new Error("Launcher browser control channel returned invalid account plan evidence");
+        }
+        accountContext = { accountKey: context.accountKey, planType: context.planType as ChatGptAccountContext["planType"],
+          ...(context.extraHighAvailable !== undefined ? { extraHighAvailable: context.extraHighAvailable } : {}) };
+      }
       return {
         surfaceId: body.surfaceId,
         reused: body.reused,
         connectorBound: body.connectorBound,
         trackUsage: body.trackUsage === true,
+        ...(accountContext ? { accountContext } : {}),
       };
     }
     if (activity.phase === "end") {
@@ -757,6 +806,39 @@ export async function notifyLauncherTurn(
   } finally {
     clearTimeout(timer);
   }
+}
+
+function launcherAccountCooldownError(body: Record<string, unknown>): ChatGptWebAdapterError {
+  if (!Number.isSafeInteger(body.retryAt) || !Number.isInteger(body.retry_after_seconds)
+    || Number(body.retry_after_seconds) < 1) throw new Error("Launcher returned an invalid account cooldown");
+  return new ChatGptWebAdapterError(typeof body.error === "string" ? body.error : "ChatGPT account is temporarily limited", {
+    status: 429, errorType: "rate_limit_error",
+    code: body.code === "chatgpt_unusual_activity" ? "chatgpt_unusual_activity" : "chatgpt_account_cooldown",
+    retryable: false,
+    retryAt: Number(body.retryAt), retryAfterSeconds: Number(body.retry_after_seconds),
+  });
+}
+
+/** Admission does not create a tab, switch a running turn, or submit anything to ChatGPT. */
+export async function admitLauncherAccount(descriptorPath: string, activity: {
+  conversationKey?: string; traceId?: string; helperPid: number;
+}, signal?: AbortSignal): Promise<void> {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/account/admit`, {
+      method: "POST", headers: { authorization: `Bearer ${descriptor.control.token}`, "content-type": "application/json" },
+      body: JSON.stringify(activity), signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+    });
+    const body = await response.json() as Record<string, unknown>;
+    if (response.status === 429 && (body.code === "chatgpt_account_cooldown" || body.code === "chatgpt_unusual_activity")) {
+      throw launcherAccountCooldownError(body);
+    }
+    if (body.code === "account_unavailable") throw new ChatGptWebAdapterError(String(body.error || "No signed-in ChatGPT account is available"),
+      { status: 409, errorType: "invalid_request_error", code: "account_unavailable", retryable: false });
+    if (!response.ok || body.ok !== true) throw new Error(`Launcher account admission failed (HTTP ${response.status})`);
+  } finally { clearTimeout(timer); }
 }
 
 export async function releaseLauncherRetainedConversation(

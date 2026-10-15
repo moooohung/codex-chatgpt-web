@@ -1,8 +1,10 @@
 const { parentPort, workerData } = require("node:worker_threads");
-const { validateRuntimeBundle, ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
+const { validateRuntimeBundle, ensurePackagedRuntime, waitForPackagedRuntimeSource,
+  exportRuntimeVerificationCache, importRuntimeVerificationCache } = require("./runtime-install.cjs");
 
 (async () => {
-  const { task, options } = workerData;
+  const { task, options, roots, cache } = workerData;
+  importRuntimeVerificationCache(roots, cache);
   let value;
   if (task === "validate") value = validateRuntimeBundle(options.root, options.identity);
   else {
@@ -11,5 +13,7 @@ const { validateRuntimeBundle, ensurePackagedRuntime, waitForPackagedRuntimeSour
     else if (task === "wait") value = await waitForPackagedRuntimeSource({ app, resourcesPath: options.resourcesPath });
     else throw new Error("Unknown runtime verification operation");
   }
-  parentPort.postMessage({ ok: true, value });
-})().catch(error => parentPort.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  parentPort.postMessage({ ok: true, value, cache: exportRuntimeVerificationCache(roots) });
+})().catch(error => parentPort.postMessage({ ok: false,
+  error: error instanceof Error ? error.message : String(error),
+  cache: exportRuntimeVerificationCache(workerData.roots) }));

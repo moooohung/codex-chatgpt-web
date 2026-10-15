@@ -1,12 +1,13 @@
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { BrowserTurn } from "./browser-worker";
+import type { ChatGptAccountPreparation } from "./account-context";
 
 export type ChatGptPlusPreparation = Pick<BrowserTurn, "capabilities" | "modelFamily"> & { reasoning: "high" };
 
 /** These codes are issued only before any physical Send, after positive Plus evidence. */
 export async function runWithChatGptPlusPreparation(
   worker: { run(turn: BrowserTurn): Promise<string> }, turn: BrowserTurn,
-  prepare: (override: ChatGptPlusPreparation, resume: boolean) => ReturnType<BrowserTurn["prepare"]>,
+  prepare: (override: ChatGptPlusPreparation | ChatGptAccountPreparation, resume: boolean) => ReturnType<BrowserTurn["prepare"]>,
 ): Promise<string> {
   let submitted = false;
   try {
@@ -25,8 +26,8 @@ export async function runWithChatGptPlusPreparation(
     console.info(`[chatgpt-web] plus_context_reprepared ${JSON.stringify({ traceId: turn.traceId, family, effort: "high" })}`);
     // Exactly one fresh preparation; a second failure propagates without looping.
     return worker.run({ ...turn, ...override,
-      prepare: () => prepare(override, false),
-      ...(turn.prepareResume ? { prepareResume: () => prepare(override, true) } : {}),
+      prepare: account => prepare(account ?? override, false),
+      ...(turn.prepareResume ? { prepareResume: account => prepare(account ?? override, true) } : {}),
     });
   }
 }

@@ -32,8 +32,10 @@ function createAccountApi({ profile, getHost, getSupervisor, logger }) {
           await host?.auditAccountCookie(name);
         }
         const status = host?.accountStatuses?.get(name);
+        const cooldown = host?.accountCooldowns?.get(name);
         return { name, email: account.email || "", tunnelId: account.tunnelId || "",
-          cooling: Boolean(status?.cooldownUntil > Date.now()), authenticated: status?.authenticated === true,
+          cooling: Boolean(cooldown || status?.cooldownUntil > Date.now()), authenticated: status?.authenticated === true,
+          ...(cooldown ? { retryAt: cooldown.retryAt } : {}),
           enabled: account.enabled !== false, pendingRemoval: account.pendingRemoval === true,
           partition: paths.partition(name),
           activeTabs: [...(host?.turnTabs?.values() || [])].filter(tab => accountNameForTab(tab) === name).length };
@@ -64,6 +66,7 @@ function createAccountApi({ profile, getHost, getSupervisor, logger }) {
     },
     remove(input) { return removals().request(nameFrom(input)); },
     login(input) { getHost().openAccountLoginTab(nameFrom(input)); return { ok: true }; },
+    passkeyLogin(input) { return getHost().openAccountPasskeyLogin(nameFrom(input)); },
     toggle(input) {
       const name = nameFrom(input);
       const data = readAccountConfig(paths.config);
@@ -72,7 +75,9 @@ function createAccountApi({ profile, getHost, getSupervisor, logger }) {
       const enabled = input?.enabled === true;
       data.accounts[name].enabled = enabled;
       writeAccountConfig(paths.config, data);
-      getHost().setAccountEnabled(name, enabled);
+      const host = getHost();
+      host.recordManualAccountEnabledChange?.(name);
+      host.setAccountEnabled(name, enabled);
       return { ok: true, name, enabled };
     },
   };

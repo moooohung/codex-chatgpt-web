@@ -4,6 +4,7 @@ import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
 import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
+import { isChatGptAccountPreparation } from "./account-context";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
@@ -217,9 +218,25 @@ async function run(message: RunMessage): Promise<void> {
     })
     : undefined;
   if (progress) turnProgress.set(message.id, progress);
-  const promptSelection = createBrowserHelperPromptSelection();
-  preparedSelections.set(message.id, promptSelection);
-  const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
+  let promptSelection: ReturnType<typeof createBrowserHelperPromptSelection> | undefined;
+  let selectingPrepared = false;
+  let sendActivated = false;
+  let multipartAcknowledged = false;
+  abortController.signal.addEventListener("abort", () => promptSelection?.cancel(), { once: true });
+  const assertActive = () => {
+    if (abortController.signal.aborted || shuttingDown || abortControllers.get(message.id) !== abortController) {
+      throw new DOMException("Browser helper prompt selection aborted", "AbortError");
+    }
+  };
+  const prepareSelected = async () => {
+    assertActive();
+    const selection = promptSelection;
+    if (!selection) throw new Error("Browser helper has no selected prompt");
+    const prepared = await selection.wait();
+    assertActive();
+    if (selection !== promptSelection) throw new Error("Browser helper prompt selection was superseded");
+    return { ...prepared, release: () => {} };
+  };
   const turn: BrowserTurn = {
     traceId: message.turn.traceId,
     modelId: message.turn.modelId,
@@ -266,13 +283,47 @@ async function run(message: RunMessage): Promise<void> {
       },
     } : {}),
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
-    onPreparedSelected: reused => {
-      if (!writeProtocol({ type: "event", id: message.id, event: "prepared_selected", reused })) {
-        throw new Error("Browser helper could not request prompt selection");
+    onGenerationProgress: () => writeProtocol({ type: "event", id: message.id, event: "generation_progress" }),
+    onPreparedSelected: async (reused, accountPreparation) => {
+      assertActive();
+      if (sendActivated || multipartAcknowledged || selectingPrepared) {
+        throw new Error("Browser helper cannot reselect a prompt after Send activation, multipart acknowledgement, or during selection");
       }
-      return promptSelection.wait().then(() => undefined);
+      if (accountPreparation !== undefined && !isChatGptAccountPreparation(accountPreparation)) {
+        throw new Error("Browser helper account preparation is invalid");
+      }
+      // A new unsent lease must wait for its own prompt rather than reuse the previous tier's ACK.
+      promptSelection?.cancel();
+      const selection = createBrowserHelperPromptSelection();
+      promptSelection = selection;
+      preparedSelections.set(message.id, selection);
+      selectingPrepared = true;
+      try {
+        if (!writeProtocol({ type: "event", id: message.id, event: "prepared_selected", reused,
+          ...(accountPreparation ? { accountPreparation: {
+            accountKey: accountPreparation.accountKey,
+            planType: accountPreparation.planType,
+            capabilities: {
+              localToolsEnabled: accountPreparation.capabilities.localToolsEnabled,
+              solAvailable: accountPreparation.capabilities.solAvailable,
+              extraHighAvailable: accountPreparation.capabilities.extraHighAvailable,
+              proAvailable: accountPreparation.capabilities.proAvailable,
+            },
+            ...(accountPreparation.modelFamily !== undefined ? { modelFamily: accountPreparation.modelFamily } : {}),
+            ...(accountPreparation.reasoning !== undefined ? { reasoning: accountPreparation.reasoning } : {}),
+          } } : {}),
+        })) {
+          throw new Error("Browser helper could not request prompt selection");
+        }
+        await selection.wait();
+        assertActive();
+      } finally {
+        selectingPrepared = false;
+      }
     },
     onSendActivated: () => new Promise<void>((resolve, reject) => {
+      assertActive();
+      sendActivated = true;
       if (sendActivationWaiters.has(message.id)) {
         reject(new Error("Browser helper Send activation already awaits acknowledgement"));
         return;
@@ -284,11 +335,13 @@ async function run(message: RunMessage): Promise<void> {
       }
     }),
     onSubmitted: () => {
+      sendActivated = true;
       if (!writeProtocol({ type: "event", id: message.id, event: "submitted" })) {
         throw new Error("Browser helper could not persist ChatGPT submission evidence");
       }
     },
     onMultipartStageAcknowledged: stageIndex => {
+      multipartAcknowledged = true;
       if (!writeProtocol({ type: "event", id: message.id, event: "multipart_stage_acknowledged", stageIndex })) {
         throw new Error("Browser helper could not persist multipart acknowledgement evidence");
       }
@@ -307,6 +360,7 @@ async function run(message: RunMessage): Promise<void> {
     }),
     onCommentary: (text, continuation) => writeProtocol({ type: "event", id: message.id, event: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
     onTextDelta: text => writeProtocol({ type: "event", id: message.id, event: "text", text }),
+    onEffortSelected: selection => writeProtocol({ type: "event", id: message.id, event: "effort", selection }),
     ...(message.turn.captureLunaCheckpoint ? {
       captureLunaCheckpoint: true,
       onLunaCheckpoint: captured => writeProtocol({
@@ -331,6 +385,8 @@ async function run(message: RunMessage): Promise<void> {
         errorType: error.errorType,
         code: error.code,
         retryable: error.retryable,
+        ...(error.retryAt !== undefined ? { retryAt: error.retryAt } : {}),
+        ...(error.retryAfterSeconds !== undefined ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
       } : {}),
     });
   } finally {
@@ -442,7 +498,10 @@ input.on("line", line => {
       writeProtocol({ type: "error", id: message.id, message: "Browser helper has no pending prompt selection" });
       return;
     }
-    selection.select(prepared);
+    if (!selection.select(prepared)) {
+      writeProtocol({ type: "error", id: message.id, message: "Browser helper prompt selection was already acknowledged" });
+      abortControllers.get(message.id)?.abort();
+    }
   } else if (message.type === "send_activation_ack") {
     const waiter = sendActivationWaiters.get(message.id);
     if (!waiter) {

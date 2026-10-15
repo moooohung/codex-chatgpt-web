@@ -49,7 +49,7 @@ test("launcher activity follows actual send callbacks and current-turn tool coun
     const message = await request.json() as typeof messages[number];
     messages.push(message);
     return Response.json(message.phase === "start"
-      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
       : { cancelledByUser: false });
   } });
   const waitForStage = async (stage: string) => {
@@ -113,7 +113,7 @@ test.each(["failed", "cancelled", "handoff", "release-error"])(
         return Response.json({ error: "fixture control unavailable" }, { status: 503 });
       }
       return Response.json(message.phase === "start"
-        ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+        ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
         : { cancelledByUser: false });
     } });
     const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
@@ -180,7 +180,7 @@ test("a blocked sign-in replaces an opaque navigation abort with a non-retryable
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const activity = await req.json() as { phase: string };
     return Response.json(activity.phase === "start"
-      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
       : { cancelledByUser: false, authenticationRequired: needsSignIn });
   } });
   try {
@@ -206,7 +206,7 @@ test("startup waits beyond five seconds and distinguishes its deadline from call
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch() {
     calls++;
     await Bun.sleep(calls === 1 ? 5_100 : 80);
-    return Response.json({ surfaceId: "a".repeat(32), reused: false, connectorBound: false });
+    return Response.json({ surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } });
   } });
   try {
     const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
@@ -220,6 +220,55 @@ test("startup waits beyond five seconds and distinguishes its deadline from call
     expect(calls).toBe(3);
   } finally { server.stop(true); }
 }, 10_000);
+
+test("model capability failover moves only an unsent turn and sends the original model preference", async () => {
+  let starts = 0;
+  let browserRuns = 0;
+  const phases: string[] = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const activity = await req.json() as any;
+    phases.push(activity.phase);
+    if (activity.phase === "start") {
+      expect(activity.modelRequest).toEqual({ requiresPro: true, reasoning: "max" });
+      return Response.json({ surfaceId: "a".repeat(32), reused: false, connectorBound: false,
+        accountContext: { accountKey: "a".repeat(64), planType: ++starts === 1 ? "free" : "pro", extraHighAvailable: starts > 1 } });
+    }
+    return Response.json(activity.phase === "capability-error" ? { ok: true, alternateAvailable: true } : { cancelledByUser: false });
+  } });
+  try {
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", browserHostDescriptorPath: descriptorFile(`http://127.0.0.1:${server.port}`) },
+      runBrowserTurn: async () => { browserRuns++; return "answer"; },
+    });
+    const turn = { traceId: "capability-unsent", modelId: "gpt-5.6-sol", modelFamily: "6", reasoning: "max",
+      capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: true, extraHighAvailable: true }, prepare() {} };
+    expect(await worker.runExclusive(turn)).toBe("answer");
+    expect(starts).toBe(2);
+    expect(browserRuns).toBe(1);
+    expect(phases.indexOf("capability-error")).toBeLessThan(phases.indexOf("end"));
+    expect(phases.filter(phase => phase === "end")).toHaveLength(2);
+  } finally { server.stop(true); }
+});
+
+test("leased picker capability is typed and cannot grant Free Extra High", async () => {
+  let context: unknown = { accountKey: "a".repeat(64), planType: "plus", extraHighAvailable: false };
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({
+    surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: context,
+  }) });
+  try {
+    const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
+    const activity = { phase: "start" as const, traceId: "capability-proof", helperPid: process.pid };
+    expect((await notifyLauncherTurn(descriptor, activity)).accountContext).toEqual({
+      accountKey: "a".repeat(64), planType: "plus", extraHighAvailable: false,
+    });
+    for (const malformed of ["false", null, 1]) {
+      context = { accountKey: "a".repeat(64), planType: "plus", extraHighAvailable: malformed };
+      await expect(notifyLauncherTurn(descriptor, activity)).rejects.toThrow("invalid account plan evidence");
+    }
+    context = { accountKey: "a".repeat(64), planType: "free", extraHighAvailable: true };
+    await expect(notifyLauncherTurn(descriptor, activity)).rejects.toThrow("invalid account plan evidence");
+  } finally { server.stop(true); }
+});
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });

@@ -188,6 +188,7 @@ export interface CodexProviderContinuationState {
 }
 
 export type AdapterEvent =
+  | { type: "response_metadata"; metadata: Record<string, string> }
   | { type: "heartbeat" }
   | { type: "text_delta"; text: string; phase?: CodexMessagePhase }
   | { type: "thinking_delta"; thinking: string }
@@ -228,6 +229,8 @@ export type AdapterEvent =
       errorType?: string;
       code?: string;
       retryable?: boolean;
+      retryAt?: number;
+      retryAfterSeconds?: number;
     };
 
 /**

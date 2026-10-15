@@ -83,6 +83,8 @@ Setup options:
   --retained-conversation      Reuse the browser chat between turns (default)
   --saved-chats                Keep task conversations in ChatGPT history
   --temporary-chats            Use Temporary Chat for task conversations (default)
+  --composer-predictions       Enable next-message suggestions using GPT-6 Sol Medium (default)
+  --no-composer-predictions    Disable next-message suggestions for Web models
   --skill-attachments         Experimental selected skills as text attachments
   --inline-skills             Keep selected skills inline (default)
   --standard-context           Disable experimental multi-message context
@@ -245,7 +247,7 @@ async function loginCommand(args: string[]): Promise<void> {
   const storageStatePath = takeOption(args, "--storage-state");
   assertNoArgs(args);
   authorizeLauncherControl("passkey login");
-  if (process.platform !== "darwin") throw new Error("Passkey sign-in is currently supported only on macOS");
+  if (!["darwin", "win32", "linux"].includes(process.platform)) throw new Error("System-browser sign-in is unsupported on this platform");
   if (!chromeExecutablePath || !isAbsolute(chromeExecutablePath)) {
     throw new Error("Launcher passkey sign-in requires --chrome with an absolute path");
   }
@@ -309,6 +311,10 @@ async function setupCommand(args: string[]): Promise<void> {
   if (runtimeKeyFile) options.runtimeKeyFile = runtimeKeyFile;
   options.forceLogin = takeFlag(args, "--login");
   options.autoApproveToolCalls = takeFlag(args, "--auto-approve-tool-calls");
+  const predictions = takeFlag(args, "--composer-predictions");
+  const noPredictions = takeFlag(args, "--no-composer-predictions");
+  if (predictions && noPredictions) throw new Error("Choose --composer-predictions or --no-composer-predictions");
+  if (predictions || noPredictions) options.composerPredictionsEnabled = predictions;
   const skillAttachments = takeFlag(args, "--skill-attachments");
   const inlineSkills = takeFlag(args, "--inline-skills");
   if (skillAttachments && inlineSkills) throw new Error("Choose --skill-attachments or --inline-skills");

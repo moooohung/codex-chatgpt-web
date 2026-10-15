@@ -5,9 +5,11 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
+import { isChatGptAccountPreparation, type ChatGptAccountPreparation } from "./account-context";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
 import { isChatGptResponseWaitState, type ChatGptResponseWaitState } from "./response-wait";
+import { isChatGptEffortSelection, type ChatGptEffortSelection } from "./effort-ceiling";
 import {
   parseChatGptLunaCheckpoint,
   type ChatGptLunaCheckpoint,
@@ -23,17 +25,20 @@ interface PendingTurn {
   localFailure?: Error;
   progressForwarding?: AbortController;
   acknowledgedMultipartStage?: number;
+  sendActivated?: boolean;
+  selectingPrepared?: object;
 }
 
 type HelperMessage =
   | { type: "ready"; features?: string[] }
-  | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
+  | { type: "event"; id: string; event: "heartbeat" | "generation_progress" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
   | { type: "event"; id: string; event: "response_wait"; state: ChatGptResponseWaitState | null }
+  | { type: "event"; id: string; event: "effort"; selection: ChatGptEffortSelection }
   | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
-  | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
+  | { type: "event"; id: string; event: "prepared_selected"; reused: boolean; accountPreparation?: ChatGptAccountPreparation }
   | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
   | { type: "result"; id: string; text: string }
   | {
@@ -45,6 +50,8 @@ type HelperMessage =
       errorType?: string;
       code?: string;
       retryable?: boolean;
+      retryAt?: number;
+      retryAfterSeconds?: number;
     };
 
 function parseHelperMessage(line: string): HelperMessage {
@@ -66,6 +73,10 @@ function parseHelperMessage(line: string): HelperMessage {
   }
   if (message.type === "event") {
     const event = message.event;
+    if (event === "effort") {
+      if (!isChatGptEffortSelection(message.selection)) throw new Error("Launcher browser helper effort selection is invalid");
+      return { type: "event", id: message.id, event, selection: message.selection };
+    }
     if (event === "response_wait") {
       if (message.state !== null && !isChatGptResponseWaitState(message.state)) {
         throw new Error("Launcher browser helper response-wait state is invalid");
@@ -121,9 +132,16 @@ function parseHelperMessage(line: string): HelperMessage {
       if (typeof message.reused !== "boolean") {
         throw new Error("Launcher browser helper prompt selection is invalid");
       }
-      return { type: "event", id: message.id, event, reused: message.reused };
+      const account = message.accountPreparation;
+      if (account !== undefined && (!isChatGptAccountPreparation(account)
+        || Object.keys(account).some(key => !["accountKey", "planType", "capabilities", "modelFamily", "reasoning"].includes(key))
+        || Object.keys(account.capabilities).some(key => !["localToolsEnabled", "solAvailable", "extraHighAvailable", "proAvailable"].includes(key)))) {
+        throw new Error("Launcher browser helper account preparation is invalid");
+      }
+      return { type: "event", id: message.id, event, reused: message.reused,
+        ...(account !== undefined ? { accountPreparation: account } : {}) };
     }
-    if (!["heartbeat", "send_activated", "submitted", "reasoning", "commentary", "text"].includes(String(event))) {
+    if (!["heartbeat", "generation_progress", "send_activated", "submitted", "reasoning", "commentary", "text"].includes(String(event))) {
       throw new Error("Launcher browser helper emitted an unknown event");
     }
     if (text !== undefined && typeof text !== "string") {
@@ -135,7 +153,7 @@ function parseHelperMessage(line: string): HelperMessage {
     return {
       type: "event",
       id: message.id,
-      event: event as "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text",
+      event: event as "heartbeat" | "generation_progress" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text",
       ...(text !== undefined ? { text: text as string } : {}),
       ...(continuation !== undefined ? { continuation: continuation as boolean } : {}),
     };
@@ -154,10 +172,14 @@ function parseHelperMessage(line: string): HelperMessage {
     const errorType = message.errorType;
     const code = message.code;
     const retryable = message.retryable;
+    const retryAt = message.retryAt;
+    const retryAfterSeconds = message.retryAfterSeconds;
     const structured = status !== undefined
       || errorType !== undefined
       || code !== undefined
-      || retryable !== undefined;
+      || retryable !== undefined
+      || retryAt !== undefined
+      || retryAfterSeconds !== undefined;
     if (typeof errorMessage !== "string"
       || (errorName !== undefined && typeof errorName !== "string")
       || (structured && (
@@ -169,6 +191,8 @@ function parseHelperMessage(line: string): HelperMessage {
         || typeof code !== "string"
         || !code
         || typeof retryable !== "boolean"
+        || (retryAt !== undefined && (!Number.isSafeInteger(retryAt) || (retryAt as number) <= 0))
+        || (retryAfterSeconds !== undefined && (!Number.isSafeInteger(retryAfterSeconds) || (retryAfterSeconds as number) <= 0))
       ))) {
       throw new Error("Launcher browser helper error payload is invalid");
     }
@@ -182,6 +206,8 @@ function parseHelperMessage(line: string): HelperMessage {
         errorType: errorType as string,
         code: code as string,
         retryable: retryable as boolean,
+        ...(retryAt !== undefined ? { retryAt: retryAt as number } : {}),
+        ...(retryAfterSeconds !== undefined ? { retryAfterSeconds: retryAfterSeconds as number } : {}),
       } : {}),
     };
   }
@@ -428,6 +454,7 @@ export class LauncherBrowserHelperClient {
     }
     if (message.type === "event") {
       if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
+      else if (message.event === "generation_progress") pending.turn.onGenerationProgress?.();
       else if (message.event === "tool_batch_observed") {
         logChatGptToolBoundary("ack_received", pending.turn.traceId, message.revision);
         const progress = pending.turn.externalProgress;
@@ -495,6 +522,7 @@ export class LauncherBrowserHelperClient {
         ));
       }
       else if (message.event === "send_activated") {
+        pending.sendActivated = true;
         void Promise.resolve().then(() => pending.turn.onSendActivated?.()).then(() => {
           if (this.pending.get(message.id) !== pending) return;
           return this.send({ type: "send_activation_ack", id: message.id });
@@ -504,7 +532,10 @@ export class LauncherBrowserHelperClient {
           pending,
         ));
       }
-      else if (message.event === "submitted") pending.turn.onSubmitted?.();
+      else if (message.event === "submitted") {
+        pending.sendActivated = true;
+        pending.turn.onSubmitted?.();
+      }
       else if (message.event === "multipart_stage_acknowledged") {
         const multipart = pending.prepared?.multipart;
         if (!multipart
@@ -526,19 +557,37 @@ export class LauncherBrowserHelperClient {
           ));
       }
       else if (message.event === "prepared_selected") {
+        if (pending.localFailure || pending.turn.abortSignal?.aborted) return;
+        if (pending.sendActivated || pending.acknowledgedMultipartStage || pending.selectingPrepared) {
+          this.abortWithLocalFailure(message.id,
+            new Error("Launcher browser helper cannot reselect a prompt after Send activation, multipart acknowledgement, or during selection"), pending);
+          return;
+        }
+        const selection = {};
+        pending.selectingPrepared = selection;
+        pending.prepared?.release();
+        pending.prepared = undefined;
+        const isActive = () => this.pending.get(message.id) === pending
+          && !pending.localFailure && !pending.turn.abortSignal?.aborted;
         const prepare = message.reused ? pending.turn.prepareResume : pending.turn.prepare;
-        void Promise.resolve().then(() => prepare?.()).then(prepared => {
-          if (!prepared) throw new Error("Launcher browser helper selected an unavailable continuation prompt");
-          if (this.pending.get(message.id) !== pending) {
-            prepared.release();
+        void Promise.resolve().then(async () => {
+          if (!isActive()) return;
+          if (message.accountPreparation) await pending.turn.onAccountSelected?.(message.accountPreparation);
+          if (!isActive()) return;
+          return prepare?.(message.accountPreparation);
+        }).then(prepared => {
+          if (!isActive()) {
+            prepared?.release();
             return;
           }
+          if (!prepared) throw new Error("Launcher browser helper selected an unavailable continuation prompt");
           pending.prepared = prepared;
           if (prepared.skillFiles?.length && !this.helperFeatures.has("skill-attachments")) {
             throw new Error("Launcher browser helper does not support skill attachments; update or restart the launcher");
           }
-          return Promise.resolve(pending.turn.onPreparedSelected?.(message.reused)).then(() => {
-            if (this.pending.get(message.id) !== pending) return;
+          return Promise.resolve(pending.turn.onPreparedSelected?.(message.reused, message.accountPreparation)).then(() => {
+            if (!isActive()) return;
+            pending.selectingPrepared = undefined;
             return this.send({
               type: "prepared_selected_ack",
               id: message.id,
@@ -557,7 +606,9 @@ export class LauncherBrowserHelperClient {
           message.id,
           error instanceof Error ? error : new Error(String(error)),
           pending,
-        ));
+        )).finally(() => {
+          if (pending.selectingPrepared === selection) pending.selectingPrepared = undefined;
+        });
       }
       else if (message.event === "luna_checkpoint") {
         if (!pending.turn.captureLunaCheckpoint || !pending.turn.onLunaCheckpoint) {
@@ -567,6 +618,7 @@ export class LauncherBrowserHelperClient {
         pending.turn.onLunaCheckpoint({ checkpoint: message.checkpoint, answerHash: message.answerHash });
       }
       else if (message.event === "response_wait") pending.turn.onResponseWait?.(message.state);
+      else if (message.event === "effort") pending.turn.onEffortSelected?.(message.selection);
       else if (message.event === "reasoning" && message.text) {
         pending.turn.onReasoningSummary?.(message.text, message.continuation === true);
       }
@@ -585,6 +637,8 @@ export class LauncherBrowserHelperClient {
           errorType: message.errorType!,
           code: message.code!,
           retryable: message.retryable!,
+          retryAt: message.retryAt,
+          retryAfterSeconds: message.retryAfterSeconds,
         })
         : message.name === "AbortError"
           ? new DOMException(message.message, "AbortError")

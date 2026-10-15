@@ -6,7 +6,15 @@ const { app, clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { configureChatGptLocale } = require("./chatgpt-locale.cjs");
 const { injectDomStealth, applyStealthHeaders } = require("./stealth.cjs");
-const { accountNameForTab, accountPaths, readAccountConfig, selectAccount } = require("./account-policy.cjs");
+const {
+  accountNameForTab,
+  accountPaths,
+  readAccountConfig,
+  selectAccount,
+  writeAccountConfig,
+} = require("./account-policy.cjs");
+const { AccountCooldownStore, PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX } = require("./account-cooldown-store.cjs");
+const { resolveCooldownRoute } = require("./account-cooldown-routing.cjs");
 const { bindAccountBackendRecovery } = require("./account-backend-recovery.cjs");
 const {
   runBrowserHelperOperation,
@@ -15,10 +23,14 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
+const { startAccountPasskeyLogin } = require("./account-passkey-login.cjs");
 const { configureChatGptAnnouncementDismissal } = require("./browser-announcements.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
+const { readAccountContext, readLeasedAccountContext } = require("./account-context.cjs");
+const { capabilitiesFromPlan, readCapabilities, saveCapabilities, modelAccountPool } = require("./account-capabilities.cjs");
 const { resolveBrowserMemoryPolicy } = require("./browser-memory-policy.cjs");
 const { bindBrowserResourceBudget, takeContentsResourceBudgetCounts } = require("./browser-resource-budget.cjs");
+const { runBrowserPageScript } = require("./browser-page-script.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
   shouldBlockSleepForTurns,
@@ -399,6 +411,7 @@ class BrowserHost {
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
     getUseSavedChats = () => false,
+    stateStore,
     memoryPolicy = resolveBrowserMemoryPolicy(),
     getAppMetrics = () => app?.getAppMetrics?.() ?? [],
   }) {
@@ -427,6 +440,8 @@ class BrowserHost {
     this.partition = partition;
     this.profile = profile;
     this.accountPaths = accountPaths({ coreHome, userData, partition });
+    this.accountCooldowns = new AccountCooldownStore(this.accountPaths.cooldowns);
+    this.unusualActivityCooldownTimers = new Map();
     this.accountConfigPresent = fs.existsSync(this.accountPaths.config);
     this.pendingRemovalAccounts = new Set(Object.entries(readAccountConfig(this.accountPaths.config).accounts).filter(([, acc]) => acc.pendingRemoval).map(([name]) => name));
     this.accountCleanup = new Map();
@@ -435,6 +450,7 @@ class BrowserHost {
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.getUseSavedChats = getUseSavedChats;
+    this.stateStore = stateStore;
     this.memoryPolicy = memoryPolicy;
     this.getAppMetrics = getAppMetrics;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
@@ -451,6 +467,7 @@ class BrowserHost {
     this.selectedTabId = "home";
     this.accountPool = this.loadAccountPool();
     this.disabledAccounts = this.loadDisabledAccounts();
+    this.unusualActivityDisabledAccounts = this.loadUnusualActivityDisabledAccounts();
     this.accountRoundRobinIndex = 0;
     this.stickyConversations = this.loadStickyMap();
     this.accountStatuses = new Map();
@@ -466,6 +483,8 @@ class BrowserHost {
     this.cloudflareChallengeRecoverySettleMs = CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS;
     this.viewportCssKey = null;
     this.primaryRendererReady = false;
+    this.primaryRendererRecovery = null;
+    this.primaryRendererRecoveryNeeded = false;
     this.primaryDeviceEmulationViewport = null;
     this.primaryDeviceEmulationDirty = true;
     this.shellZoomShortcutBindings = new Map();
@@ -520,6 +539,7 @@ class BrowserHost {
     this.bindChatGptBackendRecovery();
     this.bindAuthenticationChanges();
     this.bindWebContents();
+    this.restoreUnusualActivityDisabledAccounts();
     this.initializationReady = this.initializePrimaryView().catch((error) => {
       this.logger.error("browser.initialization_failed", {
         message: error instanceof Error ? error.message : String(error),
@@ -531,6 +551,7 @@ class BrowserHost {
 
   async ready() {
     await this.initializationReady;
+    if (this.primaryRendererRecovery) await this.primaryRendererRecovery;
   }
 
   async initializePrimaryView() {
@@ -552,7 +573,8 @@ class BrowserHost {
   }
 
   currentOperation() {
-    return this.manualOperation || (this.loginOperation ? "ChatGPT login" : null);
+    return this.manualOperation || (this.loginOperation ? "ChatGPT login" : null)
+      || (this.accountPasskeyLogin ? "ChatGPT account Chrome login" : null);
   }
 
   assertTurnTabsCanResetForInteractionModeChange() {
@@ -565,6 +587,7 @@ class BrowserHost {
     if (mode !== "automatic" && mode !== "manual") {
       throw new Error("Browser interaction mode must be automatic or manual");
     }
+    if (this.accountPasskeyLogin) throw new Error("Finish the selected account's Chrome sign-in first");
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
     }
@@ -629,6 +652,8 @@ class BrowserHost {
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
       closable: true,
+      accountName: accountNameForTab(tab),
+      isSignInTab: tab.isSignInTab === true,
       ...(tab.status === "running" && tab.authenticationRequired ? { authenticationRequired: true } : {}),
       ...(tab.status === "running" && !tab.authenticationRequired && tab.activity
         ? { activity: { ...tab.activity } } : {}),
@@ -656,6 +681,98 @@ class BrowserHost {
       .filter(([, account]) => account.enabled === false).map(([name]) => name));
   }
 
+  loadUnusualActivityDisabledAccounts() {
+    const raw = this.stateStore?.read?.().unusualActivityDisabledAccounts;
+    return new Map(raw && typeof raw === "object" && !Array.isArray(raw) ? Object.entries(raw) : []);
+  }
+
+  persistUnusualActivityDisableState() {
+    this.stateStore?.update?.({ unusualActivityDisabledAccounts: Object.fromEntries(this.unusualActivityDisabledAccounts || []) });
+  }
+
+  persistUnusualActivityDisable(name, retryAt, traceId) {
+    const temporary = this.unusualActivityDisabledAccounts || new Map();
+    const existing = temporary.get(name);
+    let reactivate = existing?.reactivate;
+    if (reactivate === undefined) {
+      if (name === PRIMARY_ACCOUNT) reactivate = !this.disabledAccounts?.has(name);
+      else {
+        const data = readAccountConfig(this.accountPaths.config);
+        const account = data.accounts[name];
+        if (!account) throw new Error(`Account ${name} does not exist`);
+        reactivate = account.enabled !== false;
+      }
+    }
+    temporary.set(name, { retryAt, traceId, reactivate });
+    this.unusualActivityDisabledAccounts = temporary;
+    if (reactivate && name !== PRIMARY_ACCOUNT) {
+      const data = readAccountConfig(this.accountPaths.config);
+      const account = data.accounts[name];
+      if (!account) throw new Error(`Account ${name} does not exist`);
+      account.enabled = false;
+      writeAccountConfig(this.accountPaths.config, data);
+    }
+    this.persistUnusualActivityDisableState();
+    if (reactivate) this.setAccountEnabled(name, false);
+    return temporary.get(name);
+  }
+
+  recordManualAccountEnabledChange(name) {
+    const marker = this.unusualActivityDisabledAccounts?.get(name);
+    if (!marker || marker.reactivate === false) return;
+    this.unusualActivityDisabledAccounts.set(name, { ...marker, reactivate: false });
+    this.persistUnusualActivityDisableState();
+  }
+
+  clearUnusualActivityDisable(name, { log = true } = {}) {
+    const temporary = this.unusualActivityDisabledAccounts || new Map();
+    const marker = temporary.get(name);
+    if (!marker) return false;
+    if (marker.reactivate && name !== PRIMARY_ACCOUNT) {
+      const data = readAccountConfig(this.accountPaths.config);
+      if (data.accounts[name]) {
+        data.accounts[name].enabled = true;
+        writeAccountConfig(this.accountPaths.config, data);
+      }
+    }
+    temporary.delete(name);
+    this.unusualActivityDisabledAccounts = temporary;
+    this.persistUnusualActivityDisableState();
+    this.accountCooldowns.clear(name);
+    if (marker.reactivate) this.setAccountEnabled(name, true);
+    if (log) this.logger.info("unusual_activity_cooldown_ended", {
+      traceId: marker.traceId,
+      account: name,
+      retryAt: marker.retryAt,
+    });
+    return true;
+  }
+
+  restoreUnusualActivityDisabledAccounts() {
+    if (!this.unusualActivityDisabledAccounts?.size) return;
+    for (const [name, marker] of [...this.unusualActivityDisabledAccounts]) {
+      const cooldown = this.accountCooldowns.peek(name);
+      if (!cooldown || !cooldown.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)
+        || cooldown.retryAt <= Date.now() || marker.retryAt <= Date.now()) {
+        this.clearUnusualActivityDisable(name);
+        continue;
+      }
+      const retryAt = Math.max(marker.retryAt, cooldown.retryAt);
+      if (retryAt !== marker.retryAt) this.persistUnusualActivityDisable(name, retryAt, marker.traceId);
+      else if (marker.reactivate) {
+        if (name !== PRIMARY_ACCOUNT) {
+          const data = readAccountConfig(this.accountPaths.config);
+          if (data.accounts[name] && data.accounts[name].enabled !== false) {
+            data.accounts[name].enabled = false;
+            writeAccountConfig(this.accountPaths.config, data);
+          }
+        }
+        this.setAccountEnabled(name, false);
+      }
+      this.scheduleUnusualActivityCooldownEnd(name, retryAt, marker.traceId);
+    }
+  }
+
   loadStickyMap() {
     const stickyPath = this.accountPaths.sticky;
     if (!fs.existsSync(stickyPath)) return new Map();
@@ -675,20 +792,210 @@ class BrowserHost {
     writePrivateFileAtomic(this.accountPaths.sticky, JSON.stringify(Object.fromEntries(this.stickyConversations), null, 2));
   }
 
-  resolveAccountForConversation(conversationKey) {
+  resolveAccountForConversation(conversationKey, modelRequest) {
+    const pending = new Set([...(this.pendingRemovalAccounts || []), ...(this.accountLoginReservations || [])]);
+    if (modelRequest) {
+      const pool = modelAccountPool({ pool: this.routingAccountPool(), capabilities: this.accountCapabilities || new Map(),
+        statuses: this.accountStatuses, disabled: this.disabledAccounts, pending, cooldowns: this.accountCooldowns,
+        proUnavailable: this.proUnavailableAccounts,
+        requiresPro: modelRequest.requiresPro === true || modelRequest.reasoning === "max" });
+      const selected = selectAccount({ pool, configured: true, statuses: this.accountStatuses,
+        tabs: [...(this.turnTabs?.values() || [])], bound: this.stickyConversations?.get(conversationKey),
+        roundRobin: this.accountRoundRobinIndex || 0 });
+      return selected === PRIMARY_ACCOUNT ? null : selected;
+    }
+    if (this.accountCooldowns && this.browserInteractionMode() !== "manual"
+      && this.routingAccountPool().some(name => this.accountCooldowns.get(name))) {
+      const account = resolveCooldownRoute({ pool: this.routingAccountPool(), statuses: this.accountStatuses,
+        disabled: this.disabledAccounts, pending,
+        unusualActivityDisabled: new Set(this.unusualActivityDisabledAccounts?.keys?.() || []),
+        preferred: this.stickyConversations?.get(conversationKey), cooldowns: this.accountCooldowns,
+        tabs: [...(this.turnTabs?.values() || [])], roundRobin: this.accountRoundRobinIndex || 0 });
+      return account === PRIMARY_ACCOUNT ? null : account;
+    }
     return selectAccount({ pool: this.accountPool, configured: this.accountConfigPresent,
-      disabled: this.disabledAccounts, pending: this.pendingRemovalAccounts, statuses: this.accountStatuses,
+      disabled: this.disabledAccounts, pending, statuses: this.accountStatuses,
       tabs: [...(this.turnTabs?.values() || [])], bound: this.stickyConversations?.get(conversationKey),
       roundRobin: this.accountRoundRobinIndex || 0 });
   }
 
   commitAccountBinding(conversationKey, name) {
+    if (this.accountCooldowns && this.browserInteractionMode() !== "manual") {
+      const selected = name || PRIMARY_ACCOUNT;
+      this.accountRoundRobinIndex = (this.accountRoundRobinIndex || 0) + 1;
+      // A failover is temporary. Keep the original preference so expiry restores it on the next turn.
+      if (conversationKey && !this.stickyConversations.has(conversationKey)) {
+        this.stickyConversations.set(conversationKey, selected);
+        this.saveStickyMap();
+      }
+      return;
+    }
     if (!name) return;
     this.accountRoundRobinIndex = (this.accountRoundRobinIndex || 0) + 1;
     if (conversationKey && this.stickyConversations.get(conversationKey) !== name) {
       this.stickyConversations.set(conversationKey, name);
       this.saveStickyMap();
     }
+  }
+
+  routingAccountPool() {
+    return this.accountPool?.length || this.accountConfigPresent ? this.accountPool || [] : [PRIMARY_ACCOUNT];
+  }
+
+  async refreshAccountCapabilities(names = this.routingAccountPool(), signal) {
+    if (!this.accountCapabilities) {
+      this.accountCapabilitiesFile = this.accountPaths?.cooldowns
+        ? path.join(path.dirname(this.accountPaths.cooldowns), "account-capabilities.json") : undefined;
+      try { this.accountCapabilities = readCapabilities(this.accountCapabilitiesFile); }
+      catch { this.accountCapabilities = new Map(); this.logger?.warn?.("browser.account_capabilities_invalid"); }
+    }
+    this.accountCapabilityProbes ||= new Map();
+    await Promise.all(names.map(async name => {
+      if (this.disabledAccounts?.has(name) || this.pendingRemovalAccounts?.has(name) || this.accountLoginReservations?.has(name)) return;
+      if (this.accountCapabilities.get(name)?.checkedAt > Date.now() - 30_000) return;
+      if (this.accountCapabilityProbes.has(name)) return this.accountCapabilityProbes.get(name);
+      const revision = this.accountStatuses?.get(name)?.routingAuthRevision || 0;
+      const primaryRevision = this.authenticationRevision;
+      const operation = (async () => {
+        try {
+          const partSession = name === PRIMARY_ACCOUNT ? this.view.webContents.session
+            : (this.session || session).fromPartition(this.accountPaths.partition(name));
+          const context = await this.readAccountContext(partSession, { signal });
+          if ((this.accountStatuses?.get(name)?.routingAuthRevision || 0) !== revision
+            || name === PRIMARY_ACCOUNT && this.authenticationRevision !== primaryRevision
+            || this.pendingRemovalAccounts?.has(name) || !this.routingAccountPool().includes(name)) return;
+          const caps = capabilitiesFromPlan(context);
+          const previous = this.accountCapabilities.get(name);
+          if (previous?.accountKey === caps.accountKey && previous.planType === caps.planType && caps.solAvailable) {
+            caps.extraHighAvailable = previous.extraHighAvailable;
+          }
+          this.accountCapabilities.set(name, caps);
+          this.logger?.info?.("browser.account_capabilities", { account: name, plan: caps.planType,
+            proAvailable: caps.proAvailable, extraHighAvailable: caps.extraHighAvailable, solAvailable: caps.solAvailable });
+        } catch {
+          this.accountCapabilities.delete(name);
+          this.logger?.warn?.("browser.account_capabilities_unavailable", { account: name });
+        }
+        saveCapabilities(this.accountCapabilitiesFile, this.accountCapabilities);
+      })();
+      this.accountCapabilityProbes.set(name, operation);
+      try { await operation; } finally { this.accountCapabilityProbes.delete(name); }
+    }));
+    signal?.throwIfAborted();
+  }
+
+  async refreshTurnCapabilities(traceId, helperPid, proUnavailable = false) {
+    const tab = [...this.turnTabs.values()].find(item => item.traceId === traceId && item.helperPid === helperPid && item.status === "running");
+    if (!tab) throw new Error("Capability refresh requires the exact active browser turn owner");
+    const name = accountNameForTab(tab) || PRIMARY_ACCOUNT;
+    this.accountCapabilities?.delete(name);
+    await this.refreshAccountCapabilities([name]);
+    if (proUnavailable) {
+      this.proUnavailableAccounts ||= new Map();
+      this.proUnavailableAccounts.set(name, Date.now() + 5 * 60_000);
+    }
+    let alternateAvailable = false;
+    try { alternateAvailable = (this.resolveAccountForConversation(tab.conversationKey, tab.modelRequest) || PRIMARY_ACCOUNT) !== name; }
+    catch (error) { if (error.code !== "account_unavailable") throw error; }
+    return { alternateAvailable };
+  }
+
+  observeAccountPickerCapabilities(tab, available) {
+    const name = accountNameForTab(tab) || PRIMARY_ACCOUNT;
+    const caps = this.accountCapabilities?.get(name);
+    if (!caps || !caps.solAvailable) return;
+    this.accountCapabilities.set(name, { ...caps, extraHighAvailable: available[3] === true });
+    saveCapabilities(this.accountCapabilitiesFile, this.accountCapabilities);
+  }
+
+  accountCapabilitiesForLease(context, tab) {
+    const caps = this.accountCapabilities?.get(accountNameForTab(tab) || PRIMARY_ACCOUNT);
+    return caps?.checkedAt > Date.now() - 30_000 && caps.accountKey === context.accountKey && caps.planType === context.planType
+      ? { ...context, extraHighAvailable: caps.extraHighAvailable } : context;
+  }
+
+  async refreshRoutingAccounts() {
+    if (!this.accountCooldowns || !this.routingAccountPool().some(name => this.accountCooldowns.get(name))) return;
+    const now = Date.now();
+    await Promise.all(this.routingAccountPool().map(async name => {
+      if (this.disabledAccounts?.has(name) || this.pendingRemovalAccounts?.has(name) || this.accountLoginReservations?.has(name)
+        || this.accountCooldowns.get(name)) return;
+      const status = this.accountStatuses.get(name);
+      if (status?.routingAuthCheckedAt > now - 30_000) return;
+      this.routingAuthProbes ||= new Map();
+      if (this.routingAuthProbes.has(name)) return this.routingAuthProbes.get(name);
+      const operation = (async () => {
+        const revision = this.accountStatuses.get(name)?.routingAuthRevision || 0;
+        const primaryRevision = this.authenticationRevision;
+        const partSession = name === PRIMARY_ACCOUNT ? this.view.webContents.session
+          : (this.session || session).fromPartition(this.accountPaths.partition(name));
+        const result = await readChatGptAuthSession(partSession.fetch.bind(partSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+        // A native network failure is unknown, never proof of sign-in or authorization to switch.
+        const previous = this.accountStatuses.get(name);
+        if ((previous?.routingAuthRevision || 0) !== revision
+          || name === PRIMARY_ACCOUNT && this.authenticationRevision !== primaryRevision) return;
+        this.accountStatuses.set(name, { ...previous, routingAuthenticated: result.sessionAuthenticated === true,
+          routingAuthCheckedAt: Date.now(), ...(result.sessionCheckError ? {} : { authenticated: result.sessionAuthenticated === true }),
+          ...(result.sessionAuthenticated === true ? { cooldownUntil: 0 } : {}) });
+      })();
+      this.routingAuthProbes.set(name, operation);
+      try { await operation; } finally { this.routingAuthProbes.delete(name); }
+    }));
+  }
+
+  async admitAccount(conversationKey, traceId, helperPid) {
+    if (!this.accountCooldowns) return { ok: true };
+    // Reconnecting an existing physical turn must keep its already-owned partition.
+    const active = [...this.turnTabs.values()].find(tab => tab.status === "running"
+      && tab.traceId === traceId && tab.helperPid === helperPid && tab.conversationKey === conversationKey);
+    if (active) return { ok: true };
+    await this.refreshRoutingAccounts();
+    this.resolveAccountForConversation(conversationKey);
+    return { ok: true };
+  }
+
+  scheduleUnusualActivityCooldownEnd(name, retryAt, traceId) {
+    this.unusualActivityCooldownTimers ??= new Map();
+    const existing = this.unusualActivityCooldownTimers.get(name);
+    if (existing) clearTimeout(existing);
+    const delay = Math.max(1, Math.min(2_147_483_647, retryAt - Date.now()));
+    const timer = setTimeout(() => {
+      this.unusualActivityCooldownTimers.delete(name);
+      const marker = this.unusualActivityDisabledAccounts?.get(name);
+      if (!marker) return;
+      const entry = this.accountCooldowns.peek(name);
+      const pendingUntil = Math.max(marker.retryAt, entry?.retryAt || 0);
+      if (entry?.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX) && pendingUntil > Date.now()) {
+        this.scheduleUnusualActivityCooldownEnd(name, pendingUntil, marker.traceId || traceId);
+        return;
+      }
+      this.clearUnusualActivityDisable(name);
+      this.publishState?.(this.snapshot());
+    }, delay);
+    timer.unref?.();
+    this.unusualActivityCooldownTimers.set(name, timer);
+  }
+
+  async recordTurnCooldown(traceId, helperPid, retryAt, message, code) {
+    const tab = [...this.turnTabs.values()].find(item => item.traceId === traceId && item.helperPid === helperPid
+      && item.status === "running");
+    if (!tab) throw new Error("Account cooldown requires the exact active browser turn owner");
+    const name = accountNameForTab(tab) || PRIMARY_ACCOUNT;
+    const recorded = this.accountCooldowns.record(name, { retryAt, message });
+    this.logger.info("browser.account_cooldown", { traceId, account: name, retryAt });
+    if (code === "chatgpt_unusual_activity" || recorded.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)) {
+      this.persistUnusualActivityDisable(name, recorded.retryAt, traceId);
+      this.logger.warn("unusual_activity_detected", { traceId, account: name, retryAt: recorded.retryAt });
+      this.scheduleUnusualActivityCooldownEnd(name, recorded.retryAt, traceId);
+    }
+    await this.refreshRoutingAccounts();
+    let alternateAvailable = false;
+    try { alternateAvailable = (this.resolveAccountForConversation(tab.conversationKey, tab.modelRequest) || PRIMARY_ACCOUNT) !== name; }
+    catch (error) {
+      if (!["chatgpt_account_cooldown", "chatgpt_unusual_activity", "account_unavailable"].includes(error.code)) throw error;
+    }
+    this.publishState?.(this.snapshot());
+    return { alternateAvailable };
   }
 
   allocateTabOrdinal() {
@@ -705,7 +1012,8 @@ class BrowserHost {
   }
 
   isAccountBusy(name) {
-    return [...this.turnTabs.values()].some(tab => accountNameForTab(tab) === name && tab.status === "running")
+    return this.accountLoginReservations?.has(name) === true
+      || [...this.turnTabs.values()].some(tab => accountNameForTab(tab) === name && tab.status === "running")
       || [...(this.accountCleanup?.values() || [])].some(tab => accountNameForTab(tab) === name);
   }
 
@@ -714,6 +1022,10 @@ class BrowserHost {
   }
 
   configureLocalePreferences(browserSession) {
+    this.localePreferencesReady ??= new WeakMap();
+    const existing = this.localePreferencesReady.get(browserSession);
+    if (existing) return existing;
+    const ready = Promise.resolve().then(() => {
     applyStealthHeaders(browserSession);
     bindBrowserResourceBudget(browserSession, contentsId => {
       const tab = [...this.turnTabs.values()].find(candidate => candidate.view?.webContents?.id === contentsId);
@@ -722,14 +1034,16 @@ class BrowserHost {
         authenticationRequired: tab.authenticationRequired, isSignInTab: tab.isSignInTab,
         documentUrl: tab.view.webContents.getURL() };
     });
-    const ready = configureChatGptLocale(browserSession);
+    return configureChatGptLocale(browserSession);
+    });
+    this.localePreferencesReady.set(browserSession, ready);
     void ready.catch(error => this.logger.warn("browser.locale_preference_failed", { message: String(error) }));
     return ready;
   }
 
-  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal) {
+  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal, modelRequest) {
     signal?.throwIfAborted();
-    const assignedAccount = BrowserHost.prototype.resolveAccountForConversation.call(this, conversationKey);
+    const assignedAccount = BrowserHost.prototype.resolveAccountForConversation.call(this, conversationKey, modelRequest);
     const ordinal = BrowserHost.prototype.allocateTabOrdinal.call(this);
     const id = randomBytes(12).toString("base64url");
     const surfaceId = randomBytes(24).toString("base64url");
@@ -758,6 +1072,7 @@ class BrowserHost {
       accountName: assignedAccount,
       partition: assignedPartition,
       connectorIdentity,
+      modelRequest,
       connectorBound: false,
       helperPid,
       view,
@@ -1183,12 +1498,21 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-stop-loading", () => {
+      if (this.destroyed || contents.isDestroyed()) return;
       tab.loading = false;
       tab.url = contents.getURL();
       this.publishState?.(this.snapshot());
     });
-    contents.on("dom-ready", () => injectDomStealth(contents));
+    contents.on("dom-ready", () => {
+      // Automation starts at DOMContentLoaded. A pending image can delay did-finish-load
+      // while this new document already exposes controls in a collapsed offscreen viewport.
+      // Restore only rendering here; load completion still owns bootstrap and surface marking.
+      if (this.destroyed || contents.isDestroyed()) return;
+      tab.rendererReady = true;
+      this.syncViewVisibility();
+    });
     contents.on("did-finish-load", () => {
+      if (this.destroyed || contents.isDestroyed()) return;
       injectDomStealth(contents);
       tab.url = contents.getURL();
       tab.loading = false;
@@ -1255,9 +1579,12 @@ class BrowserHost {
 
   recordAccountAuthFailure(accountName) {
     if (!accountName) return;
+    if (this.accountLoginReservations?.has(accountName)) return;
     const now = Date.now();
     if (!this.accountStatuses) this.accountStatuses = new Map();
     const existing = this.accountStatuses.get(accountName);
+    this.accountStatuses.set(accountName, { ...existing, routingAuthenticated: false,
+      routingAuthCheckedAt: 0, routingAuthRevision: (existing?.routingAuthRevision || 0) + 1 });
     if (existing && existing.authenticated === false && existing.cooldownUntil && existing.cooldownUntil > now) {
       return;
     }
@@ -1293,6 +1620,7 @@ class BrowserHost {
 
   recordAccountAuthSuccess(accountName) {
     if (!accountName) return;
+    if (this.accountLoginReservations?.has(accountName)) return;
     if (!this.accountStatuses) this.accountStatuses = new Map();
     const existing = this.accountStatuses.get(accountName);
     if (existing && existing.authenticated === true && (!existing.cooldownUntil || existing.cooldownUntil <= 0)) {
@@ -1316,6 +1644,7 @@ class BrowserHost {
 
   async auditAccountCookie(accountName) {
     if (!accountName) return false;
+    if (this.accountLoginReservations?.has(accountName)) return false;
     const now = Date.now();
     try {
       const sessionApi = this.session || session;
@@ -1366,6 +1695,11 @@ class BrowserHost {
     if (tab.accountName) {
       this.recordAccountAuthFailure(tab.accountName);
     } else {
+      if (this.accountCooldowns) {
+        const previous = this.accountStatuses.get(PRIMARY_ACCOUNT);
+        this.accountStatuses.set(PRIMARY_ACCOUNT, { ...previous, routingAuthenticated: false,
+          routingAuthCheckedAt: 0, routingAuthRevision: (previous?.routingAuthRevision || 0) + 1 });
+      }
       this.reauthenticationRequired = true;
       this.authenticationRevision = (this.authenticationRevision ?? 0) + 1;
       this.setState({ authenticated: false, status: "signed-out", message: tab.message });
@@ -1554,6 +1888,7 @@ class BrowserHost {
         return;
       }
       this.setState({ url, loading: false });
+      if (this.primaryRendererRecovery) return; // Recovery establishes ownership once below.
       void this.applyViewportCss();
       void this.markOwnedSurface()
         .then(() => this.probeAuthentication())
@@ -1613,9 +1948,51 @@ class BrowserHost {
       this.clearHomeNavigationTimeout();
       this.primaryNavigationError = new Error(`ChatGPT renderer stopped: ${details.reason}`);
       this.primaryRendererReady = false;
+      this.authenticationRevision = (this.authenticationRevision ?? 0) + 1;
+      this.authenticationProbe = null;
       this.logger.error("browser.renderer_gone", { reason: details.reason, exitCode: details.exitCode });
       this.setState({ status: "error", message: `Browser renderer stopped: ${details.reason}`, loading: false });
+      if (!this.destroyed && details.reason !== "clean-exit" && !this.primaryRendererRecovery) {
+        this.primaryRendererRecoveryNeeded = true;
+        // Let all listeners reject work owned by the dead document before reloading it.
+        queueMicrotask(() => { void this.recoverPrimaryRenderer(); });
+      }
     });
+  }
+
+  recoverPrimaryRenderer() {
+    if (this.destroyed || this.manualOperation || !this.primaryRendererRecoveryNeeded
+      || this.primaryRendererRecovery) return this.primaryRendererRecovery;
+    this.primaryRendererRecoveryNeeded = false;
+    const contents = this.view.webContents;
+    const operation = Promise.resolve().then(async () => {
+      // The primary view owns sign-in, not a running model turn. Recreate its local idle
+      // document in the same session; never resend a task or clear authentication here.
+      await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL);
+      if (this.destroyed) return;
+      this.primaryNavigationError = null;
+      this.primaryRendererReady = true;
+      if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
+      if (this.destroyed) return;
+      this.writeDescriptor();
+      this.setState({
+        status: this.state.authenticated ? "ready" : "signed-out",
+        message: this.state.authenticated ? "Browser recovered. Open ChatGPT to continue." : "Sign in to ChatGPT",
+        url: IDLE_BROWSER_URL, loading: false,
+      });
+      this.logger.info("browser.renderer_recovered");
+    });
+    const tracked = operation.catch(error => {
+      if (this.destroyed) return;
+      this.primaryNavigationError = error;
+      this.primaryRendererReady = false;
+      this.setState({ status: "error", message: "Could not restart the ChatGPT browser. Open sign in to retry.", loading: false });
+      this.logger.error("browser.renderer_recovery_failed", navigationErrorForLog(error));
+    }).finally(() => {
+      if (this.primaryRendererRecovery === tracked) this.primaryRendererRecovery = null;
+    });
+    this.primaryRendererRecovery = tracked;
+    return tracked;
   }
 
   armHomeNavigationTimeout(contents, url) {
@@ -1727,7 +2104,8 @@ class BrowserHost {
   }
 
   refreshAuthenticationFromSession() {
-    if (this.destroyed || this.reauthenticationRequired || browserInteractionModeFor(this) !== "automatic") return Promise.resolve();
+    if (this.destroyed || this.primaryRendererRecoveryNeeded || this.primaryRendererRecovery
+      || this.reauthenticationRequired || browserInteractionModeFor(this) !== "automatic") return Promise.resolve();
     this.authenticationRevision = (this.authenticationRevision ?? 0) + 1;
     if (this.authenticationRefresh) return this.authenticationRefresh;
     const operation = (async () => {
@@ -1750,7 +2128,7 @@ class BrowserHost {
           let anyAuthed = false;
           for (const acc of this.accountPool) {
             try {
-              if (this.disabledAccounts?.has(acc) || this.pendingRemovalAccounts?.has(acc)) continue;
+              if (this.disabledAccounts?.has(acc) || this.pendingRemovalAccounts?.has(acc) || this.accountLoginReservations?.has(acc)) continue;
               const partSession = session.fromPartition(this.accountPaths.partition(acc));
               this.configureLocalePreferences(partSession);
               const res = await readChatGptAuthSession(partSession.fetch.bind(partSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
@@ -1905,6 +2283,9 @@ class BrowserHost {
       : manualInteraction
         ? { ...this.state, title: "ChatGPT" }
         : this.state;
+    const unusualActivityCooldowns = Object.entries(this.accountCooldowns?.snapshot?.() || {})
+      .filter(([, entry]) => entry.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX))
+      .sort((a, b) => a[1].retryAt - b[1].retryAt);
     return {
       ...readBrowserNavigationState(contents, {
         ...state,
@@ -1921,6 +2302,12 @@ class BrowserHost {
           ]
         : [homeTab],
       maxTabs: this.memoryPolicy?.maxTabs ?? resolveBrowserMemoryPolicy().maxTabs,
+      ...(unusualActivityCooldowns.length ? {
+        unusualActivityCooldown: {
+          retryAt: unusualActivityCooldowns[0][1].retryAt,
+          accountCount: unusualActivityCooldowns.length,
+        },
+      } : {}),
     };
   }
 
@@ -2252,23 +2639,29 @@ class BrowserHost {
   }
 
   syncViewVisibility() {
+    // Navigation events may arrive after the native window or one of its views closed.
+    if (this.destroyed || this.window.isDestroyed?.()) return;
     const windowVisible = this.window.isVisible() && !this.window.isMinimized();
     const visible = windowVisible
       && browserViewVisible(this.visible, this.surfaceActive, this.boundsReady);
     const selected = this.selectedTurnTab();
+    const isLiveView = view => view && !view.webContents?.isDestroyed?.();
     const hasDocument = contents => {
       const url = contents?.getURL?.();
       return url !== IDLE_BROWSER_URL && url !== "about:blank";
     };
     // Keep the exact owned CDP target drawable offscreen during idle/bootstrap. The launcher
     // shows its preparation/empty state instead of putting an empty native document over it.
-    this.presentPrimaryView(visible && !this.authView && !selected && hasDocument(this.view.webContents));
+    if (isLiveView(this.view)) {
+      this.presentPrimaryView(visible && !this.authView && !selected && hasDocument(this.view.webContents));
+    }
     for (const tab of this.turnTabs.values()) {
+      if (!isLiveView(tab.view)) continue;
       const tabVisible = visible && !this.authView && selected?.id === tab.id
         && hasDocument(tab.view.webContents);
       this.presentTurnView(tab, tabVisible);
     }
-    this.authView?.setVisible(visible);
+    if (isLiveView(this.authView)) this.authView.setVisible(visible);
     BrowserHost.prototype.restoreSelectedRetainedTab.call(this);
   }
 
@@ -2535,7 +2928,7 @@ class BrowserHost {
   async markOwnedSurface() {
     requireAutomaticBrowserInspection(this, "ChatGPT DOM surface ownership marking");
     const surfaceId = JSON.stringify(this.surfaceId);
-    await this.view.webContents.executeJavaScript(`(() => {
+    await runBrowserPageScript(this.view.webContents, `(() => {
       Object.defineProperty(globalThis, "__CODEX_WEB_GPT_SURFACE_ID__", {
         value: ${surfaceId},
         configurable: true,
@@ -2544,7 +2937,7 @@ class BrowserHost {
       });
       document.documentElement.dataset.codexWebGptSurface = ${surfaceId};
       (${configureChatGptAnnouncementDismissal.toString()})(true);
-    })()`, true);
+    })()`);
   }
 
   show() {
@@ -3001,6 +3394,10 @@ class BrowserHost {
     return { cancelledByUser: true };
   }
 
+  readAccountContext(browserSession, options) {
+    return readAccountContext(browserSession, options);
+  }
+
   async beginTurn(
     traceId,
     reveal,
@@ -3009,6 +3406,7 @@ class BrowserHost {
     connectorIdentity,
     requireRetainedConversation = false,
     signal,
+    modelRequest,
   ) {
     signal?.throwIfAborted();
     if (this.manualOperation) {
@@ -3029,6 +3427,14 @@ class BrowserHost {
       }
     }
     const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+    if (modelRequest && sameTrace?.status !== "running") {
+      await this.refreshAccountCapabilities(undefined, signal);
+      signal?.throwIfAborted();
+    }
+    if (this.accountCooldowns && sameTrace?.status !== "running") {
+      await this.admitAccount(conversationKey, traceId, helperPid);
+      signal?.throwIfAborted();
+    }
     if (sameTrace && sameTrace.interactionMode !== "automatic") {
       throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
     }
@@ -3047,7 +3453,7 @@ class BrowserHost {
       throw new Error(`ChatGPT retained conversation ${conversationKey} owns multiple browser tabs`);
     }
     let exactRetained = retainedMatches[0];
-    if (exactRetained && this.resolveAccountForConversation(conversationKey) !== accountNameForTab(exactRetained)) {
+    if (exactRetained && this.resolveAccountForConversation(conversationKey, modelRequest) !== accountNameForTab(exactRetained)) {
       this.removeTurnTab(exactRetained, false);
       exactRetained = undefined;
     }
@@ -3087,6 +3493,9 @@ class BrowserHost {
           throw unavailable;
         }
       }
+      const accountContext = await readLeasedAccountContext(this, existing, {
+        traceId, helperPid, conversationKey, connectorIdentity,
+      }, signal);
       existing.approvalPending = false;
       existing.turnProgress = undefined;
       existing.activity = undefined;
@@ -3119,6 +3528,7 @@ class BrowserHost {
         tabId: existing.id,
         reused,
         connectorBound: existing.connectorBound === true,
+        accountContext: this.accountCapabilitiesForLease(accountContext, existing),
       };
     }
     if (requireRetainedConversation) {
@@ -3128,7 +3538,11 @@ class BrowserHost {
     }
     // A retry may reuse the trace, but never the failed document or its incremental history.
     if (sameTrace?.failedAt !== undefined) this.removeTurnTab(sameTrace, false);
-    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal);
+    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal,
+      ...(modelRequest ? [modelRequest] : []));
+    const accountContext = await readLeasedAccountContext(this, tab, {
+      traceId, helperPid, conversationKey, connectorIdentity,
+    }, signal);
     if (reveal) {
       this.selectedTabId = tab.id;
       this.show();
@@ -3143,7 +3557,8 @@ class BrowserHost {
       tabId: tab.id, traceId, rendererPid: rendererPidFor(tab.view?.webContents), tabCount: this.turnTabs.size,
     });
     this.writeDescriptor();
-    return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
+    return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false,
+      accountContext: this.accountCapabilitiesForLease(accountContext, tab) };
   }
 
   async endTurn(
@@ -3339,6 +3754,8 @@ class BrowserHost {
       this.accountPool.push(accountName);
     }
     void this.refreshAuthenticationFromSession();
+    this.accountCapabilities?.delete(accountName);
+    if (this.refreshAccountCapabilities) void this.refreshAccountCapabilities([accountName]).catch(() => {});
   }
 
   setAccountEnabled(accountName, enabled) {
@@ -3388,6 +3805,7 @@ class BrowserHost {
 
   openLogin() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT sign-in verification");
+    if (this.accountPasskeyLogin) throw new Error("Finish the selected account's Chrome sign-in first");
     if (this.state.authenticated && !this.primaryNavigationError) {
       this.activateHomeSurface();
       this.show();
@@ -3439,6 +3857,7 @@ class BrowserHost {
 
   openPasskeyLogin() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT passkey import");
+    if (this.accountPasskeyLogin) throw new Error("Finish the selected account's Chrome sign-in first");
     if (this.state.authenticated) {
       this.activateHomeSurface();
       this.show();
@@ -3489,6 +3908,13 @@ class BrowserHost {
     await this.installPasskeyLogin(transfer);
     this.setState({ passkeyPhase: null, loading: false });
     return this.snapshot();
+  }
+
+  openAccountPasskeyLogin(accountName) {
+    return startAccountPasskeyLogin(this, accountName, this.session || session, {
+      idleUrl: IDLE_BROWSER_URL,
+      composerSelector: COMPOSER_SELECTOR,
+    });
   }
 
   async clearOwnedSessionForPasskey() {
@@ -3647,6 +4073,9 @@ class BrowserHost {
 
   async probeAuthentication() {
     requireAutomaticBrowserInspection(this, "ChatGPT authentication probe");
+    if (this.destroyed || this.primaryRendererRecoveryNeeded || this.primaryRendererRecovery) {
+      throw new Error("ChatGPT browser is unavailable while its renderer restarts. Retry when it is ready.");
+    }
     if (this.reauthenticationRequired
       && !["ChatGPT login", "ChatGPT passkey login", "ChatGPT logout"].includes(this.manualOperation)) return this.snapshot();
     if (this.authenticationProbe) return this.authenticationProbe;
@@ -3669,7 +4098,7 @@ class BrowserHost {
         this.setState({ status: "signed-out", message: "Sign in to ChatGPT", authenticated: false, url });
         return this.snapshot();
       }
-      const probe = (contents) => contents.executeJavaScript(`(async () => {
+      const probe = (contents) => runBrowserPageScript(contents, `(async () => {
         const expectedUrl = new URL(${JSON.stringify(TEMPORARY_CHAT_URL)});
         const readSurface = () => {
           const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
@@ -3688,7 +4117,7 @@ class BrowserHost {
           ? await (${readChatGptAuthSession.toString()})(fetch.bind(globalThis), expectedUrl.origin, ${CHATGPT_AUTH_SESSION_TIMEOUT_MS})
           : { sessionAuthenticated: false, sessionCheckError: null };
         return { ...readSurface(), ...session };
-      })()`, true).catch(() => ({
+      })()`).catch(() => ({
         url: "",
         composer: false,
         temporary: false,
@@ -3697,6 +4126,7 @@ class BrowserHost {
         readyState: "unknown",
       }));
       let result = await probe(this.view.webContents);
+      if (this.destroyed || revision !== this.authenticationRevision) return this.snapshot();
       if (!(result.composer && result.temporary && result.sessionAuthenticated)
         && this.authView
         && !this.authView.webContents.isDestroyed()) {
@@ -3897,6 +4327,7 @@ class BrowserHost {
 
   async withManualOperation(name, action) {
     await this.ready();
+    if (this.accountPasskeyLogin) throw new Error("Finish the selected account's Chrome sign-in first");
     if (this.activeTraceId) {
       throw new Error(`ChatGPT browser is running Codex turn ${this.activeTraceId}`);
     }
@@ -3916,6 +4347,7 @@ class BrowserHost {
     } finally {
       if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(true);
       this.manualOperation = null;
+      if (this.primaryRendererRecoveryNeeded) void this.recoverPrimaryRenderer();
     }
   }
 
@@ -3979,6 +4411,8 @@ class BrowserHost {
 
   destroy() {
     this.destroyed = true;
+    for (const timer of this.unusualActivityCooldownTimers?.values?.() || []) clearTimeout(timer);
+    this.unusualActivityCooldownTimers?.clear?.();
     if (this.authenticationCookieListener) {
       this.view.webContents.session.cookies.off("changed", this.authenticationCookieListener);
     }

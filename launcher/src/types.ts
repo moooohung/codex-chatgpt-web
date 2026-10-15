@@ -26,6 +26,8 @@ export interface AccountAddInput {
 }
 
 export interface LauncherState {
+  effortCeilings?: Array<{ account: string; family: "5.6" | "6"; requestedPosition: number;
+    actualPosition: number; observedAt: number; lastCheckedAt: number }>;
   version: 1;
   language: Language | null;
   onboardingComplete: boolean;
@@ -38,6 +40,7 @@ export interface LauncherState {
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
   biggerContextAvailable?: boolean;
+  composerPredictionsEnabled: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
   useSavedChats: boolean;
@@ -62,6 +65,7 @@ export interface BrowserState {
   title: string;
   authenticated: boolean;
   passkeyPhase?: "opening" | "waiting" | "importing" | null;
+  passkeyAccount?: string | null;
   visible: boolean;
   surfaceActive: boolean;
   loading: boolean;
@@ -71,10 +75,16 @@ export interface BrowserState {
   activeTabId: string;
   maxTabs: number;
   tabs: BrowserTabState[];
+  unusualActivityCooldown?: {
+    retryAt: number;
+    accountCount: number;
+  };
 }
 
 export interface BrowserTabState {
   id: string;
+  accountName?: string | null;
+  isSignInTab?: boolean;
   traceId: string | null;
   title: string;
   status: "idle" | "loading" | "signed-out" | "ready" | "testing" | "running" | "error" | "aborted";
@@ -194,6 +204,7 @@ export interface LauncherApi {
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
+  setComposerPredictions(enabled: boolean): Promise<LauncherState>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
   setAutoApproveToolCalls(enabled: boolean): Promise<LauncherState>;
   setFreshConversationPerTurn(enabled: boolean): Promise<LauncherState>;
@@ -216,6 +227,7 @@ export interface LauncherApi {
   addAccount(input: AccountAddInput): Promise<{ ok: boolean; name: string }>;
   removeAccount(name: string): Promise<{ ok: boolean; deferred?: boolean }>;
   openAccountLogin(name: string): Promise<{ ok: boolean }>;
+  openAccountPasskeyLogin(name: string): Promise<BrowserState>;
   toggleAccount(input: { name: string; enabled: boolean }): Promise<{ ok: boolean; name: string; enabled: boolean }>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;

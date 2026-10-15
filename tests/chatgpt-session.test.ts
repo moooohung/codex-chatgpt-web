@@ -73,7 +73,7 @@ test("effort activation binds the owned menu after the control opens", async () 
       return null;
     },
     click: async (options: unknown) => {
-      expect(options).toEqual({ force: true, timeout: 1 });
+      expect(options).toEqual({ timeout: 1 });
       opened = true;
     },
   };
@@ -156,7 +156,7 @@ test("effort activation retries one ghost click with a primary pointerdown", asy
   expect(activation.method).toBe("pointerdown");
   expect(activation.menu).toBe(ownedMenu as never);
   expect(events).toEqual([
-    ["click", { force: true, timeout: 1 }],
+    ["click", { timeout: 1 }],
     ["keyboard", "Escape"],
     ["pointerdown", { button: 0, buttons: 1, pointerType: "mouse", isPrimary: true }],
   ]);
@@ -407,7 +407,7 @@ test("power picker omission of lock attributes requires its enabled structural o
     .rejects.toThrow("availability");
 });
 
-test("stale saved capabilities cannot activate a locked effort; High remains selectable", async () => {
+test("stale saved capabilities clamp a locked effort; High remains selectable", async () => {
   for (const effort of ["xhigh", "high"] as const) {
     const fixture = reasoningPicker({ max: "3", locks: ["false", "false", "false", "true"] });
     const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
@@ -416,25 +416,26 @@ test("stale saved capabilities cannot activate a locked effort; High remains sel
     const selection = worker.selectModelAndEffort(fixture.page, "gpt-5.6-sol", effort, {
       localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
     });
-    if (effort === "xhigh") {
-      await expect(selection).rejects.toMatchObject({ code: "chatgpt_effort_locked", retryable: false });
-      expect(fixture.keys).toEqual([]);
-    } else {
-      expect((await selection).selection.label).toBe("High");
-      expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
-    }
+    expect((await selection).selection.label).toBe("High");
+    expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
   }
 });
 
-test.each(["xhigh", "max"])("stale Pro capabilities on the observed three-position Plus picker identify unavailable %s", async effort => {
+test.each(["xhigh", "max"])("stale capabilities on a three-position picker clamp xhigh while preserving Pro: %s", async effort => {
   const fixture = reasoningPicker({ power: true, max: "2", locks: [null, null, null] });
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     activeComposer: async () => fixture.composer,
   }) as any;
-  await expect(worker.selectModelAndEffort(fixture.page, "gpt-5.6-sol", effort, {
+  const selection = worker.selectModelAndEffort(fixture.page, "gpt-5.6-sol", effort, {
     localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
-  })).rejects.toMatchObject({ code: "chatgpt_effort_unavailable", retryable: false, message: expect.stringContaining("picker exposes 3 effort positions") });
-  expect(fixture.keys).toEqual([]);
+  });
+  if (effort === "max") {
+    await expect(selection).rejects.toMatchObject({ code: "chatgpt_effort_unavailable", retryable: false });
+    expect(fixture.keys).toEqual([]);
+  } else {
+    expect((await selection).effort).toBe("high");
+    expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
+  }
 });
 
 test("Pro selection verifies the persisted hidden slider through its visible owner, never model rows", async () => {
