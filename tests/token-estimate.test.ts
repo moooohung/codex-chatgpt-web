@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { estimateTokens } from "../src/lib/token-estimate";
+import { createRequestTokenEstimator, estimateTokens } from "../src/lib/token-estimate";
 
 test("counts GPT-5 text with the o200k tokenizer", () => {
   expect(estimateTokens("hello world")).toBe(2);
@@ -22,8 +22,30 @@ test("pathological repeated text is counted in bounded chunks", () => {
   expect(estimateTokens("a".repeat(32_768))).toBe(4_096);
 });
 
+test("repeated chunks keep exact counts across changes, partial tails and Unicode boundaries", () => {
+  const a = "a".repeat(4096);
+  const b = "b".repeat(4096);
+  expect(estimateTokens(a + a + b + b + "hello world"))
+    .toBe(2 * estimateTokens(a) + 2 * estimateTokens(b) + 2);
+  const unicode = "a".repeat(4095) + "😀";
+  expect(estimateTokens(unicode.repeat(2)))
+    .toBe(estimateTokens("a".repeat(4095)) + estimateTokens("😀" + "a".repeat(4094)) + estimateTokens("a😀"));
+  expect(estimateTokens("hello world")).toBe(2);
+  expect(estimateTokens("")).toBe(0);
+});
+
 test("large ordinary prose is not inflated by a character-ratio heuristic", () => {
   const prose = `${"word ".repeat(97_999)}word`;
   expect(prose.length).toBe(489_999);
   expect(estimateTokens(prose)).toBeLessThan(100_000);
+});
+
+test("request-local memoization preserves upstream counts for repeated and changing context", () => {
+  const estimate = createRequestTokenEstimator();
+  const a = "a".repeat(4096);
+  const b = "b".repeat(4096);
+  for (const text of [a.repeat(80), a + b + a, "가😀".repeat(5000), "", a.repeat(80), b + a + b]) {
+    expect(estimate(text)).toBe(estimateTokens(text));
+    expect(createRequestTokenEstimator()(text)).toBe(estimateTokens(text));
+  }
 });

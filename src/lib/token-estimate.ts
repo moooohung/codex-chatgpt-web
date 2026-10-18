@@ -43,6 +43,10 @@ function countTokens(text: string, modelId?: string, chunks?: Map<string, number
 
   const encoding = chatGptTokenizer();
   let count = 0;
+  // Long padding/code runs often contain identical chunks. Reuse only the last
+  // exact chunk within this call; never retain prompt text between requests.
+  let previousChunk: string | undefined;
+  let previousCount = 0;
   for (let start = 0; start < text.length;) {
     let end = Math.min(start + TOKENIZER_CHUNK_CHARS, text.length);
     if (end < text.length) {
@@ -52,7 +56,12 @@ function countTokens(text: string, modelId?: string, chunks?: Map<string, number
         end -= 1;
       }
     }
-    count += countChunk(text.slice(start, end), encoding, chunks);
+    const chunk = text.slice(start, end);
+    if (chunk !== previousChunk) {
+      previousCount = countChunk(chunk, encoding, chunks);
+      previousChunk = chunk;
+    }
+    count += previousCount;
     start = end;
   }
   return count;
