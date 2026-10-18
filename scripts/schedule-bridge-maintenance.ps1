@@ -62,6 +62,115 @@ function BridgePhase($Reservation, $State, [string]$Phase) {
     $State.updatedAt = [DateTime]::UtcNow.ToString('o')
     WriteBridgeJson $Reservation.statePath $State
 }
+function AssertBridgeRoutePreflight($Reservation, [ValidateRange(100, 15000)][int]$TimeoutMilliseconds = 15000) {
+    # `route status` can repair journal copies. Run the original CLI against an
+    # isolated snapshot, never against the live route during a maintenance check.
+    $check = $Reservation.routeCheck
+    $snapshot = $null
+    $process = $null
+    try {
+        if (-not $check -or $check.schemaVersion -ne 1) { throw 'Missing pinned route preflight; create a new reservation' }
+        foreach ($file in @(@{ path = $check.cliPath; hash = $check.cliSha256 }, @{ path = $check.bunPath; hash = $check.bunSha256 })) {
+            if ($file.hash -notmatch '^[a-f0-9]{64}$' -or (BridgeFileHash $file.path) -ne $file.hash) { throw 'Route checker identity changed' }
+        }
+        $codexHomePath = [IO.Path]::GetFullPath($check.codexHome)
+        $inputs = @(
+            (Join-Path $codexHomePath 'config.toml'),
+            (Join-Path $Reservation.runtimeRoot 'codex/integration-journal.json'),
+            (Join-Path $Reservation.runtimeRoot 'codex/integration-journal.recovery.json')
+        )
+        $snapshot = Join-Path ([IO.Path]::GetTempPath()) ('bridge-route-preflight-' + [Guid]::NewGuid().ToString('N'))
+        $snapshotCodex = Join-Path $snapshot 'codex'
+        $snapshotApp = Join-Path $snapshot 'app'
+        [IO.Directory]::CreateDirectory($snapshotCodex) | Out-Null
+        [IO.Directory]::CreateDirectory((Join-Path $snapshotApp 'codex')) | Out-Null
+        $hashes = @()
+        for ($index = 0; $index -lt $inputs.Count; $index++) {
+            $path = $inputs[$index]
+            $hash = if (Test-Path -LiteralPath $path -PathType Leaf) { BridgeFileHash $path } else { $null }
+            $hashes += $hash
+            if (-not $hash) { continue }
+            $bytes = [IO.File]::ReadAllBytes($path)
+            if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() -ne $hash) { throw 'Route changed during preflight; retry after the other writer finishes' }
+            if ($index -eq 0) {
+                [IO.File]::WriteAllBytes((Join-Path $snapshotCodex 'config.toml'), $bytes)
+            } else {
+                $journal = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xfeff) | ConvertFrom-Json -AsHashtable
+                if ($journal.configPath -isnot [string] -or [IO.Path]::GetFullPath($journal.configPath) -ne $inputs[0]) { throw 'Route journal targets another Codex home' }
+                $journal.configPath = Join-Path $snapshotCodex 'config.toml'
+                WriteBridgeJson (Join-Path $snapshotApp ('codex/' + [IO.Path]::GetFileName($path))) $journal
+            }
+        }
+        if (-not $hashes[0]) { throw 'Codex route configuration is missing' }
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $check.bunPath
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        foreach ($argument in @($check.cliPath, '--home', $snapshotApp, 'route', 'status')) { $start.ArgumentList.Add($argument) }
+        $start.Environment['CODEX_HOME'] = $snapshotCodex
+        $start.Environment['CODEX_CHATGPT_WEB_HOME'] = $snapshotApp
+        $start.Environment.Remove('CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN') | Out-Null
+        $start.Environment.Remove('CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR') | Out-Null
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $start
+        $process.Start() | Out-Null
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw 'Route preflight timed out'
+        }
+        # Never persist raw CLI output, config contents or a previous route URL.
+        if ($process.ExitCode -ne 0) { throw 'Original route CLI rejected the snapshot' }
+        $status = $stdout.GetAwaiter().GetResult() | ConvertFrom-Json -AsHashtable
+        $stderr.GetAwaiter().GetResult() | Out-Null
+        if ($status.installed -isnot [bool] -or -not $status.installed -or $status.active -isnot [bool] -or $status.errors -isnot [array]) { throw 'Invalid or missing route status' }
+        if ($status.errors.Count -gt 0) { throw 'Codex route config and integration journal disagree (base URL, marker, features or interrupt hook)' }
+        $expectedRoute = [Uri]::new([Uri]$Reservation.healthUri, '/v1').AbsoluteUri
+        if ($status.routeUrl -cne $expectedRoute) { throw 'Journal route does not target the reviewed bridge endpoint' }
+        for ($index = 0; $index -lt $inputs.Count; $index++) {
+            $current = if (Test-Path -LiteralPath $inputs[$index] -PathType Leaf) { BridgeFileHash $inputs[$index] } else { $null }
+            if ($current -ne $hashes[$index]) { throw 'Route changed during preflight; retry after the other writer finishes' }
+        }
+        return [ordered]@{
+            passed = $true; checkedAt = [DateTime]::UtcNow.ToString('o'); active = $status.active
+            reconnectOnStartup = $status.reconnectOnStartup -eq $true
+            configSha256 = $hashes[0]; journalSha256 = $hashes[1]; recoveryJournalSha256 = $hashes[2]
+            cliSha256 = $check.cliSha256; bunSha256 = $check.bunSha256; isolatedSnapshot = $true
+        }
+    } catch {
+        # Do not propagate parsers/process diagnostics which could contain secrets.
+        $reason = if ($_.Exception.Message -match '^(Missing pinned|Route checker identity|Route journal targets|Codex route configuration|Route preflight timed|Original route CLI rejected|Invalid or missing route|Codex route config and|Journal route does not|Route changed during)') { $_.Exception.Message } else { 'Unable to validate the isolated route snapshot' }
+        $failure = [InvalidOperationException]::new('Route preflight rejected before drain/quit: ' + $reason)
+        $failure.Data['BridgeRoutePreflightRejected'] = $true
+        throw $failure
+    } finally {
+        if ($process) { $process.Dispose() }
+        if ($snapshot -and (Test-Path -LiteralPath $snapshot)) {
+            $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+            $target = [IO.Path]::GetFullPath($snapshot)
+            if (-not $target.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($target) -notmatch '^bridge-route-preflight-[a-f0-9]{32}$') { throw 'Unexpected route snapshot cleanup path' }
+            try { Remove-Item -LiteralPath $target -Recurse -Force }
+            catch {
+                $failure = [InvalidOperationException]::new('Route preflight rejected before drain/quit: Snapshot cleanup failed')
+                $failure.Data['BridgeRoutePreflightRejected'] = $true
+                throw $failure
+            }
+        }
+    }
+}
+function ConfirmBridgeRouteBeforeQuit($Reservation, $State) {
+    try { $State.routePreflightBeforeQuit = AssertBridgeRoutePreflight $Reservation }
+    catch {
+        $State.routePreflightBeforeQuit = @{ passed = $false; checkedAt = [DateTime]::UtcNow.ToString('o'); reason = $_.Exception.Message }
+        BridgePhase $Reservation $State 'preflight_rejected'
+        throw
+    }
+    WriteBridgeJson $Reservation.statePath $State
+}
 function BridgeReservationDirectory($Reservation) { return [IO.Path]::GetDirectoryName($Reservation.statePath) }
 function AssertBridgeProtectedJobPath([string]$Path) {
     $absolute = [IO.Path]::GetFullPath($Path)
@@ -236,11 +345,11 @@ function InvokeBridgeRestartGuardian($Reservation, [string]$ManifestPath, [strin
         $worker.WaitForExit()
         $state = Get-Content -LiteralPath $Reservation.statePath -Raw | ConvertFrom-Json
         WriteBridgeJson (Join-Path $directory 'guardian-result.json') @{ at = [DateTime]::UtcNow.ToString('o'); guardianPid = $PID; workerPid = $worker.Id; attempt = $attempt; exitCode = $worker.ExitCode; phase = $state.phase }
-        if ($state.phase -in @('complete', 'reservation_probe_complete')) { return }
+        if ($state.phase -in @('complete', 'reservation_probe_complete', 'preflight_rejected')) { return }
         if ($attempt -lt 3) { Start-Sleep -Seconds 60 }
     }
     $state = Get-Content -LiteralPath $Reservation.statePath -Raw | ConvertFrom-Json
-    if ($state.phase -notin @('complete', 'reservation_probe_complete')) { throw 'Independent restart recovery exhausted its three retries; receipts retained' }
+    if ($state.phase -notin @('complete', 'reservation_probe_complete', 'preflight_rejected')) { throw 'Independent restart recovery exhausted its three retries; receipts retained' }
 }
 function RequestBridgeQuit($Reservation, $State) {
     $owner = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $Reservation.priorLauncherPid)
@@ -255,6 +364,7 @@ function RequestBridgeQuit($Reservation, $State) {
     $version = Invoke-RestMethod -Uri ([Uri]::new($endpoint, '/json/version')) -TimeoutSec 5
     $socketUri = [Uri]$version.webSocketDebuggerUrl
     if ($socketUri.Host -ne $endpoint.Host -or $socketUri.Port -ne $endpoint.Port -or $socketUri.Scheme -ne 'ws' -or -not $socketUri.AbsolutePath.StartsWith('/devtools/browser/')) { throw 'Unexpected owned browser socket' }
+    ConfirmBridgeRouteBeforeQuit $Reservation $State
     $headers = @{ Authorization = 'Bearer ' + $config.controlToken }
     $State.shutdownRequested = $true
     $State.browserTurnsAtQuit = $health.active_browser_turns
@@ -373,7 +483,7 @@ function InvokeReservedBridgeMaintenance($Reservation) {
     $lock = [IO.File]::Open($Reservation.lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     try {
         $State = Get-Content -LiteralPath $Reservation.statePath -Raw | ConvertFrom-Json -AsHashtable -DateKind String
-        if ($State.phase -in @('complete', 'reservation_probe_complete')) {
+        if ($State.phase -in @('complete', 'reservation_probe_complete', 'preflight_rejected')) {
             CompleteBridgeReservation $Reservation
             return
         }
@@ -405,12 +515,16 @@ function InvokeReservedBridgeMaintenance($Reservation) {
         } catch {
             $operationError = $_.Exception.Message
             $State.operationError = $operationError
-            BridgePhase $Reservation $State 'operation_failed_recovery_pending'
+            if ($_.Exception.Data['BridgeRoutePreflightRejected'] -and -not $State.shutdownRequested) {
+                $State.preflightRejected = $true
+                BridgePhase $Reservation $State 'preflight_rejected'
+            } else { BridgePhase $Reservation $State 'operation_failed_recovery_pending' }
         } finally {
-            # Runs even on installer failure. A scheduler retry resumes here rather
-            # than repeating the quit, user sends, or the original installation.
-            RestoreBridgeLauncher $Reservation $State
+            # Runs even on installer failure. A pre-drain route rejection leaves
+            # the existing owner alone and must not become a successful recovery.
+            if (-not $State.preflightRejected) { RestoreBridgeLauncher $Reservation $State }
         }
+        if ($State.preflightRejected) { CompleteBridgeReservation $Reservation; return }
         $State.recoveredAfterFailure = [bool]($operationError -or $State.operationError)
         BridgePhase $Reservation $State 'complete'
         CompleteBridgeReservation $Reservation
@@ -484,6 +598,14 @@ function NewBridgeMaintenanceReservation([string]$RequestedOperation, [string]$R
     $state = BridgeRuntimeState $reservation
     if ($state -notin @('original', 'candidate')) { throw 'Current runtime is not a complete reviewed version' }
     if ($RequestedOperation -eq 'Install' -and $state -ne 'original') { throw 'Overlay is already installed; do not repeat its deployment' }
+    if ($RequestedOperation -ne 'Probe') {
+        $bundleRoot = Join-Path ([IO.Path]::GetDirectoryName($launcherPath)) 'resources/runtime'
+        $cliPath = Join-Path $bundleRoot 'app/cli.js'
+        $bunPath = Join-Path $bundleRoot 'runtime/bun.exe'
+        $codexHomePath = if ($env:CODEX_HOME) { [IO.Path]::GetFullPath($env:CODEX_HOME) } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex' }
+        $reservation.routeCheck = @{ schemaVersion = 1; cliPath = $cliPath; cliSha256 = BridgeFileHash $cliPath; bunPath = $bunPath; bunSha256 = BridgeFileHash $bunPath; codexHome = $codexHomePath }
+        $reservation.routePreflightAtReservation = AssertBridgeRoutePreflight $reservation
+    }
     return $reservation
 }
 

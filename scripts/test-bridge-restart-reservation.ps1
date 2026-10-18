@@ -163,6 +163,24 @@ function RequestBridgeQuit($Reservation, $State) {
     WaitFixtureGuardian $failureArmed
     AssertFixture ($failureState.phase -eq 'complete' -and $failureState.operationSucceeded -eq $false -and $failureState.recoveredAfterFailure -and $failureState.launcherStarts -eq 1) 'Installer failure did not execute restart recovery'
     FixtureResult 'installer_failure_finally_restarts' $failureState
+
+    # A real independent guardian must retire a rejected route preflight instead
+    # of retrying for minutes or restarting the healthy fixture owner.
+    $preflight = FixtureReservation 'route-preflight-rejected'
+    $preflightSource = Join-Path $fixtureRoot 'fixture-preflight-worker.ps1'
+    $fixturePreflight = @'
+function RequestBridgeQuit($Reservation, $State) {
+    ConfirmBridgeRouteBeforeQuit $Reservation $State
+    throw 'Missing route checker incorrectly allowed fixture quit'
+}
+'@
+    [IO.File]::WriteAllText($preflightSource, (Get-Content -LiteralPath $source -Raw).Replace($entry, $fixturePreflight + [Environment]::NewLine + $entry))
+    $preflightArmed = RegisterBridgeReservation $preflight $preflightSource
+    $preflightState = WaitFixture $preflight.statePath 'preflight_rejected'
+    WaitFixtureGuardian $preflightArmed
+    $stillHealthy = Invoke-RestMethod -Uri ('http://127.0.0.1:' + $port + '/healthz') -TimeoutSec 3
+    AssertFixture ($preflightState.installerInvocations -eq 0 -and $preflightState.launcherStarts -eq 0 -and -not $preflightState.shutdownRequested -and -not $preflightState.operationSucceeded -and -not $preflightState.healthyAt -and $preflightState.runAttempts -eq 1 -and $stillHealthy.pid -eq $failureState.daemonPid) 'Rejected preflight retried, restarted or falsely completed'
+    FixtureResult 'guardian_retires_route_rejection_without_restarting_owner' $preflightState
     Invoke-RestMethod -Uri ('http://127.0.0.1:' + $port + '/shutdown') -Method Post -TimeoutSec 3 | Out-Null
     WaitBridgeIdle $failure 10
 
@@ -203,7 +221,7 @@ function RequestBridgeQuit($Reservation, $State) {
     $report | ConvertTo-Json -Depth 12
 } finally {
     # Only this fixture's named tasks and private loopback service are cleaned up.
-    foreach ($reservation in @($crash, $existing, $failure, $completed)) {
+    foreach ($reservation in @($crash, $existing, $failure, $preflight, $completed)) {
         if ($reservation -and (Get-ScheduledTask -TaskName $reservation.taskName -ErrorAction SilentlyContinue)) { Unregister-ScheduledTask -TaskName $reservation.taskName -Confirm:$false }
     }
     if ($port) {

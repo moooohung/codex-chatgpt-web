@@ -41,7 +41,14 @@ try {
     $config = Join-Path $directory 'config.json'
     WriteBridgeJson $descriptor @{ pid = $fixture.Id; endpoint = $uri }
     WriteBridgeJson $config @{ controlToken = 'offline-fixture' }
-    $reservation = [ordered]@{ launcherPath = $owner.ExecutablePath; priorLauncherPid = $fixture.Id; priorLauncherCreatedAt = $owner.CreationDate.ToUniversalTime().ToString('o'); priorDaemonPid = $fixture.Id; healthUri = $uri + '/healthz'; descriptorPath = $descriptor; configPath = $config; statePath = Join-Path $directory 'state.json'; allowActiveBrowserTurns = $false }
+    # Route semantics have their own original-CLI suite. This fixture isolates
+    # active-turn/drain behavior with a pinned, inert status command.
+    $routeCli = Join-Path $directory 'route-status.cjs'
+    [IO.File]::WriteAllText($routeCli, ('console.log(JSON.stringify({installed:true,active:true,routeUrl:' + ($uri + '/v1' | ConvertTo-Json -Compress) + ',errors:[]}));'))
+    $codexHomePath = Join-Path $directory 'codex-home'
+    [IO.Directory]::CreateDirectory($codexHomePath) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $codexHomePath 'config.toml'), 'model = "offline-fixture"')
+    $reservation = [ordered]@{ launcherPath = $owner.ExecutablePath; priorLauncherPid = $fixture.Id; priorLauncherCreatedAt = $owner.CreationDate.ToUniversalTime().ToString('o'); priorDaemonPid = $fixture.Id; healthUri = $uri + '/healthz'; descriptorPath = $descriptor; configPath = $config; statePath = Join-Path $directory 'state.json'; allowActiveBrowserTurns = $false; runtimeRoot = $directory; routeCheck = @{ schemaVersion = 1; cliPath = $routeCli; cliSha256 = BridgeFileHash $routeCli; bunPath = $bun; bunSha256 = BridgeFileHash $bun; codexHome = $codexHomePath } }
     $state = [ordered]@{ phase = 'prepared'; shutdownRequested = $false; browserTurnsAtQuit = 0 }
     $rejected = $false
     try { RequestBridgeQuit $reservation $state } catch { $rejected = $_.Exception.Message -match 'browser work changed' }
@@ -66,7 +73,17 @@ try {
     try { RequestBridgeQuit $reservation $state } catch { $drainRejected = $_.Exception.Message -match 'drain was not acknowledged' }
     $events = Get-Content -LiteralPath $log
     if (-not $drainRejected -or $events.Count -ne 4 -or $events[2] -notmatch 'drain' -or $events[3] -notmatch 'resume') { throw 'Unacknowledged drain did not resume before rejecting quit' }
-    $report = @{ passed = $true; cases = @('default_busy_guard_no_writes','native_only_busy_guard_no_writes','explicit_active_normal_quit','daemon_owner_guard','unacknowledged_drain_resumes'); browserTurnsAtQuit = 2; httpTurnsAtQuit = 3; realLauncherQuitRequests = 0; fixtureRoot = $directory }
+    # Drift after reserving must stop the real RequestBridgeQuit path before drain.
+    $state = [ordered]@{ phase = 'prepared'; shutdownRequested = $false; browserTurnsAtQuit = 0 }
+    [IO.File]::AppendAllText($routeCli, '// changed after reservation')
+    $routeRejected = $false
+    try { RequestBridgeQuit $reservation $state } catch { $routeRejected = [bool]$_.Exception.Data['BridgeRoutePreflightRejected'] }
+    if (-not $routeRejected -or $state.shutdownRequested -or $state.phase -ne 'preflight_rejected' -or @(Get-Content -LiteralPath $log).Count -ne 4) { throw 'Route preflight drift sent drain or quit' }
+    $reservation.routeCheck = $null
+    $missingRejected = $false
+    try { RequestBridgeQuit $reservation $state } catch { $missingRejected = [bool]$_.Exception.Data['BridgeRoutePreflightRejected'] }
+    if (-not $missingRejected -or @(Get-Content -LiteralPath $log).Count -ne 4) { throw 'Old reservation without route preflight sent drain or quit' }
+    $report = @{ passed = $true; cases = @('default_busy_guard_no_writes','native_only_busy_guard_no_writes','explicit_active_normal_quit','daemon_owner_guard','unacknowledged_drain_resumes','route_checker_drift_no_drain_or_quit','old_reservation_no_drain_or_quit'); browserTurnsAtQuit = 2; httpTurnsAtQuit = 3; realLauncherQuitRequests = 0; fixtureRoot = $directory }
     if ($OutputDirectory) { [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($OutputDirectory)) | Out-Null; WriteBridgeJson (Join-Path $OutputDirectory 'maintenance-active-tests.json') $report }
     $report | ConvertTo-Json -Depth 5
 } finally {
