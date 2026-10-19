@@ -415,6 +415,7 @@ class BrowserControlServer {
       const cancelled = error?.code === "turn_cancelled";
       const retainedUnavailable = error?.code === "retained_conversation_unavailable";
       const accountUnavailable = error?.code === "account_unavailable";
+      const ownerLost = error?.code === "turn_owner_lost";
       const manualInspectionDisabled = error?.code === "manual_browser_inspection_disabled";
       const manualOwnerLost = error?.code === "manual_turn_owner_lost";
       const manualTimedOut = error?.code === "manual_turn_timed_out";
@@ -423,7 +424,7 @@ class BrowserControlServer {
       if (accountCooldown) response.setHeader("retry-after", String(error.retryAfterSeconds));
       writeJson(
         response,
-        accountCooldown ? 429 : cancelled || retainedUnavailable || accountUnavailable || manualInspectionDisabled || manualOwnerLost
+        accountCooldown ? 429 : cancelled || retainedUnavailable || accountUnavailable || ownerLost || manualInspectionDisabled || manualOwnerLost
           ? 409
           : surfaceNotReady ? 503 : manualTimedOut ? 408 : 400,
         {
@@ -431,6 +432,7 @@ class BrowserControlServer {
         ...(cancelled ? { code: "turn_cancelled" } : {}),
         ...(retainedUnavailable ? { code: "retained_conversation_unavailable" } : {}),
         ...(accountUnavailable ? { code: "account_unavailable" } : {}),
+        ...(ownerLost ? { code: "turn_owner_lost" } : {}),
         ...(manualInspectionDisabled ? { code: "manual_browser_inspection_disabled" } : {}),
         ...(manualOwnerLost ? { code: "manual_turn_owner_lost" } : {}),
         ...(manualTimedOut ? { code: "manual_turn_timed_out" } : {}),

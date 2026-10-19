@@ -44,6 +44,9 @@ const COMPUTER_USE_REPL_WIRES = new Set(["mcp__node_repl__js", "node_repl__js"])
 const COMPUTER_USE_REPL_DESCRIPTION = "Computer Use (computer-use) skill entry point: the node_repl JavaScript session can import the installed @oai/sky package. Read the skill before Windows actions. Registration alone does not verify the Windows helper connection.";
 
 const turnTokenSchema = z.string().min(20).max(256);
+const nativeTurnTokenSchema = z.string().regex(/^turn_[A-Za-z0-9_-]{32}$/,
+  "Copy turn_token exactly from the current request: turn_ followed by 32 case-sensitive characters. Do not guess or reuse an earlier token.")
+  .describe("Opaque capability for this request. Copy the complete turn_token from the current request unchanged, including case, hyphens and underscores. Never infer it from another turn or from an error.");
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 30_000;
@@ -85,7 +88,7 @@ const ZERO_RISK_MCP_INSTRUCTIONS = [
 function turnReferenceInput(contract: ChatGptMcpContract): Record<string, z.ZodString> {
   return contract === "safe"
     ? { request_id: turnTokenSchema }
-    : { turn_token: turnTokenSchema };
+    : { turn_token: nativeTurnTokenSchema };
 }
 
 function turnReference(contract: ChatGptMcpContract, input: object): string {
