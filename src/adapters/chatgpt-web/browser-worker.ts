@@ -2217,7 +2217,7 @@ class ChatGptBrowserDiagnostics {
         withChatGptBrowserObservationTimeout(page.evaluate(chatGptInteractionState, {
           selector: CHATGPT_EFFORT_CONTROL_SELECTOR,
           sampleFrames: failed,
-        })),
+        }), observationTimeoutMs),
       ]);
       if (stateResult.status === "fulfilled") recordChatGptPageObservationSize(page, stateResult.value.bodyTextChars);
       console.info(`[chatgpt-web] page_stage ${JSON.stringify({ traceId: this.traceId.slice(0, 12), checkpoint,

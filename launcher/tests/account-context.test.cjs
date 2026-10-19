@@ -376,6 +376,7 @@ function loadNotifyLauncherTurn(fetchResponse) {
     },
     LauncherBrowserTurnCancelledError: class extends Error {},
     LauncherRetainedConversationUnavailableError: class extends Error {},
+    LauncherBrowserTurnOwnerLostError: class extends Error {},
     ChatGptWebAdapterError: class extends Error {},
   };
   vm.runInNewContext(compiled, sandbox);
