@@ -38,7 +38,8 @@ export function logChatGptToolBoundary(
   stage: string,
   traceId: string | undefined,
   revision: number,
-  details: { elapsedMs?: number; timeoutMs?: number; textChars?: number; toolCount?: number; code?: string } = {},
+  details: { elapsedMs?: number; timeoutMs?: number; textChars?: number; toolCount?: number; code?: string;
+    failureKind?: "cancelled" | "browser_timeout" | "locator_timeout" | "type_error" | "adapter_error" | "other" } = {},
 ): void {
   const shortId = /^[a-f0-9]{12,}$/i.test(traceId ?? "") ? traceId!.slice(0, 12) : "untracked";
   console.info(`[chatgpt-web] tool_boundary ${JSON.stringify({ stage, traceId: shortId, revision, ...details })}`);
@@ -118,6 +119,12 @@ export function captureChatGptToolBoundary(options: {
     logChatGptToolBoundary("capture_failed", traceId, revision, {
       elapsedMs: Date.now() - started,
       code: failure instanceof ChatGptWebAdapterError ? failure.code : "cancelled",
+      // Never log error messages: Playwright errors can contain page/tool text.
+      failureKind: options.signal?.aborted ? "cancelled"
+        : error instanceof Error && error.name === "ChatGptBrowserObservationTimeoutError" ? "browser_timeout"
+        : error instanceof Error && error.name === "TimeoutError" ? "locator_timeout"
+        : error instanceof TypeError ? "type_error"
+        : error instanceof ChatGptWebAdapterError ? "adapter_error" : "other",
     });
     throw failure;
   });

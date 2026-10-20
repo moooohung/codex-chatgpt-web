@@ -11,6 +11,23 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+test("boundary failure diagnostics classify a locator timeout without recording its private message", async () => {
+  const logs: string[] = [];
+  const logging = spyOn(console, "info").mockImplementation(value => { logs.push(String(value)); });
+  try {
+    const error = new Error("private fixture page text must never enter diagnostics");
+    error.name = "TimeoutError";
+    let acknowledged = false;
+    await expect(captureChatGptToolBoundary({ tracker: new ChatGptCompletionTracker(), revision: 1,
+      timeoutMs: 50, capture: async () => { throw error; },
+      acknowledge: async () => { acknowledged = true; } }))
+      .rejects.toMatchObject({ code: "chatgpt_tool_boundary_observation_failed", retryable: false });
+    expect(acknowledged).toBe(false);
+    expect(logs.some(line => line.includes('"failureKind":"locator_timeout"'))).toBe(true);
+    expect(logs.join("\n")).not.toContain("private fixture page text");
+  } finally { logging.mockRestore(); }
+});
+
 test("reconcile after accepted MCP captures and ACKs before the daemon can emit, including an empty boundary", async () => {
   for (const visibleText of ["pre-tool answer", ""]) {
     const worker: any = Object.create(ChatGptBrowserWorker.prototype);

@@ -1027,15 +1027,21 @@ export async function resolveChatGptToolConfirmation(
   timeoutMs = CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
   onVisible?: () => Promise<void>,
   onApprovalPending?: (pending: boolean) => Promise<void>,
+  observe: <T>(operation: () => Promise<T>) => Promise<T> = operation =>
+    withChatGptBrowserObservationTimeout(withBrowserTurnAbort(operation(), signal), chatGptPageObservationTimeoutMs(page)),
 ): Promise<boolean> {
+  const read = <T>(operation: () => Promise<T>): Promise<T> => {
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    return observe(operation);
+  };
   const dialogs = page.locator('[role="dialog"], [data-testid="tool-approval-card"], [data-codex-approval-surface="true"]')
     .filter({ has: page.getByText(`Allow ChatGPT to use ${appName}?`, { exact: true }) })
     .filter({ visible: true });
-  const dialogCount = await dialogs.count();
+  const dialogCount = await read(() => dialogs.count());
   if (dialogCount === 0) return false;
   if (dialogCount !== 1) throw new Error("ChatGPT exposed multiple approvals for the selected connector");
   const dialog = dialogs.first();
-  await onVisible?.();
+  await read(async () => onVisible?.());
   if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
 
   if (autoApprove) {
@@ -1046,54 +1052,54 @@ export async function resolveChatGptToolConfirmation(
       .getByRole("button", { name: /^Allow(?: once)?$/ })
       .filter({ visible: true });
     const deny = dialog.getByRole("button", { name: "Deny", exact: true }).filter({ visible: true });
-    await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000, signal });
-    await deny.waitFor({ state: "visible", timeout: 10_000, signal });
-    if (await allowCurrentAction.count() !== 1 || await deny.count() !== 1) {
+    await read(() => allowCurrentAction.waitFor({ state: "visible", timeout: 10_000, signal }));
+    await read(() => deny.waitFor({ state: "visible", timeout: 10_000, signal }));
+    if (await read(() => allowCurrentAction.count()) !== 1 || await read(() => deny.count()) !== 1) {
       throw new Error("ChatGPT approval does not expose a unique one-time Allow and Deny action");
     }
     // Saved chats can mount the approval before the requesting message finishes
     // streaming. Submitting it while Stop is present can produce "Invalid conversation body".
     const readyDeadline = Date.now() + timeoutMs;
-    while (await chatGptStopButton(page).isVisible()) {
+    while (await read(() => chatGptStopButton(page).isVisible())) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      if (!await dialog.isVisible()) return true;
+      if (!await read(() => dialog.isVisible())) return true;
       if (Date.now() >= readyDeadline) {
         throw new Error("ChatGPT is still preparing the tool request; automatic approval was not sent. Wait for Stop to disappear, then approve the request in ChatGPT.");
       }
       await withBrowserTurnAbort(new Promise(resolveSleep => setTimeout(resolveSleep, 50)), signal);
     }
-    if (!await dialog.isVisible()) return true;
+    if (!await read(() => dialog.isVisible())) return true;
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    await allowCurrentAction.click({ timeout: 10_000, signal });
-    await dialog.waitFor({ state: "hidden", timeout: 10_000, signal });
+    await read(() => allowCurrentAction.click({ timeout: 10_000, signal }));
+    await read(() => dialog.waitFor({ state: "hidden", timeout: 10_000, signal }));
     return true;
   }
 
   let approvalError: unknown;
   try {
-    await onApprovalPending?.(true);
+    await read(async () => onApprovalPending?.(true));
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      if (!await dialog.isVisible().catch(() => false)) return true;
-      await new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, deadline - Date.now()))));
+      if (!await read(() => dialog.isVisible())) return true;
+      await withBrowserTurnAbort(new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, deadline - Date.now())))), signal);
     }
 
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    if (!await dialog.isVisible().catch(() => false)) return true;
+    if (!await read(() => dialog.isVisible())) return true;
     const deny = dialog.getByRole("button", { name: "Deny", exact: true }).filter({ visible: true });
-    if (await deny.count() !== 1) throw new Error("ChatGPT approval does not expose a unique Deny action");
-    await deny.waitFor({ state: "visible", timeout: 5_000 });
+    if (await read(() => deny.count()) !== 1) throw new Error("ChatGPT approval does not expose a unique Deny action");
+    await read(() => deny.waitFor({ state: "visible", timeout: 5_000, signal }));
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    await deny.click({ timeout: 5_000, signal });
-    await dialog.waitFor({ state: "hidden", timeout: 10_000 });
+    await read(() => deny.click({ timeout: 5_000, signal }));
+    await read(() => dialog.waitFor({ state: "hidden", timeout: 10_000, signal }));
     return true;
   } catch (error) {
     approvalError = error;
     throw error;
   } finally {
     try {
-      await onApprovalPending?.(false);
+      await withChatGptBrowserObservationTimeout(Promise.resolve(onApprovalPending?.(false)), chatGptPageObservationTimeoutMs(page));
     } catch (error) {
       if (approvalError === undefined) throw error;
       // A closed tab can reject the final update. Preserve the original failure;
@@ -3378,6 +3384,31 @@ export class ChatGptBrowserWorker {
   }
 
 
+
+  private async observeToolConfirmation(
+    page: Page,
+    baseline: ChatGptSubmissionBaseline,
+    signal: AbortSignal | undefined,
+    externalProgress: ChatGptTurnProgressReader | undefined,
+    completionTracker: ChatGptCompletionTracker | undefined,
+    onVisible?: () => Promise<void>,
+    onApprovalPending?: (pending: boolean) => Promise<void>,
+    timeoutMs = CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
+  ): Promise<boolean> {
+    // The approval policy can wait for a person for a full minute. Bound each
+    // browser operation, not that entire wait (including diagnostic/IPC time).
+    // Keep boundary capture/observe/ACK live throughout the approval wait.
+    return observeChatGptToolBoundaryDuring({
+      progress: externalProgress, signal,
+      capture: ownedSignal => this.observeSubmissionToolBoundary(page, baseline, ownedSignal, externalProgress, completionTracker),
+      observe: ownedSignal => resolveChatGptToolConfirmation(
+        page, this.config.appName, this.config.autoApproveToolCalls, ownedSignal,
+        timeoutMs, onVisible, onApprovalPending,
+        operation => this.observeResponseProbe(page, baseline, ownedSignal, undefined, completionTracker,
+          () => operation(), chatGptPageObservationTimeoutMs(page), "tool_confirmation"),
+      ),
+    });
+  }
 
   private async observeSubmissionToolBoundary(
     page: Page,
@@ -6481,12 +6512,12 @@ export class ChatGptBrowserWorker {
         let deliveryTimedOut = await observeProbe(() => chatGptMessageDeliveryTimeoutVisible(responseTurn.locator), undefined, "delivery_timeout");
         if (!deliveryTimedOut) await observeProbe(() => throwIfChatGptTerminalErrorAlert(page.locator(chatGptTurnContainerSelector(responseTurn.identity))), undefined, "terminal_error");
 
-        if (mode.localTools && await observeProbe(ownedSignal => resolveChatGptToolConfirmation(
+        if (mode.localTools && await this.observeToolConfirmation(
           page,
-          this.config.appName,
-          this.config.autoApproveToolCalls,
-          ownedSignal,
-          CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
+          submissionBaseline,
+          turn.abortSignal,
+          turn.externalProgress,
+          completionTracker,
           () => diagnostics.capture(page, "tool-confirmation-visible"),
           async pending => {
             if (!launcherSurfaceId) return;
@@ -6497,7 +6528,7 @@ export class ChatGptBrowserWorker {
               pending,
             });
           },
-        ), CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS)) {
+        )) {
           internalObservationFaults = 0;
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;

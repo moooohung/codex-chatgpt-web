@@ -3510,6 +3510,7 @@ function toolConfirmationPage(options: {
   disappearAfterReads?: number;
   surface?: "dialog" | "card" | "current";
   allowLabel?: "Allow once" | "Allow" | "Always allow";
+  visibility?: () => Promise<boolean>;
 } = {}): {
   page: Page;
   pressed: string[];
@@ -3540,6 +3541,7 @@ function toolConfirmationPage(options: {
     first: () => dialog,
     count: async () => visible ? 1 : 0,
     isVisible: async () => {
+      if (options.visibility) return options.visibility();
       reads += 1;
       if (options.disappearAfterReads !== undefined && reads >= options.disappearAfterReads) visible = false;
       return visible;
@@ -3592,6 +3594,72 @@ test("an unanswered ChatGPT connector approval is denied instead of aborting the
     undefined, async value => { pending.push(value); })).toBeTrue();
   expect(pending).toEqual([true, false]);
   expect(fixture.pressed).toEqual(["Deny:click"]);
+});
+
+test("worker approval policy expires normally after diagnostic overhead without an aggregate response timeout", async () => {
+  const fixture = toolConfirmationPage();
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  worker.config = { appName: "Codex Native", autoApproveToolCalls: false };
+  const pending: boolean[] = [];
+  const started = Date.now();
+  expect(await worker.observeToolConfirmation(fixture.page, {}, undefined, undefined, undefined,
+    async () => { await Bun.sleep(30); }, async (value: boolean) => { pending.push(value); }, 20)).toBeTrue();
+  expect(Date.now() - started).toBeGreaterThanOrEqual(50);
+  expect(pending).toEqual([true, false]);
+  expect(fixture.pressed).toEqual(["Deny:click"]);
+});
+
+test("failed approval visibility is not mistaken for a dismissed approval", async () => {
+  const failure = new Error("fixture DOM read failed");
+  const fixture = toolConfirmationPage({ visibility: async () => { throw failure; } });
+  const pending: boolean[] = [];
+  await expect(resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 20,
+    undefined, async value => { pending.push(value); })).rejects.toBe(failure);
+  expect(pending).toEqual([true, false]);
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("worker approval bounds a hung DOM operation and cancellation fences late permission", async () => {
+  let finish!: (visible: boolean) => void;
+  const fixture = toolConfirmationPage({ visibility: () => new Promise(resolve => { finish = resolve; }) });
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  worker.config = { appName: "Codex Native", autoApproveToolCalls: false };
+  const original = worker.observeResponseProbe.bind(worker);
+  worker.observeResponseProbe = (...args: any[]) => { args[6] = 5; return original(...args); };
+  const pending: boolean[] = [];
+  await expect(worker.observeToolConfirmation(fixture.page, {}, undefined, undefined, undefined,
+    undefined, async (value: boolean) => { pending.push(value); }, 100))
+    .rejects.toMatchObject({ probe: "tool_confirmation", timeoutMs: 5 });
+  finish(false);
+  await Bun.sleep(1);
+  expect(pending).toEqual([true, false]);
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("a tool batch arriving during approval still requires capture and observation before ACK", async () => {
+  const fixture = toolConfirmationPage({ disappearAfterReads: 2 });
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  worker.config = { appName: "Codex Native", autoApproveToolCalls: false };
+  const progress = new ChatGptExternalTurnProgress();
+  const tracker = new ChatGptCompletionTracker();
+  let captured = false, observed = false, acknowledged = false;
+  worker.currentSubmissionAnswerText = async () => { captured = true; return "proven boundary"; };
+  const observe = tracker.observeToolBatch.bind(tracker);
+  tracker.observeToolBatch = (revision, text) => {
+    expect(captured).toBeTrue();
+    observed = true;
+    return observe(revision, text);
+  };
+  const ack = progress.acknowledgeToolBatch.bind(progress);
+  progress.acknowledgeToolBatch = async revision => {
+    expect(observed).toBeTrue();
+    acknowledged = true;
+    await ack(revision);
+  };
+  expect(await worker.observeToolConfirmation(fixture.page, {}, undefined, progress, tracker,
+    undefined, async (pending: boolean) => { if (pending) progress.recordToolBatch(1); }, 200)).toBeTrue();
+  expect(acknowledged).toBeTrue();
+  expect(fixture.pressed).toEqual([]);
 });
 
 test("explicit connector auto-approval still selects Allow once", async () => {
