@@ -2971,6 +2971,15 @@ describe("ChatGPT outer-native harness v4", () => {
   test("serves the complete outer-native bridge contract over MCP stdio", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-mcp-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
+    const recursiveBridgeWires = [
+      "codex_exec",
+      "mcp__codex_native__codex_exec",
+      "mcp__codex_safe__codex_turn_complete",
+      "mcp__codex_apps__codex_native2_codex_exec",
+      "mcp__codex_apps__codex_native2__codex_tool_inventory",
+      "mcp__codex_apps__codex_native2___codex_exec",
+      "mcp__codex_apps__codex_native2___codex_tool_call",
+    ];
     const agentWaits = [
       { name: "multi_agent_v1__wait_agent", args: { targets: ["agent_test"], timeout_ms: 30_000 }, result: { statuses: {} }, direct: true },
       { name: "multi_agent_v2__wait_agent", args: { targets: [{ agent_id: "agent_test" }], timeout_ms: 30_000 }, result: { statuses: {} }, direct: false },
@@ -3126,7 +3135,7 @@ describe("ChatGPT outer-native harness v4", () => {
       const pwdRequest = execRequests.find(request => request.input?.includes('"cmd":"pwd"'));
       expect(pwdRequest?.input).toBeString();
       const execGatewayCalls: GatewayProgramCall[] = [];
-      await executeGatewayProgram(pwdRequest!.input!, ["exec_command"], execGatewayCalls);
+      await executeGatewayProgram(pwdRequest!.input!, ["exec_command", ...recursiveBridgeWires], execGatewayCalls);
       expect(execGatewayCalls).toEqual([{
         name: "exec_command",
         input: {
@@ -3253,6 +3262,53 @@ describe("ChatGPT outer-native harness v4", () => {
         next_offset: null,
       });
       expect(rawGatewayInventory.structuredContent).not.toHaveProperty("discovery_tools");
+
+      const recursiveInventory = await inventoryThroughGateway("codex_native", true, recursiveBridgeWires);
+      expect(recursiveInventory.structuredContent).toMatchObject({
+        total: 0, tools: [],
+      });
+      // A stale wire obtained before the fix is rejected before any outer call is queued.
+      for (const wire of recursiveBridgeWires) {
+        const refused = await call("codex_tool_call", { turn_token: token, wire_name: wire, arguments: {} });
+        expect(refused.isError).toBe(true);
+        expect(JSON.stringify(refused.content)).toContain("not available in this turn");
+        await expect(broker.nextToolBatch(token, AbortSignal.timeout(10))).rejects.toThrow("tool wait aborted");
+      }
+      // Even a correctly framed but invalid catalog cannot re-register our own MCP tools.
+      const injectedInventory = await inventoryThroughGateway("web__run", true, ["web__run"], content => [
+        { type: "text", text: content[0]!.text!.replaceAll("web__run", recursiveBridgeWires[5]!) },
+      ]);
+      expect(injectedInventory.isError).toBe(true);
+
+      for (const wire of recursiveBridgeWires) {
+        const raw = call("codex_tool_call", {
+          turn_token: token, wire_name: "exec",
+          input: `await tools[${JSON.stringify(wire)}]({});`,
+        });
+        const [request] = await broker.nextToolBatch(token);
+        const calls: GatewayProgramCall[] = [];
+        await expect(executeGatewayProgram(request!.input!, [wire], calls, true))
+          .rejects.toThrow("Recursive bridge tool is unavailable");
+        expect(calls).toEqual([]);
+        broker.completeTool(token, request!.callId, {
+          content: [{ type: "text", text: "Recursive bridge tool is unavailable" }], isError: true,
+        });
+        expect((await raw).isError).toBe(true);
+      }
+
+      const rawRegistry = call("codex_tool_call", {
+        turn_token: token, wire_name: "exec",
+        input: `text(Object.keys(tools)); text(${JSON.stringify(recursiveBridgeWires[5])} in tools);`,
+      });
+      const [registryRequest] = await broker.nextToolBatch(token);
+      const registryCalls: GatewayProgramCall[] = [];
+      const registryContent = await executeGatewayProgram(registryRequest!.input!, ["vendor__codex_tool_call", ...recursiveBridgeWires], registryCalls, true);
+      expect(registryCalls).toEqual([]);
+      expect(registryContent).toEqual([
+        { type: "text", text: '["vendor__codex_tool_call"]' }, { type: "text", text: "false" },
+      ]);
+      broker.completeTool(token, registryRequest!.callId, { content: registryContent });
+      expect((await rawRegistry).isError).not.toBe(true);
 
       const rawWeb = call("codex_tool_call", {
         turn_token: token,
@@ -3576,6 +3632,7 @@ describe("ChatGPT outer-native harness v4", () => {
       { name: "write_stdin", description: "Continue a command", parameters: { type: "object" } },
       { name: "apply_patch", description: "Apply a patch", parameters: {}, freeform: true },
       { name: "view_image", description: "View an image", parameters: { type: "object" } },
+      { name: "_codex_exec", namespace: "mcp__codex_apps__codex_native2", description: "Recursive bridge", parameters: {} },
     ];
     const token = await broker.register(directEnvironment, 60_000);
     const transport = new StdioClientTransport({
@@ -3603,6 +3660,14 @@ describe("ChatGPT outer-native harness v4", () => {
       // A fully local inventory lookup still crosses the broker's activity fence even though it
       // does not enqueue an outer Codex tool call.
       expect(broker.beginCompletionFence(token)).toBe(2);
+
+      const ownInventory = await call("codex_tool_inventory", { turn_token: token, query: "Recursive bridge" });
+      expect(ownInventory.structuredContent).toMatchObject({ total: 0, tools: [] });
+      const recursive = await call("codex_tool_call", {
+        turn_token: token, wire_name: "mcp__codex_apps__codex_native2___codex_exec", arguments: {},
+      });
+      expect(recursive.isError).toBe(true);
+      await expect(broker.nextToolBatch(token, AbortSignal.timeout(10))).rejects.toThrow("tool wait aborted");
 
       const exec = call("codex_exec", {
         turn_token: token,

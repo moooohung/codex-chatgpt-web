@@ -21,7 +21,7 @@ export function observeMcpToolCalls(
   const pending = new Map<string | number, { call: number; tool: string; started: number } | null>();
   const emit = (event: Record<string, unknown>) => {
     // Logging is observational: a broken sink cannot change the invocation or its result.
-    try { write({ pid: process.pid, ...event }); } catch { /* Preserve transport semantics. */ }
+    try { write({ at: new Date().toISOString(), pid: process.pid, ...event }); } catch { /* Preserve transport semantics. */ }
   };
   const receive = transport.onmessage;
   transport.onmessage = (message, extra) => {

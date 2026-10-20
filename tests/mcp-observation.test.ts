@@ -53,6 +53,10 @@ test("MCP observations separate pre-handler validation and returned tool errors 
     expect(events.map(event => event.event)).toEqual(Array(3).fill(["call_received", "reply_sent"]).flat());
     expect(events.filter(event => event.event === "reply_sent").map(event => event.is_error)).toEqual([true, true, false]);
     expect(events.map(event => event.call)).toEqual([1, 1, 2, 2, 3, 3]);
+    for (const event of events) {
+      expect(event.at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(Number.isFinite(Date.parse(event.at as string))).toBeTrue();
+    }
     expect(JSON.stringify(events)).not.toContain(secret);
     expect(JSON.stringify(events)).not.toContain("private_key");
     expect(JSON.stringify(events)).not.toContain("content");

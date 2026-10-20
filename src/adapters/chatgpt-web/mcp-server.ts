@@ -34,6 +34,13 @@ const BRIDGE_TOOL_NAMES = new Set([
   "codex_turn_complete",
 ]);
 
+// The outer registry can contain this connector itself, including the extra underscore
+// used by codex_apps. Re-entering it waits on the MCP channel that owns the current call.
+// Match our connector identities, not unrelated vendor tools with similar leaf names.
+const BRIDGE_TOOL_WIRE_PATTERN = new RegExp(
+  `^(?:(?:(?:mcp__)?codex_apps__|mcp__)?codex_(?:native2?|safe)_+)?(?:${[...BRIDGE_TOOL_NAMES].join("|")})$`,
+);
+
 const GATEWAY_AGENT_WAIT_TOOL_NAMES = new Set([
   "multi_agent_v1__wait_agent",
   "multi_agent_v2__wait_agent",
@@ -163,15 +170,16 @@ function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool
 }
 
 function gatewayToolNameIsValid(name: string): boolean {
-  return /^[A-Za-z0-9_$]+$/.test(name);
+  return /^[A-Za-z0-9_$]+$/.test(name) && !BRIDGE_TOOL_WIRE_PATTERN.test(name);
 }
 
 function safeVisibleTools(environment: ChatGptTurnEnvironment, contract: ChatGptMcpContract): CodexTool[] {
-  if (contract === "native") return environment.tools;
+  const outerTools = environment.tools.filter(tool => !BRIDGE_TOOL_WIRE_PATTERN.test(wireName(tool)));
+  if (contract === "native") return outerTools;
   const bridgeNamespaces = new Set(environment.tools
     .filter(tool => tool.namespace && BRIDGE_TOOL_NAMES.has(tool.name))
     .map(tool => tool.namespace!));
-  return environment.tools.filter(tool => (
+  return outerTools.filter(tool => (
     wireName(tool) !== CODEX_COMPACTION_CONTROL_WIRE_NAME
     && !BRIDGE_TOOL_NAMES.has(tool.name)
     // Zero Risk does not expose model-authored JavaScript. Automatic Full mode keeps the native
@@ -313,8 +321,9 @@ function gatewayToolCatalogProgram(options: {
     `const needle = ${JSON.stringify(needle)};`,
     `const computerUseReplWires = new Set(${JSON.stringify([...COMPUTER_USE_REPL_WIRES])});`,
     `const computerUseReplDescription = ${JSON.stringify(COMPUTER_USE_REPL_DESCRIPTION)};`,
+    `const bridgeToolWirePattern = ${BRIDGE_TOOL_WIRE_PATTERN};`,
     "const visibleName = name => {",
-    "  return typeof name === \"string\" && /^[A-Za-z0-9_$]+$/.test(name) && !excludedNames.has(name);",
+    "  return typeof name === \"string\" && /^[A-Za-z0-9_$]+$/.test(name) && !excludedNames.has(name) && !bridgeToolWirePattern.test(name);",
     "};",
     "const matches = ALL_TOOLS",
     "  .filter(tool => visibleName(tool?.name))",
@@ -440,13 +449,16 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string): s
     nativePollGatewayPrelude(),
     `  const waitNames = new Set(${JSON.stringify([...GATEWAY_AGENT_WAIT_TOOL_NAMES])});`,
     `  const blockedExecName = ${JSON.stringify(blockedExecName)};`,
+    `  const bridgeToolWirePattern = ${BRIDGE_TOOL_WIRE_PATTERN};`,
+    "  const visibleName = name => typeof name !== \"string\" || !bridgeToolWirePattern.test(name);",
     `  const pollMs = ${CHATGPT_WEB_AGENT_WAIT_POLL_MS};`,
-    "  const registryNames = new Set(Reflect.ownKeys(source));",
+    "  const registryNames = new Set(Reflect.ownKeys(source).filter(visibleName));",
     "  if (typeof ALL_TOOLS !== \"undefined\" && Array.isArray(ALL_TOOLS)) {",
-    "    for (const tool of ALL_TOOLS) if (typeof tool?.name === \"string\") registryNames.add(tool.name);",
+    "    for (const tool of ALL_TOOLS) if (typeof tool?.name === \"string\" && visibleName(tool.name)) registryNames.add(tool.name);",
     "  }",
     "  const wrappers = new Map();",
     "  const expose = name => {",
+    "    if (!visibleName(name)) throw new Error(\"Recursive bridge tool is unavailable inside ChatGPT Web exec\");",
     "    if (wrappers.has(name)) return wrappers.get(name);",
     "    const value = Reflect.get(source, name, source);",
     "    let exposed = value;",
@@ -469,10 +481,10 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string): s
     "  };",
     "  return new Proxy(Object.create(null), {",
     "    get: (_target, name) => expose(name),",
-    "    has: (_target, name) => registryNames.has(name) || Reflect.has(source, name),",
+    "    has: (_target, name) => visibleName(name) && (registryNames.has(name) || Reflect.has(source, name)),",
     "    ownKeys: () => [...registryNames],",
     "    getOwnPropertyDescriptor: (_target, name) =>",
-    "      registryNames.has(name) || Reflect.has(source, name)",
+    "      visibleName(name) && (registryNames.has(name) || Reflect.has(source, name))",
     "        ? { configurable: true, enumerable: true, writable: false, value: expose(name) }",
     "        : undefined,",
     "    set: () => false,",
