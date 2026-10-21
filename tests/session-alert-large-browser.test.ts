@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { chromium } from "playwright-core";
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readRuntimeBundleSource } from "./runtime-bundle-source";
 import vm from "node:vm";
 import ts from "typescript";
 import { chatGptSessionFailureUiState } from "../src/adapters/chatgpt-web/session-ui";
@@ -9,7 +9,7 @@ import { throwIfChatGptSessionFailureAlert } from "../src/adapters/chatgpt-web/b
 
 const projections = [{ name: "source", project: chatGptSessionFailureUiState }];
 if (process.env.CHATGPT_RENDER_CANDIDATE_ROOT) for (const relative of ["app/cli.js", "app/browser-helper.cjs"]) {
-  const file = ts.createSourceFile(relative, readFileSync(join(process.env.CHATGPT_RENDER_CANDIDATE_ROOT, relative), "utf8"), ts.ScriptTarget.Latest, true);
+  const file = ts.createSourceFile(relative, readRuntimeBundleSource(process.env.CHATGPT_RENDER_CANDIDATE_ROOT, relative), ts.ScriptTarget.Latest, true);
   const functions = file.statements.filter(ts.isFunctionDeclaration).filter(node => {
     const text = node.getText(file);
     return text.includes("Your session has expired") && text.includes("Failed to load subscription") && text.includes("new WeakMap");

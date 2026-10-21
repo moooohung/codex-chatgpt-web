@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { readRuntimeBundleSource } from "./runtime-bundle-source";
 import vm from "node:vm";
 import { chromium } from "playwright-core";
 import { chatGptSubmissionDomProjection } from "../src/adapters/chatgpt-web/submission-ui";
@@ -17,7 +17,7 @@ const projections: Array<{ name: string; project: typeof chatGptSubmissionDomPro
 if(process.env.CHATGPT_RENDER_CANDIDATE_ROOT){
  const ts=require("typescript");
  for(const relative of ["app/cli.js","app/browser-helper.cjs"]){
-  const file=ts.createSourceFile(relative,readFileSync(join(process.env.CHATGPT_RENDER_CANDIDATE_ROOT,relative),"utf8"),ts.ScriptTarget.Latest,true);
+  const file=ts.createSourceFile(relative,readRuntimeBundleSource(process.env.CHATGPT_RENDER_CANDIDATE_ROOT,relative),ts.ScriptTarget.Latest,true);
   const matches=file.statements.filter((node:any)=>ts.isFunctionDeclaration(node)
     && (node.name?.text==="__codexSubmissionUi20261007"
       || node.getText(file).includes('codex-history-render-budget') && node.getText(file).includes('contain-intrinsic-size')));

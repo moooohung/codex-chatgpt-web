@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readRuntimeBundleSource } from "./runtime-bundle-source";
 import vm from "node:vm";
 const { inspectRunStageCalls, assertRunStageCalls, repairModelSelectionStageCall, repairModelSelectionStageCatch } = require("../scripts/bridge-run-stage-call-contract.cjs");
 const fixture = readFileSync(new URL("./fixtures/bridge-stage-clock-r8.js", import.meta.url), "utf8");
@@ -67,7 +67,7 @@ test.skipIf(!process.env.CHATGPT_STAGE_CALL_RUNTIME_ROOT)("every runStage call i
   };
   const sourceAudit = assertRunStageCalls(readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8"), "browser-worker.ts");
   for (const relative of ["app/cli.js", "app/browser-helper.cjs"]) {
-    const audit = assertRunStageCalls(readFileSync(join(process.env.CHATGPT_STAGE_CALL_RUNTIME_ROOT!, relative), "utf8"), relative);
+    const audit = assertRunStageCalls(readRuntimeBundleSource(process.env.CHATGPT_STAGE_CALL_RUNTIME_ROOT!, relative), relative);
     expect(audit.calls).toHaveLength(sourceAudit.calls.length);
     for (const argc of [4, 5, 6]) expect(audit.calls.filter((call: any) => call.argc === argc))
       .toHaveLength(sourceAudit.calls.filter((call: any) => call.argc === argc).length);
