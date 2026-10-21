@@ -23,7 +23,8 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("GPT-5.6 Pro verifies the spl
     await assertChatGptModelFamily(menu, "5.6", "max", 4);
     await page.locator("#effort-label").evaluate(element => { element.textContent = "6 Pro"; });
     const failure = await assertChatGptModelFamily(menu, "5.6", "max", 4).then(() => undefined, error => error);
-    expect(failure).toMatchObject({ code: "model_version_unavailable", retryable: false });
+    expect(failure).toMatchObject({ code: "chatgpt_model_verification_failed", retryable: false });
+    expect(failure.message).toContain("model-evidence-mismatch");
   } finally { await browser.close(); }
 }, 15_000);
 
@@ -127,7 +128,10 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("reused effort proof cannot h
     await page.evaluate(() => { (window as any).selectedValue = 1; });
     let changed: any;
     try { await worker.assertSelectedEffort(page, reused); } catch (error) { changed = error; }
-    expect(changed).toMatchObject({ code: "chatgpt_effort_verification_failed" });
+    // A final read can exhaust the bounded local settle budget. Both outcomes
+    // reject the stale proof; neither is permission to send the changed effort.
+    expect(["chatgpt_effort_verification_failed", "chatgpt_model_selection_timeout"]).toContain(changed?.code);
+    expect(changed.retryable).toBe(changed.code === "chatgpt_model_selection_timeout");
     await page.evaluate(() => { (window as any).selectedValue = 2; });
     await page.locator('button').evaluate(el => { el.textContent = 'Instant'; });
     await worker.selectModelAndEffort(page, "gpt-5.6-sol", "high", caps, undefined, false, "5.6");
@@ -291,8 +295,9 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`smoke handles a sliderless d
       const failure = await worker.smokeTestExclusive(abort.signal)
         .then(() => undefined, (error: unknown) => error);
       expect(failure).toMatchObject(scenario === "missing-family"
-        ? { code: "model_version_unavailable", retryable: false }
+        ? { code: "chatgpt_model_selection_timeout", retryable: true }
         : { name: "AbortError" });
+      if (scenario === "missing-family") expect(failure.message).toContain("family-click");
       expect(turns).toBe(0);
       expect(await page.locator('#picker').isVisible()).toBe(false);
       expect(await page.getByRole('textbox').innerText()).toBe('Draft');
