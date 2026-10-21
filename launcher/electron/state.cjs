@@ -2,6 +2,7 @@ const languages = require("./languages.json");
 const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { sanitizeEffortCeilings } = require("./effort-ceiling.cjs");
+const { sanitizeUnusualActivityHistory } = require("./unusual-activity-backoff.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 420;
 const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -58,6 +59,9 @@ function readState(filePath) {
     if (state.effortCeilings !== undefined) state.effortCeilings = sanitizeEffortCeilings(state.effortCeilings);
     if (state.unusualActivityDisabledAccounts !== undefined) {
       state.unusualActivityDisabledAccounts = sanitizeUnusualActivityDisabledAccounts(state.unusualActivityDisabledAccounts);
+    }
+    if (state.unusualActivityHistory !== undefined) {
+      state.unusualActivityHistory = sanitizeUnusualActivityHistory(state.unusualActivityHistory);
     }
     delete state.bridgeEnabled;
     if (state.language !== null && (typeof state.language !== "string" || !Object.hasOwn(languages, state.language))) {

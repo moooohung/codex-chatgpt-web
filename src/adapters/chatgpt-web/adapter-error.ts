@@ -5,6 +5,7 @@ export interface ChatGptWebAdapterErrorOptions {
   retryable: boolean;
   retryAt?: number;
   retryAfterSeconds?: number;
+  localCooldown?: boolean;
   cause?: unknown;
 }
 
@@ -15,6 +16,7 @@ export class ChatGptWebAdapterError extends Error {
   readonly retryable: boolean;
   readonly retryAt?: number;
   readonly retryAfterSeconds?: number;
+  readonly localCooldown?: boolean;
 
   constructor(message: string, options: ChatGptWebAdapterErrorOptions) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -25,6 +27,7 @@ export class ChatGptWebAdapterError extends Error {
     this.retryable = options.retryable;
     this.retryAt = options.retryAt;
     this.retryAfterSeconds = options.retryAfterSeconds;
+    this.localCooldown = options.localCooldown;
   }
 }
 

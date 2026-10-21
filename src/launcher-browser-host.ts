@@ -454,6 +454,7 @@ export type LauncherTurnActivity =
       retryAt: number;
       message: string;
       code?: "rate_limit_exceeded" | "chatgpt_unusual_activity";
+      localCooldown?: boolean;
     }
   | {
       phase: "approval";
@@ -752,6 +753,7 @@ export async function notifyLauncherTurn(
   authenticationRequired?: boolean;
   trackUsage?: boolean;
   alternateAvailable?: boolean;
+  retryAt?: number;
 }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
@@ -800,7 +802,13 @@ export async function notifyLauncherTurn(
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (activity.phase === "cooldown" || activity.phase === "capability-error") {
       if (body.ok !== true || typeof body.alternateAvailable !== "boolean") throw new Error("Launcher returned an invalid account cooldown acknowledgement");
-      return { alternateAvailable: body.alternateAvailable };
+      if (body.retryAt !== undefined && (activity.phase !== "cooldown" || typeof body.retryAt !== "number"
+        || !Number.isSafeInteger(body.retryAt) || body.retryAt <= 0
+        || activity.localCooldown !== true && body.retryAt < activity.retryAt)) {
+        throw new Error("Launcher returned an invalid account retry timestamp");
+      }
+      return { alternateAvailable: body.alternateAvailable,
+        ...(typeof body.retryAt === "number" ? { retryAt: body.retryAt } : {}) };
     }
     if (activity.phase === "start") {
       if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {

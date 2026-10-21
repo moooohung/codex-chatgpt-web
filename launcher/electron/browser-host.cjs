@@ -15,6 +15,7 @@ const {
 } = require("./account-policy.cjs");
 const { AccountCooldownStore, PRIMARY_ACCOUNT, UNUSUAL_ACTIVITY_MESSAGE_PREFIX } = require("./account-cooldown-store.cjs");
 const { resolveCooldownRoute } = require("./account-cooldown-routing.cjs");
+const { sanitizeUnusualActivityHistory, nextUnusualActivityBackoff } = require("./unusual-activity-backoff.cjs");
 const { bindAccountBackendRecovery } = require("./account-backend-recovery.cjs");
 const {
   runBrowserHelperOperation,
@@ -698,27 +699,12 @@ class BrowserHost {
   persistUnusualActivityDisable(name, retryAt, traceId) {
     const temporary = this.unusualActivityDisabledAccounts || new Map();
     const existing = temporary.get(name);
-    let reactivate = existing?.reactivate;
-    if (reactivate === undefined) {
-      if (name === PRIMARY_ACCOUNT) reactivate = !this.disabledAccounts?.has(name);
-      else {
-        const data = readAccountConfig(this.accountPaths.config);
-        const account = data.accounts[name];
-        if (!account) throw new Error(`Account ${name} does not exist`);
-        reactivate = account.enabled !== false;
-      }
-    }
+    // New waits are admission state, not a user enable/disable preference. Keep
+    // legacy ownership only so an older bridge-owned disable can still recover.
+    const reactivate = existing?.reactivate === true;
     temporary.set(name, { retryAt, traceId, reactivate });
     this.unusualActivityDisabledAccounts = temporary;
-    if (reactivate && name !== PRIMARY_ACCOUNT) {
-      const data = readAccountConfig(this.accountPaths.config);
-      const account = data.accounts[name];
-      if (!account) throw new Error(`Account ${name} does not exist`);
-      account.enabled = false;
-      writeAccountConfig(this.accountPaths.config, data);
-    }
     this.persistUnusualActivityDisableState();
-    if (reactivate) this.setAccountEnabled(name, false);
     return temporary.get(name);
   }
 
@@ -743,7 +729,10 @@ class BrowserHost {
     temporary.delete(name);
     this.unusualActivityDisabledAccounts = temporary;
     this.persistUnusualActivityDisableState();
-    this.accountCooldowns.clear(name);
+    const cooldown = this.accountCooldowns.peek(name);
+    if (cooldown?.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX) && cooldown.retryAt <= Date.now()) {
+      this.accountCooldowns.clear(name);
+    }
     if (marker.reactivate) this.setAccountEnabled(name, true);
     if (log) this.logger.info("unusual_activity_cooldown_ended", {
       traceId: marker.traceId,
@@ -758,7 +747,7 @@ class BrowserHost {
     for (const [name, marker] of [...this.unusualActivityDisabledAccounts]) {
       const cooldown = this.accountCooldowns.peek(name);
       if (!cooldown || !cooldown.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)
-        || cooldown.retryAt <= Date.now() || marker.retryAt <= Date.now()) {
+        || cooldown.retryAt <= Date.now()) {
         this.clearUnusualActivityDisable(name);
         continue;
       }
@@ -798,6 +787,14 @@ class BrowserHost {
   }
 
   resolveAccountForConversation(conversationKey, modelRequest) {
+    // Timers may be delayed during sleep. Never leave an expired bridge-owned
+    // disable stuck until another launcher restart; never touch a manual disable.
+    for (const [name] of this.unusualActivityDisabledAccounts || []) {
+      const cooldown = this.accountCooldowns?.get(name);
+      if (!cooldown || !cooldown.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)) {
+        this.clearUnusualActivityDisable(name);
+      }
+    }
     const pending = new Set([...(this.pendingRemovalAccounts || []), ...(this.accountLoginReservations || [])]);
     if (modelRequest) {
       const pool = modelAccountPool({ pool: this.routingAccountPool(), capabilities: this.accountCapabilities || new Map(),
@@ -932,9 +929,17 @@ class BrowserHost {
       const operation = (async () => {
         const revision = this.accountStatuses.get(name)?.routingAuthRevision || 0;
         const primaryRevision = this.authenticationRevision;
-        const partSession = name === PRIMARY_ACCOUNT ? this.view.webContents.session
-          : (this.session || session).fromPartition(this.accountPaths.partition(name));
-        const result = await readChatGptAuthSession(partSession.fetch.bind(partSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+        let result;
+        try {
+          const partSession = name === PRIMARY_ACCOUNT ? this.view.webContents.session
+            : (this.session || session).fromPartition(this.accountPaths.partition(name));
+          result = await readChatGptAuthSession(partSession.fetch.bind(partSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+        } catch {
+          // A destroyed/unavailable partition supplies no proof. Isolate its local
+          // probe failure so other independently verified accounts remain usable.
+          result = { sessionAuthenticated: false, sessionCheckError: "partition_unavailable" };
+          this.logger?.warn?.("browser.routing_auth_unavailable", { account: name });
+        }
         // A native network failure is unknown, never proof of sign-in or authorization to switch.
         const previous = this.accountStatuses.get(name);
         if ((previous?.routingAuthRevision || 0) !== revision
@@ -981,16 +986,31 @@ class BrowserHost {
     this.unusualActivityCooldownTimers.set(name, timer);
   }
 
-  async recordTurnCooldown(traceId, helperPid, retryAt, message, code) {
+  async recordTurnCooldown(traceId, helperPid, retryAt, message, code, localCooldown = false) {
     const tab = [...this.turnTabs.values()].find(item => item.traceId === traceId && item.helperPid === helperPid
       && item.status === "running");
     if (!tab) throw new Error("Account cooldown requires the exact active browser turn owner");
     const name = accountNameForTab(tab) || PRIMARY_ACCOUNT;
+    const unusual = code === "chatgpt_unusual_activity" || message?.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX);
+    let history;
+    if (unusual) {
+      this.unusualActivityHistory ??= sanitizeUnusualActivityHistory(this.stateStore?.read?.().unusualActivityHistory);
+      history = nextUnusualActivityBackoff(this.unusualActivityHistory[name], this.accountCooldowns.get(name),
+        retryAt, localCooldown === true);
+      retryAt = history.retryAt;
+    }
     const recorded = this.accountCooldowns.record(name, { retryAt, message });
-    this.logger.info("browser.account_cooldown", { traceId, account: name, retryAt });
-    if (code === "chatgpt_unusual_activity" || recorded.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)) {
+    if (history) {
+      // Validate/persist the cooldown before committing retry history. A malformed
+      // report must not consume a retry. Only scheduling metadata is stored here.
+      this.unusualActivityHistory[name] = history;
+      this.stateStore?.update?.({ unusualActivityHistory: this.unusualActivityHistory });
+    }
+    this.logger.info("browser.account_cooldown", { traceId, account: name, retryAt: recorded.retryAt });
+    if (unusual || recorded.message.startsWith(UNUSUAL_ACTIVITY_MESSAGE_PREFIX)) {
       this.persistUnusualActivityDisable(name, recorded.retryAt, traceId);
-      this.logger.warn("unusual_activity_detected", { traceId, account: name, retryAt: recorded.retryAt });
+      this.logger.warn("unusual_activity_detected", { traceId, account: name, retryAt: recorded.retryAt,
+        failures: history?.failures, localCooldown: localCooldown === true });
       this.scheduleUnusualActivityCooldownEnd(name, recorded.retryAt, traceId);
     }
     await this.refreshRoutingAccounts();
@@ -1000,7 +1020,7 @@ class BrowserHost {
       if (!["chatgpt_account_cooldown", "chatgpt_unusual_activity", "account_unavailable"].includes(error.code)) throw error;
     }
     this.publishState?.(this.snapshot());
-    return { alternateAvailable };
+    return { alternateAvailable, ...(unusual ? { retryAt: recorded.retryAt } : {}) };
   }
 
   allocateTabOrdinal() {

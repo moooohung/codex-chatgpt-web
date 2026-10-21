@@ -1,7 +1,7 @@
 import type { Page } from "playwright-core";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
-export const DEFAULT_CHATGPT_UNUSUAL_ACTIVITY_COOLDOWN_MINUTES = 30;
+export const DEFAULT_CHATGPT_UNUSUAL_ACTIVITY_COOLDOWN_MINUTES = 3;
 export const CHATGPT_UNUSUAL_ACTIVITY_MESSAGE_PREFIX = "ChatGPT unusual activity detected: ";
 
 export type ChatGptPageRequestRejection = {
@@ -48,6 +48,15 @@ export function chatGptPageRequestRejectionUiState(alerts: Element[]): ChatGptPa
   const normalize = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
   for (const alert of alerts) {
     if (!visible(alert) || alert.closest(prose)) continue;
+    // A retained conversation may still contain the error from an earlier request.
+    // Keep global banners, but never turn a historical turn's card into a new block.
+    const turns = '[data-testid^="conversation-turn-"], [data-turn-key]';
+    const owner = alert.closest(turns);
+    if (owner) {
+      const all = Array.from(alert.ownerDocument.querySelectorAll(turns));
+      if (all.some(turn => turn !== owner && !owner.contains(turn)
+        && Boolean(owner.compareDocumentPosition(turn) & 4))) continue;
+    }
     const text = normalize(alert.textContent);
     if (!text) continue;
     if (/detected unusual activity/i.test(text)) return { kind: "unusual_activity", text };
@@ -58,6 +67,15 @@ export function chatGptPageRequestRejectionUiState(alerts: Element[]): ChatGptPa
     }
   }
   return undefined;
+}
+
+export function unusualActivityProviderWaitMs(text: string): number | undefined {
+  const matches = [...text.matchAll(/(?:try again|retry|wait)\s+(?:(?:in|after|for)\s+)?(\d+)\s*(seconds?|minutes?|hours?)\b/gi)];
+  for (const match of text.matchAll(/(\d+)\s*(초|분|시간)\s*(?:후|뒤)/g)) matches.push(match);
+  const waits = matches.map(match => Number(match[1])
+    * (/^(?:hour|시간)/i.test(match[2]!) ? 3_600_000 : /^(?:minute|분)/i.test(match[2]!) ? 60_000 : 1000))
+    .filter(wait => Number.isSafeInteger(wait) && wait > 0 && wait <= 24 * 60 * 60_000);
+  return waits.length ? Math.max(...waits) : undefined;
 }
 
 async function localHistoryUnavailable(page: Page): Promise<boolean> {
@@ -82,22 +100,26 @@ export async function throwIfChatGptPageRequestRejected(
       { status: 502, errorType: "server_error", code: "chatgpt_submission_failed", retryable: false },
     );
   }
-  const retryAt = Date.now() + cooldownMinutes * 60_000;
+  const providerWait = unusualActivityProviderWaitMs(rejection.text);
+  const waitMs = Math.max(cooldownMinutes * 60_000, providerWait ?? 0);
+  const retryAt = Date.now() + waitMs;
   const supportingEvidence = await localHistoryUnavailable(page);
   console.warn(`[chatgpt-web] unusual_activity_detected ${JSON.stringify({
     traceId,
     retryAt,
+    localCooldown: providerWait === undefined,
     supportingEvidence: supportingEvidence ? "local_history_unavailable" : undefined,
   })}`);
   throw new ChatGptWebAdapterError(
-    `${CHATGPT_UNUSUAL_ACTIVITY_MESSAGE_PREFIX}${rejection.text} Try again in ${cooldownMinutes} minutes.`,
+    `${CHATGPT_UNUSUAL_ACTIVITY_MESSAGE_PREFIX}${rejection.text} Local retry check after ${Math.ceil(waitMs / 60_000)} minutes.`,
     {
       status: 429,
       errorType: "rate_limit_error",
       code: "chatgpt_unusual_activity",
       retryable: false,
       retryAt,
-      retryAfterSeconds: cooldownMinutes * 60,
+      retryAfterSeconds: Math.ceil(waitMs / 1000),
+      localCooldown: providerWait === undefined,
     },
   );
 }

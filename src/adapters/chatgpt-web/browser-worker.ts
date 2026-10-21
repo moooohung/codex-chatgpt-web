@@ -5696,8 +5696,17 @@ export class ChatGptBrowserWorker {
         const acknowledged = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
           phase: "cooldown", traceId: turn.traceId, helperPid: process.pid,
           retryAt: error.retryAt, message: error.message, code: error.code,
+          ...(error.localCooldown === true ? { localCooldown: true } : {}),
         }, 15_000);
         cooldownRecorded = true;
+        if (acknowledged.retryAt !== undefined && acknowledged.retryAt !== error.retryAt) {
+          // Account-wide backoff may be longer than this tab's first local estimate.
+          // Preserve it in the error seen by compaction and the Responses client.
+          Object.assign(error, { retryAt: acknowledged.retryAt,
+            retryAfterSeconds: Math.max(1, Math.ceil((acknowledged.retryAt - Date.now()) / 1000)),
+            message: error.message.replace(/Local retry check after \d+ minutes\./,
+              `Local retry check after ${Math.max(1, Math.ceil((acknowledged.retryAt - Date.now()) / 60_000))} minutes.`) });
+        }
         if (error.code === "rate_limit_exceeded" && !sendActivated && !turn.requireRetainedConversation
           && acknowledged.alternateAvailable === true) markUnsentCooldown();
       }

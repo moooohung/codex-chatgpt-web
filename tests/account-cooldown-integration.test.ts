@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { admitLauncherAccount, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+import { admitLauncherAccount, notifyLauncherTurn, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { buildResponseJSON } from "../src/bridge";
@@ -71,16 +71,17 @@ test("unusual activity never resubmits the blocked turn on another account", asy
   const root = mkdtempSync(join(tmpdir(), "unusual-activity-no-replay-"));
   const phases: string[] = [];
   const error = new ChatGptWebAdapterError(
-    "ChatGPT unusual activity detected: Our systems have detected unusual activity coming from your system. Please try again later. Try again in 30 minutes.",
+    "ChatGPT unusual activity detected: Our systems have detected unusual activity coming from your system. Please try again later. Local retry check after 3 minutes.",
     { status: 429, errorType: "rate_limit_error", code: "chatgpt_unusual_activity", retryable: false,
-      retryAt: Date.now() + 30 * 60_000, retryAfterSeconds: 30 * 60 },
+      retryAt: Date.now() + 3 * 60_000, retryAfterSeconds: 3 * 60, localCooldown: true },
   );
+  const retryAt = Date.now() + 5 * 60_000;
   let calls = 0;
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const body = await request.json() as { phase: string };
     phases.push(body.phase);
     return Response.json(body.phase === "start" ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false, accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
-      : body.phase === "cooldown" ? { ok: true, alternateAvailable: true } : { cancelledByUser: false });
+      : body.phase === "cooldown" ? { ok: true, alternateAvailable: true, retryAt } : { cancelledByUser: false });
   } });
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { browserHost: "launcher", browserHostDescriptorPath: descriptor(root, `http://127.0.0.1:${server.port}`) },
@@ -92,6 +93,29 @@ test("unusual activity never resubmits the blocked turn on another account", asy
     expect(phases.filter(phase => phase === "start")).toHaveLength(1);
     expect(phases).toContain("cooldown");
     expect(phases).toContain("end");
+    expect(error.retryAt).toBe(retryAt);
+    expect(error.retryAfterSeconds).toBeGreaterThanOrEqual(299);
+    expect(error.message).toContain("Local retry check after 5 minutes.");
+  } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("launcher cannot lower a provider wait but may deduplicate concurrent local deadlines", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cooldown-ack-"));
+  const retryAt = Date.now() + 180_000;
+  let returned: unknown = retryAt - 1000;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+    return Response.json({ ok: true, alternateAvailable: false, retryAt: returned });
+  } });
+  try {
+    const path = descriptor(root, `http://127.0.0.1:${server.port}`);
+    const activity = { phase: "cooldown" as const, traceId: "ack", helperPid: process.pid,
+      retryAt, message: "fixture", code: "chatgpt_unusual_activity" as const };
+    await expect(notifyLauncherTurn(path, activity)).rejects.toThrow("invalid account retry timestamp");
+    await expect(notifyLauncherTurn(path, { ...activity, localCooldown: true })).resolves.toMatchObject({ retryAt: returned });
+    for (const invalid of [0, -1, "later", null]) {
+      returned = invalid;
+      await expect(notifyLauncherTurn(path, { ...activity, localCooldown: true })).rejects.toThrow("invalid account retry timestamp");
+    }
   } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
 });
 

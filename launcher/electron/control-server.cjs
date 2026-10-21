@@ -342,7 +342,7 @@ class BrowserControlServer {
       }
       if (request.url === "/v1/turn/cooldown") {
         if (host.browserInteractionMode() === "manual") throw new Error("Automatic account routing is disabled in Zero Risk mode");
-        const result = await host.recordTurnCooldown(body.traceId, body.helperPid, body.retryAt, body.message, body.code);
+        const result = await host.recordTurnCooldown(body.traceId, body.helperPid, body.retryAt, body.message, body.code, body.localCooldown === true);
         writeJson(response, 200, { ok: true, ...result });
         return;
       }
