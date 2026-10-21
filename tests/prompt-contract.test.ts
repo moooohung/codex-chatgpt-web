@@ -29,6 +29,27 @@ function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexP
   };
 }
 
+test("custom plugin identity stays explicit in inline and multipart execution without rewriting task history", () => {
+  const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const parsed = request("high");
+  parsed.context.messages[1]!.content = "Compare Codex Native2 with the selected plugin.";
+  for (const appName of ["Codex app", "Codex Native2 DEV", "Codex Робота"]) {
+    for (const parts of [undefined, 2, 6] as const) {
+      const compiled = compileChatGptWebPrompt(parsed, capabilities, "turn_12345678901234567890123456789012", {
+        appName, experimentalMultipartParts: parts,
+      });
+      const contract = compiled.multipart?.commit ?? compiled.text;
+      expect(contract).toContain(`The selected local Codex plugin for this turn is ${JSON.stringify(appName)}.`);
+      expect(contract).toContain("Do not substitute another plugin for this local connection");
+      expect(contract).not.toContain("attached Codex Native tools");
+      const history = compiled.multipart
+        ? compiled.multipart.parts.flatMap(part => JSON.parse(part).records).filter(record => record.kind === "message").map(record => record.message)
+        : JSON.parse(compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)![1]!).messages;
+      expect(history[1].content).toBe(parsed.context.messages[1]!.content);
+    }
+  }
+});
+
 test("inline and staged history escape Markdown delimiters without changing decoded code", () => {
   const parsed = request("high");
   const code = '```ts\nconst value = "`key`";\n``` '.repeat(20) + '\\u0060 \\` [text](https://example.com) 中文';
@@ -91,26 +112,15 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(resume).toBeGreaterThan(envelopeEnd);
   expect(tokenMatches).toHaveLength(1);
   expect(compiled.text).toContain("[retired turn handle]");
-  expect(transportOnly).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
-  expect(transportOnly).toContain("Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.");
-  expect(transportOnly).toContain("Use actual Codex Native results as evidence for local observations and effects.");
-  expect(transportOnly).toContain("A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.");
+  expect(transportOnly).toContain("For local work required by the task, use the selected plugin's tools directly according to their declared descriptions and schemas.");
+  expect(transportOnly).toContain("Call a local Codex tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.");
+  expect(transportOnly).toContain("Use actual results from the selected plugin as evidence for local observations and effects.");
+  expect(transportOnly).toContain("A tool result from the selected plugin may require context compaction. If it does, follow the compaction instructions in that result exactly.");
   expect(transportOnly).toContain("After a deterministic tool failure, update the working hypothesis from that result");
   expect(transportOnly).toContain("do not repeat the same call unless its inputs or observable state changed.");
   expect(transportOnly).toContain("Continue using the available tools until the requested work is complete and verified.");
   expect(transportOnly).toContain("Write the user-facing final answer only after the last required tool result has settled.");
-  expect(transportOnly).toContain("The Codex Native bridge is attached to this tool-capable response.");
-  expect(transportOnly).toContain("use codex_tool_inventory with a focused query and include_schema=true");
-  expect(transportOnly).toContain("invoke the exact returned wire_name through codex_tool_call");
-  expect(transportOnly).toContain("For Windows Computer Use, read the installed computer-use skill");
-  expect(transportOnly).toContain("codex_tool_inventory(query=node_repl, include_schema=true)");
-  expect(transportOnly).toContain("@oai/sky");
-  expect(transportOnly).toContain("advertised deferred loader once");
-  expect(transportOnly).toContain("do not replace the installed Computer Use runtime with PowerShell/Python mouse injection");
-  expect(transportOnly).toContain(`<codex_native_binding_json>\n${JSON.stringify({ turn_token: token, token_chars: token.length })}\n</codex_native_binding_json>`);
-  expect(transportOnly.split(token)).toHaveLength(2);
-  expect(transportOnly).toContain("Use only the exact turn_token from codex_native_binding_json for every Codex Native call in this response");
-  expect(transportOnly).toContain("retry that call exactly once with the exact current turn_token");
+  expect(transportOnly).toContain(`The task context is complete. Pass turn_token ${token} unchanged to every tool call through the selected local Codex plugin in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`);
   expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
   expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex\.control\.turn_complete/);
   expect(transportOnly).toContain("Do not claim a safety or permission block without an explicit tool result or platform error supporting it.");
@@ -126,9 +136,8 @@ test("Pro preserves the same native Codex delegation contract as Extra High", ()
   const extraHigh = compileChatGptWebPrompt(request("xhigh"), capabilities, token);
 
   for (const compiled of [pro, extraHigh]) {
-    expect(compiled.text).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
-    expect(compiled.text).toContain(JSON.stringify({ turn_token: token, token_chars: token.length }));
-    expect(compiled.text).toContain("Use only the exact turn_token from codex_native_binding_json for every Codex Native call in this response");
+    expect(compiled.text).toContain("For local work required by the task, use the selected plugin's tools directly according to their declared descriptions and schemas.");
+    expect(compiled.text).toContain(`Pass turn_token ${token} unchanged to every tool call through the selected local Codex plugin in this response`);
     expect(compiled.text).not.toContain("Complete this task directly in the current parent response.");
     expect(compiled.text).not.toContain("Do not create, spawn, delegate to, or wait on sub-agents");
     expect(compiled.text).not.toContain("Use non-agent tools directly instead.");
@@ -657,7 +666,7 @@ test("uses the public Instant name without leaking the browser menu alias into t
     { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
   );
 
-  expect(compiled.text).toContain("This is ChatGPT Web Instant with no Codex Native bridge to the user's local computer");
+  expect(compiled.text).toContain("This is ChatGPT Web Instant with no local Codex bridge");
   expect(compiled.text).not.toContain("Instant 5.5");
 });
 

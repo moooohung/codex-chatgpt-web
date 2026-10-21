@@ -54,6 +54,7 @@ function fixture(options: { failurePart?: number; activation?: BrowserTurn["onSe
     partition: "persist:codex-web-gpt-chatgpt", helper: { executable: process.execPath, script: import.meta.path },
     idleUrl: LAUNCHER_BROWSER_IDLE_URL, surfaceId: "a".repeat(32), surfaceTargets: {}, createdAt: new Date().toISOString() }), { mode: 0o600 });
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     evaluate: async () => ({}), isClosed: () => false, mainFrame: () => ({}),
   });
   const realBrowserTurn = (ChatGptBrowserWorker.prototype as unknown as BrowserInternals).runBrowserTurn;

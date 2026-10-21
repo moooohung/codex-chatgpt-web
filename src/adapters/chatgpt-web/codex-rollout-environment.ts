@@ -36,6 +36,8 @@ export class NativeSnapshotPendingError extends Error {
 export interface CodexRolloutEnvironment {
   environment: ChatGptTurnEnvironment;
   workspaceRootsDeclared: boolean;
+  /** Native model-visible projection; never used to grant execution permissions. */
+  filesystemProfileXml?: string;
 }
 
 const CODEX_ID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
@@ -208,13 +210,7 @@ function firstRolloutRecord(fd: number, size: number): Record<string, unknown> {
   throw new Error("Codex rollout has no complete session metadata record");
 }
 
-function latestTurnContext(fd: number, size: number): Record<string, unknown> | undefined {
-  return latestRolloutPayload(fd, size, item => item.type === "turn_context");
-}
-
-function latestRolloutPayload(
-  fd: number, size: number, matches: (item: Record<string, unknown>) => boolean,
-): Record<string, unknown> | undefined {
+function latestRolloutPayload(fd: number, size: number, type: "turn_context" | "compacted" | ((item: Record<string, unknown>) => boolean)): Record<string, unknown> | undefined {
   let position = size;
   let carry = Buffer.alloc(0);
   let firstSegmentAtEof = true;
@@ -243,7 +239,7 @@ function latestRolloutPayload(
         throw new Error("Codex rollout JSONL record exceeds the bounded record size");
       }
       const item = parseJsonLine(line);
-      if (matches(item)) return record(item.payload);
+      if (typeof type === "function" ? type(item) : item.type === type) return record(item.payload);
     }
     carry = Buffer.from(data.subarray(0, lineEnd));
     if (carry.length > MAX_ROLLOUT_JSON_LINE_BYTES) {
@@ -252,7 +248,20 @@ function latestRolloutPayload(
   }
   if (carry.length === 0) return undefined;
   const item = parseJsonLine(carry);
-  return matches(item) ? record(item.payload) : undefined;
+  return (typeof type === "function" ? type(item) : item.type === type) ? record(item.payload) : undefined;
+}
+
+function verifyCompactedEnvironmentItems(fd: number, size: number, items: Record<string, unknown>[]): void {
+  const compacted = latestRolloutPayload(fd, size, "compacted");
+  const history = Array.isArray(compacted?.replacement_history) ? compacted.replacement_history : [];
+  let previousIndex = -1;
+  for (const item of items) {
+    const matches = history.flatMap((value, index) => record(value)?.id === item.id ? [{ value, index }] : []);
+    if (matches.length !== 1 || matches[0]!.index <= previousIndex || !isDeepStrictEqual(matches[0]!.value, item)) {
+      throw new Error("Environment message or checkpoint differs from the latest native compaction");
+    }
+    previousIndex = matches[0]!.index;
+  }
 }
 
 function verifyHistoricalEnvironmentMessages(
@@ -454,7 +463,7 @@ export function verifyCurrentCodexFailedTurnRetry(options: {
       validateSessionMeta(firstRolloutRecord(fd, size), lineage);
       const tail = Buffer.alloc(1);
       if (readSync(fd, tail, 0, 1, size - 1) !== 1 || tail[0] !== 0x0a) throw new NativeSnapshotPendingError(candidate);
-      const latest = latestTurnContext(fd, size);
+      const latest = latestRolloutPayload(fd, size, "turn_context");
       if (latest?.turn_id !== turnId) {
         const boundary = latestRolloutPayload(fd, size, item => item.type === "turn_context" || (item.type === "event_msg"
           && ["task_started", "task_complete", "task_aborted", "turn_aborted"].includes(String(record(item.payload)?.type))));
@@ -770,6 +779,55 @@ function environmentFromTurnContext(
   throw new Error("Codex rollout permission profile cannot be represented safely by the Web bridge");
 }
 
+/**
+ * Codex's model-visible projection, after environmentFromTurnContext validates execution policy.
+ * See codex-rs/core/src/context/environment_context.rs (rust-v0.154.0): expand project roots,
+ * deduplicate full entries, omit missing_path_behavior, and mark deny entries non-escalatable.
+ * Comparing the whole projection keeps calendar updates from introducing different permissions.
+ */
+function renderFilesystemProfile(value: unknown, roots: string[]): string | undefined {
+  const profile = record(value);
+  if (profile?.type === "disabled") {
+    return '<permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile>';
+  }
+  const fs = record(profile?.file_system);
+  if (profile?.type !== "managed" || fs?.type !== "restricted" || !Array.isArray(fs.entries)) return undefined;
+  const entries: Record<string, unknown>[] = [];
+  for (const raw of fs.entries) {
+    const entry = record(raw);
+    const path = record(entry?.path);
+    if (!entry || !path) return undefined;
+    const special = path.type === "special" ? record(path.value) : undefined;
+    const expanded = special?.kind === "project_roots"
+      ? roots.map(root => ({ ...entry, path: { type: "path", path: typeof special.subpath === "string" ? join(root, special.subpath) : root } }))
+      : [entry];
+    for (const candidate of expanded) {
+      if (!entries.some(prior => isDeepStrictEqual(prior, candidate))) entries.push(candidate);
+    }
+  }
+  const xml = (text: string): string => text.replace(/[&<>"']/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;",
+  })[char]!);
+  const rendered: string[] = [];
+  for (const entry of entries) {
+    const path = record(entry.path)!;
+    let tag: string;
+    let text: unknown;
+    if (path.type === "path") { tag = "path"; text = path.path; }
+    else if (path.type === "glob_pattern") { tag = "glob"; text = path.pattern; }
+    else if (path.type === "special") {
+      tag = "special";
+      const special = record(path.value);
+      if (!special || !["root", "minimal", "tmpdir", "slash_tmp"].includes(String(special.kind))) return undefined;
+      text = `:${special.kind}`;
+    } else return undefined;
+    if (typeof text !== "string") return undefined;
+    rendered.push(`<entry access="${entry.access}"${entry.access === "deny" ? ' escalatable="false"' : ""}><${tag}>${xml(text)}</${tag}></entry>`);
+  }
+  const depth = fs.glob_scan_max_depth === undefined ? "" : ` glob_scan_max_depth="${fs.glob_scan_max_depth}"`;
+  return `<permission_profile type="managed"><file_system type="restricted"${depth}>${rendered.join("")}</file_system></permission_profile>`;
+}
+
 function validateMetadataConsistency(
   lineage: RolloutIdentity,
   environment: ChatGptTurnEnvironment,
@@ -817,7 +875,7 @@ export function readCurrentCodexCompactionSnapshot(options: {
     try {
       const size = fstatSync(fd).size;
       validateSessionMeta(firstRolloutRecord(fd, size), lineage);
-      const latest = latestTurnContext(fd, size);
+      const latest = latestRolloutPayload(fd, size, "turn_context");
       const nativeEffort = latest?.reasoning_effort ?? latest?.effort;
       if (latest?.turn_id !== turnId || latest.model !== options.model
         || (latest.reasoning_effort !== undefined && latest.effort !== undefined && latest.reasoning_effort !== latest.effort)
@@ -893,7 +951,7 @@ export function resolveCurrentCodexRolloutEnvironment(options: {
   compactionSourceTurnId?: string;
   tools?: readonly CodexTool[];
   historicalEnvironmentMessages?: ChatGptUnattributedEnvironmentMessage[];
-  currentEnvironmentMessages?: ChatGptUnattributedEnvironmentMessage[];
+  compactedEnvironmentItems?: Record<string, unknown>[];
 }): CodexRolloutEnvironment | undefined {
   const { codexHome, lineage, turnId, tools, compactionSourceTurnId } = options;
   const nativeThreadId = CODEX_ID.test(lineage.threadId);
@@ -928,7 +986,7 @@ export function resolveCurrentCodexRolloutEnvironment(options: {
       const size = fstatSync(fd).size;
       if (!Number.isSafeInteger(size) || size <= 0) throw new Error("Codex rollout is empty");
       validateSessionMeta(firstRolloutRecord(fd, size), lineage);
-      const latest = latestTurnContext(fd, size);
+      const latest = latestRolloutPayload(fd, size, "turn_context");
       if (!latest) throw new Error("Codex rollout has no complete turn context");
       if (latest.turn_id !== turnId && (compactionSourceTurnId === undefined || latest.turn_id !== compactionSourceTurnId)) {
         if (owner.indexed.kind === "found") {
@@ -942,10 +1000,11 @@ export function resolveCurrentCodexRolloutEnvironment(options: {
       if (options.historicalEnvironmentMessages) {
         verifyHistoricalEnvironmentMessages(fd, size, turnId, options.historicalEnvironmentMessages);
       }
-      if (options.currentEnvironmentMessages) {
-        verifyCurrentEnvironmentMessages(fd, size, turnId, options.currentEnvironmentMessages);
+      if (options.compactedEnvironmentItems) {
+        verifyCompactedEnvironmentItems(fd, size, options.compactedEnvironmentItems);
       }
-      matching.push({ environment, workspaceRootsDeclared });
+      const filesystemProfileXml = renderFilesystemProfile(latest.permission_profile, environment.roots);
+      matching.push({ environment, workspaceRootsDeclared, filesystemProfileXml });
     } finally {
       closeSync(fd);
     }

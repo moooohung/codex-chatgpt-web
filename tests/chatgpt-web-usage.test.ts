@@ -25,7 +25,7 @@ test("request preparation reuse preserves the complete multipart prompt and usag
   }));
   for (const caps of [capabilities, { ...capabilities, proAvailable: false }]) {
     const preparation = createChatGptWebPromptPreparation(parsed);
-    const parts = resolveBiggerContextMultipartParts(parsed, caps, false, preparation);
+    const parts = resolveBiggerContextMultipartParts(parsed, caps, false, undefined, preparation);
     expect(parts).toBe(resolveBiggerContextMultipartParts(parsed, caps));
     const shared = compileChatGptWebPrompt(parsed, caps, undefined, { experimentalMultipartParts: parts, preparation });
     const independent = compileChatGptWebPrompt(parsed, caps, undefined, { experimentalMultipartParts: parts });
@@ -42,8 +42,21 @@ test("another request cannot reuse a multipart preparation or its token counts",
   const first = request("original task");
   const second = request("new task");
   const preparation = createChatGptWebPromptPreparation(first);
-  expect(() => resolveBiggerContextMultipartParts(second, capabilities, false, preparation)).toThrow(/another request/);
+  expect(() => resolveBiggerContextMultipartParts(second, capabilities, false, undefined, preparation)).toThrow(/another request/);
   expect(() => estimateChatGptWebInputTokens(second, capabilities, { preparation })).toThrow(/another request/);
+});
+
+test("usage counts the configured plugin name carried by the submitted prompt", () => {
+  const parsed = request("Inspect the repository.");
+  const caps = { ...capabilities, localToolsEnabled: true };
+  const appName = `Codex ${"測試_".repeat(16)}`;
+  const token = `turn_${"0".repeat(32)}`;
+  const compiled = compileChatGptWebPrompt(parsed, caps, token, { appName });
+  const expected = estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
+  expect(expected).not.toBe(estimateChatGptWebInputTokens(parsed, caps));
+  for (const biggerContext of [false, true]) {
+    expect(estimateChatGptWebUsage(parsed, {}, caps, biggerContext, false, appName).inputTokens).toBe(expected);
+  }
 });
 
 test.each([
@@ -89,7 +102,7 @@ test("Bigger Context compaction keeps the upstream six-part protocol", () => {
   parsed._compactionRequest = true;
   const parts = resolveBiggerContextMultipartParts(parsed, capabilities);
   expect(parts).toBe(6);
-  expect(resolveBiggerContextMultipartParts(parsed, capabilities, false, undefined, false)).toBe(6);
+  expect(resolveBiggerContextMultipartParts(parsed, capabilities, false, undefined, undefined, false)).toBe(6);
   const compiled = compileChatGptWebPrompt(parsed, capabilities, undefined, { experimentalMultipartParts: parts, preserveCompactionHistory: true });
   expect(compiled.trimmedCompactionMessages).toBeUndefined();
   expect(compiled.multipart!.parts.flatMap(part => JSON.parse(part).records).map(record => record.message.content))
@@ -137,7 +150,7 @@ test("GPT-6 compaction respects the selected account and effort", () => {
     }
   }
   parsed.options.reasoning = "max";
-  const parts = resolveBiggerContextMultipartParts(parsed, capabilities, false, undefined, false);
+  const parts = resolveBiggerContextMultipartParts(parsed, capabilities, false, undefined, undefined, false);
   expect(parts).toBe(6);
   expect(compileChatGptWebPrompt(parsed, capabilities, undefined, { experimentalMultipartParts: parts }).multipart!.parts).toHaveLength(6);
 });

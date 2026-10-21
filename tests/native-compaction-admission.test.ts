@@ -129,7 +129,8 @@ for (const kind of ["human", "cross-task"] as const) {
     const f=fixture();appendSteering(f,kind,"msg_first");appendSteering(f,kind,"msg_latest");
     const request=parseRequest(f.body);
     const store=new ChatGptThreadEnvironmentStore(undefined,Date.now,f.home);
-    expect(()=>store.resolve(request)).toThrow("missing cwd");
+    // Upstream 6.1.13 independently verifies this compacted environment against the native rollout.
+    expect(store.resolve(request).cwd).toBe(f.cwd);
     expect(admitNativeCompactionContinuation(request,f.home)).toBe(true);
     expect(store.resolve(request).cwd).toBe(f.cwd);
     expect(extractChatGptTurnUserRevision(request)).toEqual(kind === "human"

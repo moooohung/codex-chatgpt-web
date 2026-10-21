@@ -78,6 +78,7 @@ export function resolveBiggerContextMultipartParts(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
   experimentalSkillAttachments = false,
+  appName?: string,
   prepared?: ChatGptWebPromptPreparation,
   minimalTransport = true,
 ): ChatGptWebMultipartPartCount | undefined {
@@ -103,7 +104,7 @@ export function resolveBiggerContextMultipartParts(
     + CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + 1;
   const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
     parsed, capabilities, mode.localTools && !parsed._compactionRequest ? ESTIMATE_TURN_TOKEN : undefined,
-    { experimentalMultipartParts: parts, experimentalSkillAttachments, preparation, captureLunaCheckpoint: false,
+    { appName, experimentalMultipartParts: parts, experimentalSkillAttachments, preparation, captureLunaCheckpoint: false,
       preserveCompactionHistory: minimalTransport },
   );
   const widestComposer = Math.max(...([mode.effort, capabilities.proAvailable ? "max" : "medium"] as const).map(effort =>
@@ -211,16 +212,18 @@ export function estimateChatGptWebUsage(
   capabilities: ChatGptWebCapabilities,
   experimentalBiggerContext = false,
   experimentalSkillAttachments = false,
+  appName?: string,
   minimalTransport = true,
 ): CodexUsage {
   const preparation = createChatGptWebPromptPreparation(parsed);
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
     preparation,
+    appName,
     ...(experimentalBiggerContext ? { captureLunaCheckpoint: false } : {}),
     experimentalSkillAttachments,
     preserveCompactionHistory: experimentalBiggerContext && minimalTransport,
     experimentalMultipartParts: experimentalBiggerContext
-      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments, preparation, minimalTransport)
+      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments, appName, preparation, minimalTransport)
       : undefined,
   });
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
