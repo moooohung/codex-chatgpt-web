@@ -30,11 +30,29 @@ export function directCompactionFits(
   }
 }
 
+/**
+ * A staged compaction sizes later stages with the capabilities of the account the first
+ * stage leased. A Plus lease has no Extra High or Pro, so the native thread's requested
+ * effort must be clamped the same way the lease clamps the actual turn; throwing here
+ * failed the whole handoff after stage 1 and Codex restarted the compaction forever
+ * (tower 2026-10-21 21:4x).
+ */
+export function compactionStageReasoning(
+  reasoning: CodexParsedRequest["options"]["reasoning"], capabilities: ChatGptWebCapabilities,
+): CodexParsedRequest["options"]["reasoning"] {
+  if (reasoning === "max" && !capabilities.proAvailable) reasoning = "xhigh";
+  if (reasoning === "xhigh" && !capabilities.extraHighAvailable) reasoning = "high";
+  return reasoning;
+}
+
 export function prepareCompactionStageTransport(
-  stage: CodexParsedRequest,
+  requested: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
   options: { reserveCheckpoint: boolean; multipart: boolean },
 ): CompiledChatGptWebPrompt | undefined {
+  const reasoning = compactionStageReasoning(requested.options.reasoning, capabilities);
+  const stage: CodexParsedRequest = reasoning === requested.options.reasoning ? requested
+    : { ...requested, options: { ...requested.options, reasoning } };
   const mode = resolveChatGptWebModelMode(stage.modelId, stage.options.reasoning, capabilities);
   const { autoCompactTokenLimit } = resolveChatGptWebContextLimits(
     CHATGPT_WEB_BACKEND_MODEL, mode.effort, { ...capabilities, experimentalBiggerContext: false },

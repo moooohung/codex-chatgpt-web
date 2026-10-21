@@ -94,3 +94,23 @@ test("batched text is followed by every ordered original image attachment", asyn
     run: async (_stage, prepared) => { observed.push(...prepared!.images.map(image => image.imageUrl)); return "Source and image checkpoint"; } });
   expect(observed).toEqual(images.map(image => image.imageUrl));
 });
+
+test("a Plus lease after stage 1 clamps later stage sizing instead of failing the handoff", async () => {
+  // Live 2026-10-21: stage 1 leased a Plus account (no Extra High). Sizing stage 2 with the
+  // thread's xhigh threw "Extra High effort is not available", and Codex restarted the
+  // compaction forever. The shared capabilities object is mutated by the lease, as in index.ts.
+  const parsed = request(870_774);
+  const capabilities = { solAvailable: true, extraHighAvailable: true, proAvailable: true, localToolsEnabled: false };
+  const plan = planLargeContextCompaction(parsed)!;
+  let calls = 0;
+  const summary = await runLargeContextCompaction({ parsed, plan, signal: new AbortController().signal,
+    prepare: (stage, options) => prepareCompactionStageTransport(stage, capabilities, { ...options, multipart: true }),
+    onProgress: () => {}, run: async (stage, prepared) => {
+      expect(prepared).toBeDefined();
+      expect(stage.options.reasoning).toBe("xhigh");
+      if (calls++ === 0) Object.assign(capabilities, { extraHighAvailable: false, proAvailable: false });
+      return "Verified checkpoint; preserve failure provenance, original instructions and next steps.";
+    } });
+  expect(calls).toBe(plan.totalStages ?? calls);
+  expect(summary.length).toBeGreaterThan(0);
+}, 30_000);
