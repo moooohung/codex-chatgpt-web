@@ -377,6 +377,7 @@ class RuntimeSupervisor {
     this.accountTunnelHealthFiles = new Map();
     this.recoveryTasks = new Set();
     this.expectedExits = new WeakSet();
+    this.shutdownIntents = new WeakSet();
     this.restartableChildren = new WeakSet();
     this.lastChildFailure = { daemon: null, tunnel: null };
     this.lastChildOutput = { daemon: null, tunnel: null };
@@ -515,8 +516,8 @@ class RuntimeSupervisor {
     if (!preservesLiveOwnership) this.writeState("external", detail);
   }
 
-  spawnChild(name, invocation) {
-    if (this.stopping) throw new Error("Runtime startup was stopped before verification completed");
+  spawnChild(name, invocation, { compensating = false } = {}) {
+    if (this.stopping && !compensating) throw new Error("Runtime startup was stopped before verification completed");
     const child = spawn(invocation.executable, invocation.args, {
       cwd: invocation.cwd,
       detached: DETACH_OWNED_CHILD,
@@ -546,7 +547,7 @@ class RuntimeSupervisor {
     const handleTerminal = ({ code = null, signal = null, error = null }) => {
       if (terminalHandled) return;
       terminalHandled = true;
-      const expected = this.stopping || this.expectedExits.has(child);
+      const expected = this.stopping || this.expectedExits.has(child) || this.shutdownIntents.has(child);
       this.expectedExits.delete(child);
       const restartable = this.restartableChildren.has(child);
       this.restartableChildren.delete(child);
@@ -1010,7 +1011,7 @@ class RuntimeSupervisor {
     );
   }
 
-  async startTunnel(config, operationName = "runtime-start", { forceRestart = false } = {}) {
+  async startTunnel(config, operationName = "runtime-start", { forceRestart = false, compensating = false } = {}) {
     if (config.mode !== "full") return;
     this.assertTunnelClientReady(config);
     // Every acquisition binds diagnostics to this runtime, including adoption of an existing alias.
@@ -1027,7 +1028,7 @@ class RuntimeSupervisor {
         await this.waitForTunnelMcpTransport(config);
         this.startTunnelMonitor(config);
         this.logger.info("runtime.tunnel_adopted", { pid: existing.pid });
-        await this.startAllAccountTunnels(config);
+        await this.startAllAccountTunnels(config, { compensating });
         return;
       }
       this.tunnel = null;
@@ -1040,7 +1041,7 @@ class RuntimeSupervisor {
       }
       if (stopped.code === 0) await this.waitForTunnelStopped(config);
       this.tunnelHealthBaseUrl = null;
-      const connected = await this.runTunnelConnectCommand(config);
+      const connected = await this.runTunnelConnectCommand(config, { compensating });
       if (connected.code !== 0) {
         throw new Error(
           `tunnel runtime refused managed startup: ${tunnelControlDiagnostic(connected)}`,
@@ -1050,7 +1051,7 @@ class RuntimeSupervisor {
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
       await this.waitForTunnelMcpTransport(config);
       this.startTunnelMonitor(config);
-      await this.startAllAccountTunnels(config);
+      await this.startAllAccountTunnels(config, { compensating });
     } catch (error) {
       let cleanupError;
       try {
@@ -1116,13 +1117,13 @@ class RuntimeSupervisor {
     return eligible() && health.observed && health.ok;
   }
 
-  async startAllAccountTunnels(config) {
+  async startAllAccountTunnels(config, { compensating = false } = {}) {
     if (!config?.tunnel || config.mode !== "full" || !config.brokerSocketPath) return;
     const accounts = readAccountConfig(this.accountPaths().config).accounts;
     for (const [name, account] of Object.entries(accounts)) {
       if (account.pendingRemoval) continue;
       if (account.tunnelId === config.tunnel.tunnelId && config.tunnel.alias === "codex-chatgpt-web") continue;
-      if (!await this.startAccountTunnel(name, account)) throw new Error(`Account ${name} tunnel failed to start`);
+      if (!await this.startAccountTunnel(name, account, { compensating })) throw new Error(`Account ${name} tunnel failed to start`);
     }
   }
 
@@ -1134,7 +1135,7 @@ class RuntimeSupervisor {
     }
   }
 
-  async startAccountTunnel(accountName, acc) {
+  async startAccountTunnel(accountName, acc, { compensating = false } = {}) {
     try {
       const config = this.readConfig();
       if (!config?.tunnel || config.mode !== "full" || !config.brokerSocketPath) return false;
@@ -1148,7 +1149,7 @@ class RuntimeSupervisor {
         config.brokerSocketPath,
       ]);
       const mcpCommand = managedTunnelMcpCommand(invocation);
-      if (this.stopping) return false;
+      if (this.stopping && !compensating) return false;
       const alias = this.accountPaths().tunnelAlias(accountName);
       const profileName = alias;
       const args = [
@@ -1185,7 +1186,7 @@ class RuntimeSupervisor {
     }
   }
 
-  async runTunnelConnectCommand(config) {
+  async runTunnelConnectCommand(config, { compensating = false } = {}) {
     const connection = await tunnelConnectionEnvironment({ resolveProxy: this.resolveProxy });
     const contract = config.browserInteractionMode === "manual" ? "safe" : "native";
     const invocation = await this.runtimeCommand([
@@ -1195,7 +1196,7 @@ class RuntimeSupervisor {
       "--broker-socket",
       config.brokerSocketPath,
     ]);
-    if (this.stopping) throw new Error("Tunnel startup was stopped before verification completed");
+    if (this.stopping && !compensating) throw new Error("Tunnel startup was stopped before verification completed");
     return await this.runTunnelCommand(
       config,
       [...managedTunnelConnectArgs(config, invocation), "--control-plane-base-url", connection.baseURL],
@@ -1284,9 +1285,10 @@ class RuntimeSupervisor {
     this.tunnelMonitorGeneration += 1;
   }
 
-  async startDaemon(config) {
+  async startDaemon(config, { compensating = false } = {}) {
     if (this.daemon) {
       const child = this.daemon;
+      if (this.shutdownIntents.has(child)) throw new Error("Responses proxy shutdown is still pending");
       const identity = Number.isInteger(child.pid)
         && await this.proxyHealth(config, 2_000, child.pid);
       if (identity && !await this.proxyHealth(config, 2_000, child.pid, true)) {
@@ -1302,7 +1304,7 @@ class RuntimeSupervisor {
     }
     let child;
     try {
-      child = this.spawnChild("daemon", await this.runtimeCommand(["serve"]));
+      child = this.spawnChild("daemon", await this.runtimeCommand(["serve"]), { compensating });
       await this.waitForProxy(config);
       if (this.daemon !== child) throw new Error("Responses proxy exited immediately after becoming healthy");
       this.restartableChildren.add(child);
@@ -1544,7 +1546,7 @@ class RuntimeSupervisor {
         } catch (error) {
           if (drained) {
             try {
-              await this.control(config, "resume");
+              await this.restoreDrainedDaemon(config);
             } catch (resumeError) {
               throw new Error(appendFailure(errorMessage(error), "daemon resume compensation failed", resumeError));
             }
@@ -1562,6 +1564,16 @@ class RuntimeSupervisor {
 
   async restoreDrainedDaemon(config) {
     const child = this.daemon;
+    if (child && this.shutdownIntents.has(child)) {
+      // Acknowledged (or ambiguously delivered) shutdown cannot be revoked by /resume.
+      // Keep ownership until both process exit and release of the bound port are proven.
+      await this.waitForChildExit("daemon", child, 30_000);
+      await this.waitForProcessExit("daemon", child.pid, 5_000);
+      await this.waitForPortRelease(config);
+      if (this.daemon === child) this.daemon = null;
+      await this.startDaemon(config, { compensating: this.stopping });
+      return { status: "restarted", pid: this.daemon?.pid };
+    }
     const childAlive = child
       && child.exitCode === null
       && child.signalCode === null
@@ -1579,7 +1591,7 @@ class RuntimeSupervisor {
     }
     this.daemon = null;
     await this.waitForPortRelease(config);
-    await this.startDaemon(config);
+    await this.startDaemon(config, { compensating: this.stopping });
     return { status: "restarted", pid: this.daemon?.pid };
   }
 
@@ -1617,6 +1629,26 @@ class RuntimeSupervisor {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  async setAutoApproveToolCalls(enabled) {
+    if (typeof enabled !== "boolean") throw new Error("Tool approval preference must be a boolean");
+    if (this.stopping || this.stopPromise || this.startPromise) throw new Error("Runtime is changing; retry after it is ready");
+    const config = this.readConfig();
+    const child = this.daemon;
+    if (!config || !child || this.shutdownIntents.has(child) || !Number.isInteger(child.pid)
+      || !await this.proxyHealth(config, 2_000, child.pid, true)) {
+      throw new Error("A healthy launcher-owned Responses proxy is required to update tool approvals");
+    }
+    const result = await this.control(config, "tool-approvals", { body: {
+      enabled, expectedValue: config.autoApproveToolCalls, expectedPid: child.pid,
+    } });
+    if (result.status !== "ok" || result.pid !== child.pid || result.autoApproveToolCalls !== enabled
+      || result.applies_to !== "new_turns" || this.readConfig()?.autoApproveToolCalls !== enabled) {
+      throw new Error("Responses proxy did not confirm the saved tool approval preference; reload settings");
+    }
+    this.logger.info("runtime.tool_approvals_updated", { enabled, pid: child.pid, appliesTo: "new_turns" });
+    return { enabled, appliesTo: "new_turns" };
   }
 
   async waitForChildExit(name, child, timeoutMs) {
@@ -1688,6 +1720,7 @@ class RuntimeSupervisor {
       this.daemon = null;
       return;
     }
+    this.shutdownIntents.add(child);
     const result = await this.control(config, "shutdown");
     if (result.status !== "ok") throw new Error("daemon did not acknowledge graceful shutdown");
     await this.waitForChildExit("daemon", child, timeoutMs);
@@ -1939,14 +1972,16 @@ class RuntimeSupervisor {
     });
     if (daemonRunning) {
       let drained = false;
+      let shutdownRequested = false;
       try {
         drained = await this.acquireDrain(config);
+        shutdownRequested = true;
         const shutdown = await this.control(config, "shutdown");
         if (shutdown.status !== "ok") throw new Error("stale daemon did not acknowledge graceful shutdown");
         await this.waitForProcessExit("stale daemon", state.daemonPid);
         await this.waitForPortRelease(config);
       } catch (error) {
-        if (drained) {
+        if (drained && !shutdownRequested) {
           try {
             await this.control(config, "resume");
           } catch (resumeError) {
@@ -2172,18 +2207,18 @@ class RuntimeSupervisor {
       return { status: "stopped" };
     } catch (error) {
       const compensationErrors = [];
-      if (tunnelStopped && config?.mode === "full" && !this.tunnel) {
-        try {
-          await this.startTunnel(config);
-        } catch (caught) {
-          compensationErrors.push(["tunnel restart compensation failed", caught]);
-        }
-      }
       if (drained && config) {
         try {
           await this.restoreDrainedDaemon(config);
         } catch (caught) {
           compensationErrors.push(["daemon resume compensation failed", caught]);
+        }
+      }
+      if (compensationErrors.length === 0 && tunnelStopped && config?.mode === "full" && !this.tunnel) {
+        try {
+          await this.startTunnel(config, "setup-compensation", { compensating: true });
+        } catch (caught) {
+          compensationErrors.push(["tunnel restart compensation failed", caught]);
         }
       }
       const message = compensationErrors.reduce(

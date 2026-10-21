@@ -1231,6 +1231,17 @@ class RuntimeHost {
       throw new Error("Automatic tool approvals are unavailable in Zero Risk mode");
     }
     const development = this.launcherProfile === "development";
+    if (!development) {
+      if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+      this.lifecycleOperation = "auto-approve-tool-calls";
+      try {
+        // No drain, route rewrite or tunnel restart. Existing adapter snapshots retain
+        // their approval policy; the authenticated daemon commits the next-turn policy.
+        return await this.supervisor.setAutoApproveToolCalls(enabled);
+      } finally {
+        this.lifecycleOperation = null;
+      }
+    }
     const args = [
       ...(development ? ["dev", "setup"] : ["setup"]),
       current.mode === "full" ? "--full" : "--browser-only",

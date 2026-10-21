@@ -1440,12 +1440,24 @@ test("skill file experiment uses the setup transaction in production and DEV, an
 });
 
 
-test("tool approvals opt in and out through setup without refreshing models or changing chat settings", async () => {
+test("production tool approvals use live control; DEV keeps isolated setup without changing chat settings", async () => {
   for (const makeHost of [hostFor, devHostFor]) {
     for (const mode of ["browser-only", "full"]) {
       for (const enabled of [true, false]) {
         const fixture = makeHost({ mode, browserInteractionMode: "automatic", autoApproveToolCalls: !enabled });
+        let applied;
+        fixture.host.supervisor.setAutoApproveToolCalls = async value => {
+          applied = value;
+          assert.equal(fixture.host.currentOperation(), "auto-approve-tool-calls");
+          return { enabled: value, appliesTo: "new_turns" };
+        };
         assert.equal((await fixture.host.setAutoApproveToolCalls(enabled)).enabled, enabled);
+        assert.equal(fixture.host.currentOperation(), null);
+        if (makeHost === hostFor) {
+          assert.equal(applied, enabled);
+          assert.equal(fixture.invocation(), undefined, "no setup, drain, route rewrite or restart");
+          continue;
+        }
         const { name, args } = fixture.invocation();
         assert.equal(name, "auto-approve-tool-calls");
         assert.equal(args.includes("--auto-approve-tool-calls"), enabled);
@@ -1466,6 +1478,17 @@ test("tool approvals opt in and out through setup without refreshing models or c
     await assert.rejects(() => fixture.host.setAutoApproveToolCalls("true"), /boolean/);
     assert.equal(fixture.invocation(), undefined);
   }
+});
+
+test("live approval failure leaves runtime alone and releases the launcher operation", async () => {
+  const fixture = hostFor({ mode: "full", autoApproveToolCalls: false });
+  fixture.host.supervisor.setAutoApproveToolCalls = async () => { throw new Error("control refused"); };
+  await assert.rejects(fixture.host.setAutoApproveToolCalls(true), /control refused/);
+  assert.equal(fixture.host.currentOperation(), null);
+  assert.equal(fixture.invocation(), undefined);
+  fixture.host.lifecycleOperation = "another-setting";
+  await assert.rejects(fixture.host.setAutoApproveToolCalls(true), /Another launcher operation/);
+  assert.equal(fixture.host.currentOperation(), "another-setting");
 });
 
 test("fresh-conversation preference uses production and DEV setup without forcing mode or other preferences", async () => {

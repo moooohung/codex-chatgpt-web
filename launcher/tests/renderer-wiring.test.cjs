@@ -531,7 +531,7 @@ test("catalog verification reports a failed request instead of requesting anothe
   assert.equal(operations.at(-1)?.status, "completed");
 });
 
-test("browser preference IPC commits only after setup succeeds and refuses active browser work", async () => {
+test("browser preference IPC commits after success; live approvals allow active turns but refuse browser operations", async () => {
   const vm = require("node:vm");
   for (const [property, method, channel, nextChannel] of [
     ["composerPredictionsEnabled", "setComposerPredictions", "launcher:composer-predictions", "launcher:skill-attachments"],
@@ -562,12 +562,15 @@ test("browser preference IPC commits only after setup succeeds and refuses activ
       stateStore: { read: () => ({ ...state }), update: patch => Object.assign(state, patch) },
       send: (channel, value) => events.push({ channel, value: { ...value } }),
     });
-    await assert.rejects(() => handler(null, true), /Finish or cancel active ChatGPT turns/);
+    if (property !== "autoApproveToolCalls") {
+      await assert.rejects(() => handler(null, true), /Finish or cancel active ChatGPT turns/);
+    }
     browserHost.activeTraceId = null;
     browserHost.currentOperation = () => "browser-smoke";
-    await assert.rejects(() => handler(null, true), /Finish or cancel active ChatGPT turns/);
+    await assert.rejects(() => handler(null, true), /Finish.*browser operation|Finish or cancel active ChatGPT turns/);
     assert.equal(calls, 0);
     browserHost.currentOperation = () => null;
+    if (property === "autoApproveToolCalls") browserHost.activeTraceId = "running-turn";
     let api;
     vm.runInNewContext(preloadSource, { require: () => ({
       contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } },

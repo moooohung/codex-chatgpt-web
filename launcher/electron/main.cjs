@@ -979,8 +979,8 @@ function registerIpc({ logger, stateStore }) {
     return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
   });
   handle("launcher:auto-approve-tool-calls", async (_event, enabled) => {
-    if (browserHost.activeTraceId || browserHost.currentOperation()) {
-      throw new Error("Finish or cancel active ChatGPT turns before changing tool approvals");
+    if (browserHost.currentOperation()) {
+      throw new Error("Finish the current browser operation before changing tool approvals");
     }
     await runtimeHost.setAutoApproveToolCalls(enabled);
     return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);

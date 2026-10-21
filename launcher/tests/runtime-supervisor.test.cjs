@@ -1551,6 +1551,220 @@ test("launcher restarts the daemon when a failed stop already terminated the dra
   assert.equal(starts, 1);
 });
 
+function shutdownCompensationFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-shutdown-compensation-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const config = { mode: "full", tunnel: { alias: "synthetic-tunnel" } };
+  // Borrow the test runner's PID only for the read-only liveness predicate. Every
+  // stop/start/wait boundary below is mocked; no process receives an input or signal.
+  const child = { pid: process.pid, exitCode: null, signalCode: null };
+  supervisor.daemon = child;
+  supervisor.tunnel = { pid: 123_456_785, exitCode: null, signalCode: null, managed: true };
+  supervisor.readConfig = () => config;
+  supervisor.proxyHealth = async () => true;
+  supervisor.acquireDrain = async () => true;
+  supervisor.stopTunnelGracefully = async () => { supervisor.tunnel = null; };
+  return { supervisor, config, child };
+}
+
+function shutdownCompensationGate() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("shutdown timeout compensation settles the original daemon before restarting its tunnel", async t => {
+  const { supervisor, child } = shutdownCompensationFixture(t);
+  const entered = shutdownCompensationGate();
+  const settlement = shutdownCompensationGate();
+  const actions = [];
+  const replacement = { pid: 123_456_786, exitCode: null, signalCode: null };
+  supervisor.shutdownDaemon = async () => { throw new Error("synthetic initial shutdown timeout"); };
+  supervisor.restoreDrainedDaemon = async () => {
+    actions.push("settling-daemon");
+    entered.resolve("settling");
+    await settlement.promise;
+    assert.equal(supervisor.daemon, child);
+    supervisor.daemon = replacement;
+    actions.push("daemon-ready");
+  };
+  supervisor.startTunnel = async (_config, operation, options) => {
+    actions.push("start-tunnel");
+    assert.equal(supervisor.daemon, replacement);
+    assert.equal(supervisor.stopping, true);
+    assert.equal(operation, "setup-compensation");
+    assert.equal(options?.compensating, true);
+    supervisor.tunnel = { pid: 123_456_787, exitCode: null, signalCode: null, managed: true };
+  };
+  supervisor.tunnelHealth = async () => true;
+  const stopped = assert.rejects(supervisor.stopForSetup(), /synthetic initial shutdown timeout/);
+  const first = await Promise.race([entered.promise, stopped.then(() => "finished")]);
+  const whileSettling = [...actions];
+  const pendingChild = supervisor.daemon;
+  const prematureState = supervisor.readState();
+  settlement.resolve();
+  await stopped;
+  assert.equal(first, "settling");
+  assert.deepEqual(whileSettling, ["settling-daemon"]);
+  assert.equal(pendingChild, child);
+  assert.equal(prematureState, null);
+  assert.deepEqual(actions, ["settling-daemon", "daemon-ready", "start-tunnel"]);
+  assert.equal(supervisor.stopping, false);
+});
+
+test("shutdown timeout compensation never resumes a daemon whose real shutdown was acknowledged", async t => {
+  const { supervisor, config, child } = shutdownCompensationFixture(t);
+  const actions = [];
+  const settlement = shutdownCompensationGate();
+  const entered = shutdownCompensationGate();
+  const replacement = { pid: 123_456_788, exitCode: null, signalCode: null };
+  let exitWaits = 0;
+  supervisor.control = async (_config, action) => {
+    actions.push(`control:${action}`);
+    assert.equal(action, "shutdown");
+    assert.equal(supervisor.daemon, child);
+    return { status: "ok", accepting_turns: true };
+  };
+  supervisor.waitForChildExit = async (name, expectedChild) => {
+    assert.equal(name, "daemon");
+    assert.equal(expectedChild, child);
+    exitWaits += 1;
+    if (exitWaits === 1) throw new Error("synthetic initial shutdown timeout");
+    actions.push("wait-child-exit");
+    entered.resolve("settling");
+    await settlement.promise;
+    child.exitCode = 0;
+  };
+  supervisor.waitForProcessExit = async (name, pid) => {
+    assert.equal(name, "daemon");
+    assert.equal(pid, child.pid);
+    assert.equal(child.exitCode, 0);
+    actions.push("verify-pid-exit");
+  };
+  supervisor.waitForPortRelease = async () => { actions.push("verify-port-release"); };
+  supervisor.startDaemon = async () => {
+    actions.push("start-replacement");
+    supervisor.daemon = replacement;
+  };
+  await assert.rejects(supervisor.shutdownDaemon(config, 1), /synthetic initial shutdown timeout/);
+  assert.equal(supervisor.daemon, child);
+  const restored = supervisor.restoreDrainedDaemon(config);
+  const first = await Promise.race([entered.promise, restored.then(() => "finished")]);
+  const whileSettling = [...actions];
+  settlement.resolve();
+  assert.deepEqual(await restored, { status: "restarted", pid: replacement.pid });
+  assert.equal(first, "settling");
+  assert.deepEqual(whileSettling, ["control:shutdown", "wait-child-exit"]);
+  assert.deepEqual(actions, [
+    "control:shutdown", "wait-child-exit", "verify-pid-exit", "verify-port-release", "start-replacement",
+  ]);
+  assert.equal(supervisor.daemon, replacement);
+});
+
+test("shutdown timeout compensation retains failed ownership proof when the original child cannot settle", async t => {
+  const { supervisor, child } = shutdownCompensationFixture(t);
+  const actions = [];
+  let exitWaits = 0;
+  supervisor.control = async (_config, action) => {
+    actions.push(`control:${action}`);
+    assert.equal(action, "shutdown");
+    return { status: "ok" };
+  };
+  supervisor.waitForChildExit = async (_name, expectedChild) => {
+    assert.equal(expectedChild, child);
+    exitWaits += 1;
+    throw new Error(exitWaits === 1 ? "synthetic initial shutdown timeout" : "synthetic settlement timeout");
+  };
+  supervisor.waitForProcessExit = async () => { actions.push("verify-pid-exit"); };
+  supervisor.waitForPortRelease = async () => { actions.push("verify-port-release"); };
+  supervisor.startDaemon = async () => { actions.push("start-daemon"); };
+  supervisor.startTunnel = async () => { actions.push("start-tunnel"); };
+  await assert.rejects(
+    supervisor.stopForSetup(),
+    /synthetic initial shutdown timeout.*daemon resume compensation failed: synthetic settlement timeout/,
+  );
+  assert.equal(exitWaits, 2);
+  assert.deepEqual(actions, ["control:shutdown"]);
+  assert.equal(supervisor.daemon, child);
+  assert.equal(supervisor.tunnel, null);
+  const state = supervisor.readState();
+  assert.equal(state.status, "failed");
+  assert.equal(state.ownerPid, process.pid);
+  assert.equal(state.daemonPid, child.pid);
+  assert.equal(state.tunnelPid, null);
+  assert.match(state.detail, /synthetic settlement timeout/);
+  assert.equal(supervisor.stopping, false);
+});
+
+test("shutdown timeout compensation reports full runtime ready only after a verified replacement and tunnel", async t => {
+  const { supervisor, child, config } = shutdownCompensationFixture(t);
+  const actions = [];
+  const replacement = { pid: 123_456_789, exitCode: null, signalCode: null };
+  let exitWaits = 0;
+  supervisor.control = async (_config, action) => {
+    actions.push(`control:${action}`);
+    assert.equal(action, "shutdown");
+    return { status: "ok" };
+  };
+  supervisor.waitForChildExit = async (_name, expectedChild) => {
+    assert.equal(expectedChild, child);
+    exitWaits += 1;
+    if (exitWaits === 1) throw new Error("synthetic initial shutdown timeout");
+    child.exitCode = 0;
+    actions.push("child-exited");
+  };
+  supervisor.waitForProcessExit = async (_name, pid) => {
+    assert.equal(pid, child.pid);
+    actions.push("pid-exited");
+  };
+  supervisor.waitForPortRelease = async () => { actions.push("port-released"); };
+  supervisor.startDaemon = async (receivedConfig, options) => {
+    assert.equal(receivedConfig, config);
+    assert.equal(supervisor.daemon, null);
+    assert.equal(supervisor.stopping, true);
+    assert.equal(options?.compensating, true);
+    supervisor.daemon = replacement;
+    actions.push("replacement-verified");
+  };
+  supervisor.startTunnel = async (receivedConfig, operation, options) => {
+    assert.equal(receivedConfig, config);
+    assert.equal(supervisor.daemon, replacement);
+    assert.equal(operation, "setup-compensation");
+    assert.equal(options?.compensating, true);
+    supervisor.tunnel = { pid: 123_456_790, exitCode: null, signalCode: null, managed: true };
+    actions.push("tunnel-started");
+  };
+  supervisor.proxyHealth = async (_config, _timeoutMs, pid, requireAccepting) => {
+    if (requireAccepting) {
+      assert.equal(pid, replacement.pid);
+      actions.push("replacement-health-verified");
+    }
+    return true;
+  };
+  supervisor.tunnelHealth = async () => {
+    actions.push("tunnel-health-verified");
+    return true;
+  };
+  await assert.rejects(supervisor.stopForSetup(), /synthetic initial shutdown timeout/);
+  assert.deepEqual(actions, [
+    "control:shutdown", "child-exited", "pid-exited", "port-released", "replacement-verified",
+    "tunnel-started", "replacement-health-verified", "tunnel-health-verified",
+  ]);
+  assert.equal(supervisor.daemon, replacement);
+  const state = supervisor.readState();
+  assert.equal(state.status, "ready");
+  assert.equal(state.daemonPid, replacement.pid);
+  assert.equal(state.tunnelPid, supervisor.tunnel.pid);
+  assert.equal(supervisor.stopping, false);
+});
+
 test("launcher marks compensation ready only after both owned runtime processes pass health checks", async () => {
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },

@@ -47,7 +47,7 @@ test("supervised Windows runtimes receive the same trust environment before star
   const previous = process.env.NODE_USE_SYSTEM_CA;
   const supervisor = Object.assign(Object.create(RuntimeSupervisor.prototype), {
     platform: "win32", browserDescriptorPath: "fixture-descriptor",
-    lastChildFailure: {}, lastChildOutput: {}, expectedExits: new Set(), restartableChildren: new Set(),
+    lastChildFailure: {}, lastChildOutput: {}, expectedExits: new Set(), shutdownIntents: new WeakSet(), restartableChildren: new Set(),
     logger: { info() {}, warn() {}, error() {} }, writeState() {}, tryWriteState() { return true; },
   });
   try {

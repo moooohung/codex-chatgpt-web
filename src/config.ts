@@ -624,6 +624,26 @@ export function saveConfig(config: AppConfig): void {
   atomicWriteFile(path, preserveUtf8Bom(`${JSON.stringify(config, null, 2)}\n`, original));
 }
 
+// Persist before changing the live value. No await separates the compare and replace;
+// concurrent control requests cannot overwrite each other or unrelated setup changes.
+export function updateToolApprovalConfig(config: AppConfig, path: string, enabled: boolean, expected: boolean): void {
+  if (config.purpose || config.browserInteractionMode === "manual") {
+    throw new Error("Automatic tool approvals require the production Automatic runtime");
+  }
+  const original = readFileSync(path, "utf8");
+  const raw = JSON.parse(stripUtf8Bom(original)) as unknown;
+  const disk = parseConfig(raw, path);
+  const otherSettings = ({ autoApproveToolCalls: _approval, ...rest }: AppConfig) => rest;
+  if (JSON.stringify(otherSettings(disk)) !== JSON.stringify(otherSettings(config))
+    || disk.autoApproveToolCalls !== config.autoApproveToolCalls
+    || (expected !== config.autoApproveToolCalls && enabled !== config.autoApproveToolCalls)) {
+    throw new Error("Runtime configuration changed; reload settings before trying again");
+  }
+  if (enabled === config.autoApproveToolCalls) return;
+  atomicWriteFile(path, preserveUtf8Bom(`${JSON.stringify({ ...(raw as object), autoApproveToolCalls: enabled }, null, 2)}\n`, original), { durable: true });
+  config.autoApproveToolCalls = enabled;
+}
+
 export function providerConfig(config: AppConfig): CodexProviderConfig {
   const manual = config.browserInteractionMode === "manual";
   const model = manual

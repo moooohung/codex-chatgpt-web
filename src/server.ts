@@ -24,7 +24,7 @@ import { prepareNativeCompactionContinuation } from "./adapters/chatgpt-web/nati
 import { prepareNativeFailedTurnRetry } from "./adapters/chatgpt-web/native-turn-retry";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
-import { providerConfig } from "./config";
+import { getConfigPath, providerConfig, updateToolApprovalConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
@@ -623,6 +623,7 @@ export async function responseRequest(
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
   options: ResponseRequestOptions = {},
 ): Promise<Response> {
+  config = { ...config };
   const nativeRequest = req.clone();
   let raw: unknown;
   try {
@@ -895,6 +896,7 @@ export async function compactRequest(
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
   options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
 ): Promise<Response> {
+  config = { ...config };
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
   try {
@@ -1032,6 +1034,7 @@ export function startServer(
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
+  const settingsConfigPath = getConfigPath();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
@@ -1050,6 +1053,7 @@ export function startServer(
     return bridgeMaintenanceResponse();
   };
   let shutdownPromise: Promise<void> | undefined;
+  let shutdownRequested = false;
   let successfulModelCatalogRequests = 0;
   let lastSuccessfulModelCatalogRequestAt: string | null = null;
   let modelCatalogRequests = 0;
@@ -1104,9 +1108,40 @@ export function startServer(
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        if (shutdownRequested || shutdownPromise) {
+          return Response.json({ status: "refused", error: "Daemon shutdown has already been requested" }, { status: 409 });
+        }
         draining = url.pathname === "/admin/drain";
         turnBroker?.setExternalOwnersAccepted(!draining);
         return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
+      }
+      if (req.method === "POST" && url.pathname === "/admin/tool-approvals") {
+        if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        let body: { enabled: boolean; expectedValue: boolean; expectedPid: number };
+        try {
+          const value = await req.json();
+          if (!value || typeof value !== "object" || Array.isArray(value)
+            || Object.keys(value).sort().join(",") !== "enabled,expectedPid,expectedValue"
+            || typeof value.enabled !== "boolean" || typeof value.expectedValue !== "boolean"
+            || !Number.isInteger(value.expectedPid)) throw new Error("Invalid tool approval preference");
+          body = value;
+        } catch {
+          return Response.json({ status: "error", error: "Invalid tool approval preference" }, { status: 400 });
+        }
+        if (draining || shutdownPromise || body.expectedPid !== process.pid) {
+          return Response.json({ status: "refused", error: "Runtime is changing; retry after it is ready" }, { status: 409 });
+        }
+        if (config.browserInteractionMode === "manual") {
+          return Response.json({ status: "refused", error: "Tool approvals are unavailable in Zero Risk mode" }, { status: 409 });
+        }
+        try {
+          updateToolApprovalConfig(config, settingsConfigPath, body.enabled, body.expectedValue);
+        } catch {
+          // Configuration paths and contents can contain secrets. Keep control failures generic.
+          return Response.json({ status: "refused", error: "Could not persist matching runtime settings; reload settings and retry" }, { status: 409 });
+        }
+        return Response.json({ status: "ok", pid: process.pid, autoApproveToolCalls: config.autoApproveToolCalls,
+          applies_to: "new_turns", ...activity() });
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-turn") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
@@ -1239,6 +1274,7 @@ export function startServer(
             { status: 409 },
           );
         }
+        shutdownRequested = true;
         setTimeout(shutdown, 0);
         return Response.json({ status: "ok", accepting_turns: false, ...current });
       }
