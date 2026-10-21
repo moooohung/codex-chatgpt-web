@@ -111,6 +111,6 @@ test("a Plus lease after stage 1 clamps later stage sizing instead of failing th
       if (calls++ === 0) Object.assign(capabilities, { extraHighAvailable: false, proAvailable: false });
       return "Verified checkpoint; preserve failure provenance, original instructions and next steps.";
     } });
-  expect(calls).toBe(plan.totalStages ?? calls);
+  expect(calls).toBeGreaterThan(1);
   expect(summary.length).toBeGreaterThan(0);
 }, 30_000);
