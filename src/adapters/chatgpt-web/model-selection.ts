@@ -154,6 +154,26 @@ export function chatGptModelFamilyMatches(
     && state.mode.toLowerCase() === expectedMode);
 }
 
+/**
+ * Plus accounts (2026-10-21) announce only the effort ("Medium, 2 of 4.") and the
+ * picker header shows only "Medium", with no version. That is acceptable evidence
+ * only for 5.6, whose explicit "GPT-5.6 Sol" row the caller has already proven
+ * checked; GPT-6 keeps requiring a versioned announcement (Latest may run 5.6).
+ */
+export function chatGptEffortOnlyEvidenceMatches(
+  descriptions: readonly string[],
+  family: ChatGptWebModelFamily,
+  effort: ChatGptWebAdapterEffort,
+): boolean {
+  if (family !== "5.6") return false;
+  const expectedMode = { low: "instant", medium: "medium", high: "high", xhigh: "extra high", max: "pro" }[effort];
+  const labels = descriptions
+    .map(text => text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (labels.length === 0 || labels.some(text => parseChatGptModelAnnouncement(text))) return false;
+  return labels.every(text => (/^([^\p{P}\d]+)(?:\p{P}|$)/u.exec(text)?.[1] ?? "").trim().toLowerCase() === expectedMode);
+}
+
 export async function assertChatGptModelFamily(
   menu: EffortMenu,
   family: ChatGptWebModelFamily,
@@ -177,7 +197,8 @@ export async function assertChatGptModelFamily(
         menu.slider.getAttribute("aria-valuenow")])) as [string | null, string | null, string | null],
     );
     const descriptions = await probe(() => readChatGptModelAnnouncements(menu.slider));
-    if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
+    if (checked && state && state.value === state.min + effortIndex && (chatGptModelFamilyMatches(descriptions, family, effort)
+      || chatGptEffortOnlyEvidenceMatches(descriptions, family, effort))) return;
     reason = !checked ? "family-not-checked" : !state || state.value !== state.min + effortIndex
       ? "effort-position-mismatch" : "model-evidence-mismatch";
     if (Date.now() >= deadline) break;

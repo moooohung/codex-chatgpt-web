@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assertChatGptModelFamily, chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
+import { assertChatGptModelFamily, chatGptEffortOnlyEvidenceMatches, chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
 import { chatGptUsageModelFromAnnouncements } from "../src/adapters/chatgpt-web/limits";
 
 test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
@@ -110,4 +110,15 @@ test("repeated picker version verifies GPT-5.6 Pro without accepting conflicting
   }
   expect(chatGptModelFamilyMatches(["6 Astra 6 Pro"], "6", "max")).toBeTrue();
   expect(chatGptModelFamilyMatches(["6 Astra 6 Pro"], "6", "high")).toBeFalse();
+});
+
+test("Plus effort-only announcements prove only an explicitly checked 5.6 row", () => {
+  // Live Plus picker 2026-10-21: header "Medium", slider "Medium, 2 of 4.", no version.
+  expect(chatGptEffortOnlyEvidenceMatches(["Medium", "Medium, 2 of 4."], "5.6", "medium")).toBe(true);
+  expect(chatGptEffortOnlyEvidenceMatches(["Extra High, 4 of 4."], "5.6", "xhigh")).toBe(true);
+  expect(chatGptEffortOnlyEvidenceMatches(["Medium", "Medium, 2 of 4."], "6", "medium")).toBe(false);
+  expect(chatGptEffortOnlyEvidenceMatches(["High, 3 of 4."], "5.6", "medium")).toBe(false);
+  expect(chatGptEffortOnlyEvidenceMatches(["Medium", "6 Medium, 2 of 3."], "5.6", "medium")).toBe(false);
+  expect(chatGptEffortOnlyEvidenceMatches([], "5.6", "medium")).toBe(false);
+  expect(chatGptEffortOnlyEvidenceMatches(["Try Pro for more reasoning"], "5.6", "medium")).toBe(false);
 });
