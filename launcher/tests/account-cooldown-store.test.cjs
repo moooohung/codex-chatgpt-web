@@ -9,6 +9,7 @@ const { PRIMARY_ACCOUNT, AccountCooldownStore } = require("../electron/account-c
 const NOW = 1_791_590_400_000;
 const pending = (retryAt = NOW + 60_000, message = "Try again later") => ({ retryAt, message });
 const document = accounts => JSON.stringify({ version: 1, accounts });
+const legacyNotice = "ChatGPT unusual activity detected: Our systems have detected unusual activity coming from your system. Please try again later. Retry Try again in 30 minutes.";
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "account-cooldown-"));
@@ -332,4 +333,90 @@ test("the default clock accepts a future wall-clock timestamp", t => {
   store.record(PRIMARY_ACCOUNT, entry);
   assert.deepEqual(store.get(PRIMARY_ACCOUNT), entry);
   assert.deepEqual(new AccountCooldownStore(f.filePath).snapshot(), { [PRIMARY_ACCOUNT]: entry });
+});
+
+test("exact old local defaults migrate once with a byte-for-byte private backup and neighbor preservation", t => {
+  const f = fixture(t);
+  const original = document({ alpha: pending(NOW + 30 * 60_000, legacyNotice), beta: pending(NOW + 45 * 60_000, "Provider wait: 45 minutes") });
+  f.write(original);
+  const store = f.open();
+  assert.equal(store.get("alpha").retryAt, NOW + 3 * 60_000);
+  assert.match(store.get("alpha").message, /Local retry check after 3 minutes\.$/);
+  assert.deepEqual(store.get("beta"), pending(NOW + 45 * 60_000, "Provider wait: 45 minutes"));
+  const backups = fs.readdirSync(path.dirname(f.filePath)).filter(name => name.endsWith(".bak"));
+  assert.equal(backups.length, 1);
+  const backupPath = path.join(path.dirname(f.filePath), backups[0]);
+  assert.equal(fs.readFileSync(backupPath, "utf8"), original);
+  if (process.platform !== "win32") assert.equal(fs.statSync(backupPath).mode & 0o777, 0o600);
+  const migrated = fs.readFileSync(f.filePath);
+  assert.equal(f.open().get("alpha").retryAt, NOW + 3 * 60_000);
+  assert.deepEqual(fs.readFileSync(f.filePath), migrated);
+  assert.deepEqual(fs.readdirSync(path.dirname(f.filePath)).filter(name => name.endsWith(".bak")), backups);
+});
+
+test("elapsed local defaults remain peekable for owned-disable cleanup without making accounts unavailable", t => {
+  const f = fixture(t);
+  f.write(document({ alpha: pending(NOW + 10 * 60_000, legacyNotice) }));
+  const store = f.open();
+  assert.equal(store.get("alpha"), null);
+  assert.equal(store.peek("alpha").retryAt, NOW - 17 * 60_000);
+  assert.deepEqual(store.snapshot(), {});
+});
+
+test("explicit provider notices, other durations and future observations are never shortened", t => {
+  const f = fixture(t);
+  const entries = {
+    provider: pending(NOW + 30 * 60_000, legacyNotice.replace("Please try again later.", "Please try again in 30 minutes.")),
+    numeric: pending(NOW + 30 * 60_000, "ChatGPT unusual activity detected: Try again in 30 minutes."),
+    configured: pending(NOW + 45 * 60_000, legacyNotice.replace(/30 minutes\.$/, "45 minutes.")),
+    future: pending(NOW + 30 * 60_000 + 1, legacyNotice),
+    invalidOrigin: pending(1, legacyNotice),
+  };
+  const before = document(entries); f.write(before);
+  const store = f.open();
+  for (const [name, entry] of Object.entries(entries)) assert.deepEqual(store.peek(name), entry);
+  assert.equal(fs.readFileSync(f.filePath, "utf8"), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(f.filePath)), ["cooldowns.json"]);
+});
+
+test("a configured current unusual-activity wait opts out of legacy policy migration", t => {
+  const f = fixture(t);
+  const previous = process.env.CODEX_WEB_GPT_UNUSUAL_ACTIVITY_COOLDOWN_MINUTES;
+  t.after(() => { if (previous === undefined) delete process.env.CODEX_WEB_GPT_UNUSUAL_ACTIVITY_COOLDOWN_MINUTES;
+    else process.env.CODEX_WEB_GPT_UNUSUAL_ACTIVITY_COOLDOWN_MINUTES = previous; });
+  process.env.CODEX_WEB_GPT_UNUSUAL_ACTIVITY_COOLDOWN_MINUTES = "30";
+  const entry = pending(NOW + 30 * 60_000, legacyNotice);
+  const before = document({ alpha: entry }); f.write(before);
+  assert.deepEqual(f.open().get("alpha"), entry);
+  assert.equal(fs.readFileSync(f.filePath, "utf8"), before);
+});
+
+test("migration validates the complete store before backing up or changing any entry", t => {
+  const f = fixture(t);
+  const before = document({ alpha: pending(NOW + 30 * 60_000, legacyNotice), beta: { retryAt: "invalid", message: "Wait" } });
+  f.write(before);
+  assert.throws(() => f.open(), /corrupt; original preserved/);
+  assert.equal(fs.readFileSync(f.filePath, "utf8"), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(f.filePath)), ["cooldowns.json"]);
+});
+
+test("backup failure prevents migration and replacement failure leaves a recoverable original backup", t => {
+  const f = fixture(t);
+  const before = document({ alpha: pending(NOW + 30 * 60_000, legacyNotice) }); f.write(before);
+  const write = fs.writeFileSync;
+  const failBackup = t.mock.method(fs, "writeFileSync", (filePath, ...args) => {
+    if (String(filePath).endsWith(".bak")) throw new Error("synthetic backup failure");
+    return write(filePath, ...args);
+  });
+  assert.throws(() => f.open(), /synthetic backup failure/);
+  assert.equal(fs.readFileSync(f.filePath, "utf8"), before);
+  failBackup.mock.restore();
+  const failReplace = t.mock.method(fs, "renameSync", () => { throw new Error("synthetic migration replacement failure"); });
+  assert.throws(() => f.open(), /synthetic migration replacement failure/);
+  assert.equal(fs.readFileSync(f.filePath, "utf8"), before);
+  const names = fs.readdirSync(path.dirname(f.filePath));
+  assert.equal(names.length, 2);
+  assert.equal(fs.readFileSync(path.join(path.dirname(f.filePath), names.find(name => name.endsWith(".bak"))), "utf8"), before);
+  failReplace.mock.restore();
+  assert.equal(f.open().get("alpha").retryAt, NOW + 3 * 60_000, "the existing matching backup is reusable after a failed replacement");
 });

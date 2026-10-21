@@ -751,7 +751,9 @@ class BrowserHost {
         this.clearUnusualActivityDisable(name);
         continue;
       }
-      const retryAt = Math.max(marker.retryAt, cooldown.retryAt);
+      // The store owns the deadline, including the backed-up migration of an
+      // old local default. A stale disable marker must not extend that wait.
+      const retryAt = cooldown.retryAt;
       if (retryAt !== marker.retryAt) this.persistUnusualActivityDisable(name, retryAt, marker.traceId);
       else if (marker.reactivate) {
         if (name !== PRIMARY_ACCOUNT) {

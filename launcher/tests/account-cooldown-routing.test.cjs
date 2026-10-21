@@ -171,6 +171,28 @@ test("legacy bridge-owned disabled accounts recover on admission even if the exp
   assert.equal(host.disabledAccounts.has("alpha"), false);
 });
 
+test("migrated local defaults move legacy timers to three minutes and restore only owned disables", t => {
+  const { host, configPath, cooldownPath } = fixture(t, ["alpha", "beta"], ["Date", "setTimeout"]);
+  const data = readAccountConfig(configPath);
+  data.accounts.alpha.enabled = false; data.accounts.beta.enabled = false;
+  writeAccountConfig(configPath, data);
+  host.disabledAccounts = new Set(["alpha", "beta"]);
+  const oldRetryAt = Date.now() + 30 * 60_000;
+  host.accountCooldowns.record("alpha", { retryAt: oldRetryAt,
+    message: `${UNUSUAL_ACTIVITY_MESSAGE_PREFIX}Our systems have detected unusual activity coming from your system. Please try again later. Try again in 30 minutes.` });
+  host.unusualActivityDisabledAccounts.set("alpha", { retryAt: oldRetryAt, traceId: "legacy", reactivate: true });
+  host.accountCooldowns = new AccountCooldownStore(cooldownPath);
+  host.restoreUnusualActivityDisabledAccounts();
+  assert.equal(host.unusualActivityDisabledAccounts.get("alpha").retryAt, Date.now() + 3 * 60_000);
+  assert.equal(readAccountConfig(configPath).accounts.alpha.enabled, false);
+  t.mock.timers.tick(3 * 60_000);
+  assert.equal(readAccountConfig(configPath).accounts.alpha.enabled, true);
+  assert.equal(host.disabledAccounts.has("alpha"), false);
+  assert.equal(host.accountCooldowns.peek("alpha"), null);
+  assert.equal(readAccountConfig(configPath).accounts.beta.enabled, false);
+  assert.equal(host.disabledAccounts.has("beta"), true);
+});
+
 test("expired legacy marker cannot clear a later provider wait or unrelated usage limit", t => {
   const { host } = fixture(t, ["alpha"]);
   const oldRetryAt = Date.now() + 1000;

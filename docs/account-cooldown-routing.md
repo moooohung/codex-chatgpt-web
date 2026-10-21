@@ -41,6 +41,10 @@ or change a manual enable/disable preference. Admission keeps the account paused
 until the local or explicit provider deadline. Legacy bridge-owned disables still
 recover on expiry, after restart, or on admission if a timer was missed during
 sleep. Expired markers cannot delete a newer provider or ordinary usage wait.
+On upgrade, only the exact former untimed-card notice plus its local 30-minute
+suffix migrates to the original detection time plus 3 minutes, after a private
+byte-for-byte backup. Explicit provider times and other notices are preserved;
+old disable markers follow the authoritative migrated store deadline.
 Manually disabled accounts remain disabled. The launcher shows
 a short Korean notice with the remaining minutes and
 logs `unusual_activity_detected` and `unusual_activity_cooldown_ended` with the
