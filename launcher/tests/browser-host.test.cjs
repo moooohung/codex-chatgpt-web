@@ -3583,6 +3583,26 @@ test("a lightweight retained tab reloads its exact conversation before reuse", a
   assert.equal(tab.retainedUrl, null);
 });
 
+test("tab memory diagnostics distinguish active ownership, parked conversations and terminal failure", () => {
+  const host = Object.create(BrowserHost.prototype);
+  const tab = { id: "memory-diagnostics", status: "running", conversationKey: "conversation-fixture",
+    view: { webContents: { isDestroyed: () => true } } };
+  assert.equal(host.tabSnapshot(tab).memoryState, "running");
+  tab.status = "ready";
+  assert.equal(host.tabSnapshot(tab).memoryState, "retained");
+  tab.memorySuspended = true;
+  assert.equal(host.tabSnapshot(tab).memoryState, "suspended");
+  tab.status = "running";
+  assert.equal(host.tabSnapshot(tab).memoryState, "running");
+  tab.failedAt = 1;
+  assert.equal(host.tabSnapshot(tab).memoryState, "failed");
+  delete tab.failedAt;
+  delete tab.memorySuspended;
+  delete tab.conversationKey;
+  tab.status = "error";
+  assert.equal(host.tabSnapshot(tab).memoryState, "other");
+});
+
 test("a retained browser tab expires at thirty minutes", () => {
   const removed = [];
   const tab = {

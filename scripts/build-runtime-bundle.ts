@@ -57,10 +57,12 @@ const build = await Bun.build({
   entrypoints: [join(root, "src", "cli.ts")],
   target: "bun",
   minify: true,
+  // Command-specific packages stay unloaded in each long-lived MCP/serve process.
+  splitting: true,
   external: ["playwright-core"],
   packages: "external",
   outdir: appDir,
-  naming: "cli.js",
+  naming: { entry: "cli.js", chunk: "chunk-[hash].js" },
 });
 if (!build.success) {
   throw new Error(`Runtime bundle failed: ${build.logs.map(log => log.message).join("; ")}`);

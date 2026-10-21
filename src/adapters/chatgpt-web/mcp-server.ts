@@ -8,7 +8,7 @@ import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerRetirementDiagnostics, type BrokerToolResult } from "./turn-broker";
 import { observeMcpToolCalls } from "./mcp-observation";
-import { isChatGptTokenRejection } from "./prompt";
+import { isChatGptTokenRejection } from "./token-rejection";
 import { chatGptRoundFailureEvidence } from "./round-observer";
 import { readCosConfig } from "../../cos/config";
 import { limitMcpTextContent } from "../../cos/output-limit";

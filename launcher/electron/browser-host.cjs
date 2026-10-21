@@ -648,6 +648,10 @@ class BrowserHost {
       id: tab.id,
       traceId: tab.traceId,
       rendererPid: rendererPidFor(tab.view?.webContents),
+      memoryState: tab.failedAt !== undefined ? "failed"
+        : tab.status === "running" ? "running"
+          : tab.memorySuspended ? "suspended"
+            : tab.conversationKey && tab.status === "ready" ? "retained" : "other",
       title: accountNameForTab(tab) ? `${accountNameForTab(tab)} - ${tab.label}` : tab.label,
       status: tab.status,
       loading: tab.loading === true,

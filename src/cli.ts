@@ -5,32 +5,9 @@ import { timingSafeEqual } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { stdin, stdout } from "node:process";
-import { captureSystemBrowserLoginToFile, checkBrowserEngine, loginToChatGpt } from "./browser-login";
 import { defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
-import {
-  inspectLauncherBrowserHost,
-  inspectLauncherBrowserHostLiveness,
-  readLauncherBrowserHostDescriptor,
-} from "./launcher-browser-host";
-import {
-  activateCodexIntegration,
-  deactivateCodexIntegration,
-  inspectCodexIntegration,
-  readCodexSubagentProtocol,
-  setCodexSubagentProtocol,
-  uninstallCodexIntegration,
-} from "./codex-integration";
-import { formatDoctorReport, runDoctor } from "./doctor";
-import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
-import { runCommand } from "./process";
-import { startCosDashboard } from "./cos/dashboard";
-import { startServer } from "./server";
-import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, interruptActiveTurn, restartService, startService, stopService, uninstallService } from "./service";
-import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions } from "./setup";
-import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
-import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
+import type { SetupOptions } from "./setup";
 import { VERSION } from "./version";
-import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -146,13 +123,14 @@ function assertNoArgs(args: string[]): void {
   if (args.length > 0) throw new Error(`Unknown arguments: ${args.join(" ")}`);
 }
 
-function authorizeLauncherControl(operation: string): void {
+async function authorizeLauncherControl(operation: string): Promise<void> {
   const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
   const supplied = process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN?.trim();
   delete process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN;
   if (!descriptorPath || !supplied) {
     throw new Error(`Launcher-controlled ${operation} requires a live launcher authorization`);
   }
+  const { readLauncherBrowserHostDescriptor } = await import("./launcher-browser-host");
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const expectedBytes = Buffer.from(descriptor.control.token);
   const suppliedBytes = Buffer.from(supplied);
@@ -238,6 +216,7 @@ async function loginCommand(args: string[]): Promise<void> {
     if (config.browserHost === "launcher") {
       throw new Error("ChatGPT login is owned by the launcher; open Codex Web GPT and use its Sign in step");
     }
+    const { loginToChatGpt } = await import("./browser-login");
     const result = await loginToChatGpt(config);
     stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
     return;
@@ -246,7 +225,7 @@ async function loginCommand(args: string[]): Promise<void> {
   const chromeExecutablePath = takeOption(args, "--chrome");
   const storageStatePath = takeOption(args, "--storage-state");
   assertNoArgs(args);
-  authorizeLauncherControl("passkey login");
+  await authorizeLauncherControl("passkey login");
   if (!["darwin", "win32", "linux"].includes(process.platform)) throw new Error("System-browser sign-in is unsupported on this platform");
   if (!chromeExecutablePath || !isAbsolute(chromeExecutablePath)) {
     throw new Error("Launcher passkey sign-in requires --chrome with an absolute path");
@@ -256,6 +235,7 @@ async function loginCommand(args: string[]): Promise<void> {
   }
   const continuation = launcherLoginContinuation();
   try {
+    const { captureSystemBrowserLoginToFile } = await import("./browser-login");
     await captureSystemBrowserLoginToFile({
       ...defaultConfig(),
       chromeExecutablePath,
@@ -356,6 +336,8 @@ async function setupCommand(args: string[]): Promise<void> {
   if (!acknowledged) throw new Error("Setup cancelled: acknowledgement was not provided");
   options.acknowledgedUnofficial = true;
 
+  const { existingFullSetupCredentials, preflightSetup, setup } = await import("./setup");
+  const { managedRuntimeKeyPath } = await import("./tunnel");
   if (preflightOnly) {
     preflightSetup(options);
     stdout.write("Setup preflight complete.\n");
@@ -393,6 +375,7 @@ async function setupCommand(args: string[]): Promise<void> {
 async function doctorCommand(args: string[]): Promise<void> {
   const json = takeFlag(args, "--json");
   assertNoArgs(args);
+  const { formatDoctorReport, runDoctor } = await import("./doctor");
   const report = await runDoctor();
   stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : formatDoctorReport(report));
   if (!report.ok) process.exitCode = 1;
@@ -402,6 +385,7 @@ async function routeCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   const forRuntimeRecovery = action === "disconnect" && takeFlag(args, "--for-runtime-recovery");
   assertNoArgs(args);
+  const { activateCodexIntegration, deactivateCodexIntegration, inspectCodexIntegration } = await import("./codex-integration");
   const result = action === "status"
     ? (() => {
         const status = inspectCodexIntegration();
@@ -429,6 +413,7 @@ async function routeCommand(args: string[]): Promise<void> {
 async function subagentsCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
+  const { inspectCodexIntegration, readCodexSubagentProtocol, setCodexSubagentProtocol } = await import("./codex-integration");
   const config = loadConfig();
   if (config.purpose === "dev-harness") {
     throw new Error("The isolated DEV harness has no Codex subagent protocol to configure");
@@ -456,6 +441,7 @@ async function subagentsCommand(args: string[]): Promise<void> {
 async function serviceCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
+  const { cancelActiveTurns, getServiceStatus, installService, restartService, startService, stopService } = await import("./service");
   const config = action === "status" ? undefined : loadConfig();
   if (action === "cancel-turns") {
     stdout.write(`${JSON.stringify(await cancelActiveTurns(config!), null, 2)}\n`);
@@ -494,12 +480,16 @@ async function interruptHookCommand(args: string[]): Promise<void> {
     || !/^[A-Za-z0-9_-]{6,128}$/.test(turnId)) {
     throw new Error("Codex Interrupt hook payload has no valid session_id or turn_id");
   }
+  const { interruptActiveTurn } = await import("./service");
   await interruptActiveTurn(loadConfig(), { threadId, turnId });
 }
 
 async function tunnelCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
+  const { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } = await import("./tunnel");
+  const { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService } = await import("./tunnel-service");
+  const { assertServiceIdle } = await import("./service");
   if (action === "key-import") {
     const key = await secretPrompt("Runtime key (hidden): ");
     if (!key) throw new Error("A non-empty runtime key is required");
@@ -538,6 +528,7 @@ async function openCommand(args: string[]): Promise<void> {
   const url = target ? urls[target] : undefined;
   if (!url) throw new Error("Choose one of: tunnels, runtime-keys, connectors");
   if (process.platform === "darwin") {
+    const { runCommand } = await import("./process");
     const result = runCommand("open", [url]);
     if (result.status !== 0) throw new Error(result.stderr.trim() || `Could not open ${url}`);
   } else {
@@ -550,11 +541,15 @@ async function uninstallCommand(args: string[]): Promise<void> {
   const keepData = takeFlag(args, "--keep-data");
   const launcherControl = takeFlag(args, "--launcher-control");
   assertNoArgs(args);
-  if (launcherControl) authorizeLauncherControl("uninstall");
+  if (launcherControl) await authorizeLauncherControl("uninstall");
   if (!yes && !await confirm("Restore Codex config, stop services, and remove this installation?")) {
     throw new Error("Uninstall cancelled");
   }
   const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
+  const { assertServiceIdle, getServiceStatus, uninstallService } = await import("./service");
+  const { stopTunnel } = await import("./tunnel");
+  const { uninstallTunnelService } = await import("./tunnel-service");
+  const { uninstallCodexIntegration } = await import("./codex-integration");
   if (config?.browserHost === "launcher" && !launcherControl) {
     throw new Error(
       "Launcher-owned integration must be removed from Codex Web GPT Settings so the active runtime can be drained safely.",
@@ -603,6 +598,7 @@ async function main(): Promise<void> {
     if (action !== "check") throw new Error("Browser command must be: browser check");
     const config = loadConfig();
     if (config.browserHost === "launcher") {
+      const { inspectLauncherBrowserHost, inspectLauncherBrowserHostLiveness } = await import("./launcher-browser-host");
       if (config.browserInteractionMode === "manual") {
         await inspectLauncherBrowserHostLiveness(config.browserHostDescriptorPath!);
         stdout.write("The launcher browser is reachable; ChatGPT DOM inspection is intentionally disabled in Zero Risk.\n");
@@ -611,14 +607,17 @@ async function main(): Promise<void> {
         stdout.write("Playwright can reach the authenticated ChatGPT surface embedded in the launcher.\n");
       }
     } else {
+      const { checkBrowserEngine } = await import("./browser-login");
       await checkBrowserEngine(config);
       stdout.write("Playwright can launch the configured Chrome executable.\n");
     }
   } else if (command === "serve") {
     assertNoArgs(args);
     const config = loadConfig();
+    const { startServer } = await import("./server");
     const server = startServer(config);
     try {
+      const { startCosDashboard } = await import("./cos/dashboard");
       startCosDashboard(async () => {
         const health = await fetch(`http://127.0.0.1:${server.port}/healthz`, { signal: AbortSignal.timeout(2000) });
         const value = await health.json() as Record<string, unknown>;
@@ -627,8 +626,13 @@ async function main(): Promise<void> {
     } catch { process.stderr.write("CoS dashboard could not start; the core runtime remains available.\n"); }
     stdout.write(`codex-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
-  } else if (command === "dev") await runDevCommand(args);
-  else if (command === "mcp") await runChatGptMcpMain(args);
+  } else if (command === "dev") {
+    const { runDevCommand } = await import("./dev-chat/cli");
+    await runDevCommand(args);
+  } else if (command === "mcp") {
+    const { runChatGptMcpMain } = await import("./adapters/chatgpt-web/mcp-main");
+    await runChatGptMcpMain(args);
+  }
   else if (command === "service") await serviceCommand(args);
   else if (command === "hook") {
     const action = args.shift();

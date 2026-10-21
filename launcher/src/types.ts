@@ -83,6 +83,7 @@ export interface BrowserState {
 
 export interface BrowserTabState {
   id: string;
+  memoryState?: "running" | "retained" | "suspended" | "failed" | "other";
   accountName?: string | null;
   isSignInTab?: boolean;
   traceId: string | null;
