@@ -1,4 +1,5 @@
 import type { CodexParsedRequest } from "../../types";
+import { ChatGptWebAdapterError } from "./adapter-error";
 import {
   CHATGPT_WEB_BACKEND_MODEL, resolveChatGptWebContextLimits,
   resolveChatGptWebTransportLimits, resolveChatGptWebStagingTokenBudget,
@@ -16,6 +17,18 @@ import {
 export const COMPACTION_STAGE_PAGE_CHAR_BUDGET = 320_000;
 const CHECKPOINT_JSON_RESERVE = 24_000;
 const CHECKPOINT_TOKEN_RESERVE = 8_000;
+
+/** A fresh direct handoff must fit without trimming any historical record. */
+export function directCompactionFits(
+  parsed: CodexParsedRequest, capabilities: ChatGptWebCapabilities, multipart: boolean,
+): boolean {
+  try {
+    return prepareCompactionStageTransport(parsed, capabilities, { reserveCheckpoint: false, multipart }) !== undefined;
+  } catch (error) {
+    if (error instanceof ChatGptWebAdapterError && error.code === "context_length_exceeded") return false;
+    throw error;
+  }
+}
 
 export function prepareCompactionStageTransport(
   stage: CodexParsedRequest,

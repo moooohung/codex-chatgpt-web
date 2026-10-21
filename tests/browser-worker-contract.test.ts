@@ -883,10 +883,35 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     "multipart-send-budget",
     "send",
     1_000,
-    stageSignal => worker.sendAttachedPrompt(page, {}, undefined, stageSignal),
+    stageSignal => worker.sendAttachedPrompt(page, { submittedText: "complete draft", initialTurnIdentities: [] }, undefined, stageSignal),
   )).resolves.toBe("user_turn");
   expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: 0 });
   expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("a full submission baseline sends once and waits beyond the retired nine-second recovery cutoff", async () => {
+  const worker: any = ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web",
+    baseUrl: `browser://late-send-proof-${Date.now()}`, chatgptWeb: { localToolsEnabled: false, storageStatePath: `/tmp/late-send-proof-${Date.now()}` } });
+  const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false, evaluateAll: async () => [] };
+  const page = { isClosed: () => false, locator: () => hidden };
+  let activations = 0, submitted = 0, presses = 0;
+  worker.activeComposer = async () => ({ locator: () => ({ locator: () => ({
+    waitFor: async () => {}, isEnabled: async () => true,
+    press: async () => { presses++; },
+  }) }) });
+  worker.waitForSubmissionAcceptedWithRecovery = async () => { await Bun.sleep(10_000); return "user_turn"; };
+  const evidence = await worker.runStage("delayed", "multipart_commit_send", 12_000, (signal: AbortSignal) =>
+    worker.sendAttachedPrompt(page, { submittedText: "complete draft", initialTurnIdentities: [] }, undefined, signal,
+      undefined, { onSendActivated: () => { activations++; }, onSubmitted: () => { submitted++; } }));
+  expect(evidence).toBe("user_turn"); expect([activations, presses, submitted]).toEqual([1, 1, 1]);
+}, 15_000);
+
+test("a multipart ACK stage timeout retains its exact cause rather than becoming an unconfirmed Send", async () => {
+  const worker: any = ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web", baseUrl: `browser://ack-timeout-${Date.now()}`, chatgptWeb: { storageStatePath: `/tmp/ack-timeout-${Date.now()}` } });
+  await expect(worker.runStage("ack-timeout", "multipart_stage_1_acknowledgement", 10,
+    (signal: AbortSignal) => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true }))))
+    .rejects.toMatchObject({ code: "multipart_acknowledgement_timeout", retryable: false,
+      message: expect.stringContaining("final task prompt was not sent") });
 });
 
 test.each(["low", "high"] as const)("GPT-6 Plus stages High but keeps the Instant exclusion (%s)", async reasoning => {

@@ -24,8 +24,8 @@ export function resolveChatGptUnusualActivityCooldownMinutes(
 /** Runs inside the ChatGPT page. Keep all selectors and matchers self-contained. */
 export function chatGptPageRequestRejectionUiState(alerts: Element[]): ChatGptPageRequestRejection | undefined {
   const prose = [
-    "[data-turn-key]",
-    "[data-turn-id-container]",
+    // New ChatGPT places product error cards inside the conversation group.
+    // Exclude actual message prose, not the entire owning turn container.
     "[data-user-message-bubble]",
     "[data-message-author-role]",
     ".markdown",

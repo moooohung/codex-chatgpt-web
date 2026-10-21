@@ -114,7 +114,6 @@ import {
   recordChatGptPageObservationSize,
 } from "./page-observation-budget";
 import { ChatGptDeliveryRecovery, chatGptMessageDeliveryTimeoutVisible } from "./delivery-recovery";
-import { createChatGptSubmissionAudit, recoverChatGptSubmission } from "./submission-recovery";
 import { CHATGPT_MODEL_SELECTION_SETTLE_MS, assertChatGptModelFamily, chatGptModelSelectionStageError, chatGptSelectionFamily, readClosedChatGptEffortLabel, selectChatGptModelFamily } from "./model-selection";
 import { clampChatGptEffort, EFFORT_RECHECK_MS, type ChatGptEffortSelection } from "./effort-ceiling";
 import { ChatGptBrowserRunQueue, MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
@@ -2717,8 +2716,11 @@ export class ChatGptBrowserWorker {
             return;
           }
           stageTimedOut = true;
-          controller.abort();
-          rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
+          const failure = new Error(`ChatGPT browser stage timed out: ${stage}`);
+          // Publish the same cause to the action and race. Aborting first with no
+          // reason used to replace the actual stage timeout with a bare "Aborted".
+          controller.abort(failure);
+          rejectTimeout(failure);
         };
         timer = setTimeout(fireOrRearm, timeoutMs);
       });
@@ -2736,6 +2738,12 @@ export class ChatGptBrowserWorker {
             surfacedError = settlementError;
           }
         }
+      }
+      if (stageTimedOut && /^multipart_stage_\d+_acknowledgement$/.test(stage)) {
+        surfacedError = new ChatGptWebAdapterError(
+          `ChatGPT browser stage timed out: ${stage}. The context part was sent, but its exact acknowledgement was not completed; the final task prompt was not sent.`,
+          { status: 502, errorType: "server_error", code: "multipart_acknowledgement_timeout", retryable: false, cause: surfacedError },
+        );
       }
       surfacedError = chatGptModelSelectionStageError(surfacedError, stage);
       console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)} suspendedMs=${Math.round(suspensionClock.suspendedMs() - suspendedAtStart)}: ${surfacedError instanceof Error ? surfacedError.message : String(surfacedError)}`);
@@ -4430,97 +4438,10 @@ export class ChatGptBrowserWorker {
     }
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
-    if (process.env.CODEX_WEB_GPT_SEND_RECOVERY !== "0" && baseline.submittedText !== undefined
-      && Array.isArray(baseline.initialTurnIdentities)) {
-      baseline.recoveryIdentity ??= globalThis.crypto.randomUUID();
-      const identity = `${submissionLifecycle?.traceId ?? "untracked"}:${baseline.recoveryIdentity}`;
-      // Both the observer and reconciliation own this same physical submission.
-      // A same-tab CDP reconnect invalidates the old Page and every locator on it.
-      // Preserve the baseline object/receipt key, and publish the rebound page before
-      // reconciliation reads it. The original input audit cannot prove non-dispatch
-      // on a replacement connection, so it never authorizes another Send there.
-      const binding: { page: Page; pending?: Promise<ChatGptSubmissionObservationRecovery> } = { page };
-      const recoverCurrentObservation: ChatGptObservationRecovery | undefined = recoverObservation
-        ? async (...args) => {
-          const pending = recoverObservation(...args).then(recovered => {
-            args[3]?.throwIfAborted();
-            Object.assign(baseline, recovered.baseline);
-            binding.page = recovered.page;
-            return { page: binding.page, baseline };
-          });
-          binding.pending = pending;
-          try { return await pending; }
-          finally { if (binding.pending === pending) binding.pending = undefined; }
-        }
-        : undefined;
-      let audit: Awaited<ReturnType<typeof createChatGptSubmissionAudit>> | undefined;
-      let disposed = false;
-      try {
-        return await recoverChatGptSubmission<ChatGptSubmissionEvidence>({
-          key: baseline, identity, signal: abortSignal,
-          prepare: async signal => {
-            const pending = createChatGptSubmissionAudit(page, composer, identity);
-            void pending.then(value => { if (disposed) value.dispose(); }, () => {});
-            audit = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(pending, signal), chatGptPageObservationTimeoutMs(page));
-          },
-          dispose: () => { disposed = true; audit?.dispose(); },
-          activate: async signal => {
-            signal.throwIfAborted();
-            await submissionLifecycle?.onSendActivated?.();
-            signal.throwIfAborted();
-            await sendButton.press("Enter", { noWaitAfter: true, signal, timeout: 0 });
-          },
-          observe: signal => this.waitForSubmissionAcceptedWithRecovery(
-            binding.page, baseline, signal, externalProgress, initialToolBatchRevision, completionTracker, recoverCurrentObservation,
-            submissionLifecycle?.traceId,
-          ),
-          reconcile: async signal => {
-            if (binding.pending) await withBrowserTurnAbort(binding.pending, signal);
-            // A reconnect can begin while an earlier read is still in flight. Only
-            // restart that read after this submission's recovery published a page.
-            for (let attempt = 0; ; attempt++) {
-              const currentPage = binding.page;
-              try {
-                if ((externalProgress?.snapshot().lastToolBatchRevision ?? 0) > initialToolBatchRevision) {
-                  await this.observeSubmissionToolBoundary(currentPage, baseline, signal, externalProgress, completionTracker);
-                  return { state: "accepted", evidence: "mcp_tool_call" as ChatGptSubmissionEvidence };
-                }
-                const evidence = await this.currentSubmissionEvidence(currentPage, baseline, signal);
-                if (evidence) return { state: "accepted", evidence };
-                const dialogs = currentPage.locator('[role="dialog"], [data-testid="tool-approval-card"]').filter({ visible: true });
-                if (await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(dialogs.count(), signal), chatGptPageObservationTimeoutMs(currentPage)) > 0) {
-                  return { state: "approval_pending" };
-                }
-                const state = await this.submissionDomState(currentPage, undefined, signal);
-                const unchanged = state.turnIdentities.length === baseline.initialTurnIdentities.length
-                  && state.turnIdentities.every(value => baseline.initialTurnIdentities.includes(value))
-                  && state.visibleStopButtonCount === 0 && !baseline.acceptedUserIdentity;
-                const noInput = unchanged && currentPage === page
-                  && await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(audit!.notDispatched(), signal), chatGptPageObservationTimeoutMs(currentPage));
-                signal.throwIfAborted();
-                return { state: noInput ? "not_dispatched" : "ambiguous" };
-              } catch (error) {
-                signal.throwIfAborted();
-                // Boundary/ACK failures retain their cached failure and must revoke
-                // the turn. A reconnect is only a reason to repeat a stale DOM read.
-                if (error instanceof ChatGptWebAdapterError || attempt >= 1
-                  || !binding.pending && binding.page === currentPage) throw error;
-                if (binding.pending) await withBrowserTurnAbort(binding.pending, signal);
-              }
-            }
-          },
-          onAccepted: () => submissionLifecycle?.onSubmitted?.(),
-          onEvent: event => console.info(`[chatgpt-web] submission_recovery ${JSON.stringify(event)}`),
-        });
-      } catch (error) {
-        if (error instanceof Error && error.name === "ChatGptSubmissionRecoveryExhausted") {
-          throw new ChatGptWebAdapterError(error.message, {
-            status: 502, errorType: "server_error", code: "chatgpt_submission_recovery_exhausted", retryable: false, cause: error,
-          });
-        }
-        throw error;
-      }
-    }
+    // Use upstream's one physical activation and the owning Send stage budget.
+    // The retired local audit treated benign DOM/draft normalization as ambiguous
+    // even before the first keypress, and stopped acceptance after only 3 x 3s.
+    // Observe concurrently until the stage expires; never replay an ambiguous Send.
     await submissionLifecycle?.onSendActivated?.();
     const sendAbort = new AbortController();
     const sendSignal = abortSignal

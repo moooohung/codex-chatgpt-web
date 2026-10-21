@@ -1465,7 +1465,7 @@ test.each([[false, undefined], [true, undefined], [true, false], [true, true]] a
     expect(turn.compaction).toBeTrue();
     const prepared = await turn.prepare();
     const contextText = prepared.multipart?.parts.join("\n") ?? prepared.text;
-    if (experimentalBiggerContext && experimentalStagedCompaction) {
+    if (experimentalBiggerContext) {
       expect(prepared.trimmedCompactionMessages).toBeUndefined();
       expect(contextText).toContain("codex_compaction_stage_json");
       for (const text of compiledChatGptWebMessages(prepared)) expect(Buffer.byteLength(JSON.stringify(text))).toBeLessThan(110_000);
@@ -1489,7 +1489,7 @@ test.each([[false, undefined], [true, undefined], [true, false], [true, true]] a
     );
     expect(browserStarts).toBeGreaterThanOrEqual(1);
     expect(browserStarts).toBeLessThanOrEqual(planLargeContextCompaction(compact)?.fragments.length ?? 1);
-    if (!experimentalStagedCompaction) expect(browserStarts).toBe(1);
+    if (!experimentalBiggerContext) expect(browserStarts).toBe(1);
     expect(events.some(event => event.type === "text_delta"
       && event.text.includes("Fallback checkpoint from canonical Codex context"))).toBeTrue();
     expect(events.some(event => event.type === "text_delta"
@@ -1502,7 +1502,7 @@ test.each([[false, undefined], [true, undefined], [true, false], [true, true]] a
   }
 }, 30_000);
 
-test("large Plus compaction bypasses an oversized retained page and stages every historical record", async () => {
+test.each([false, true])("large Plus compaction preserves all history when direct transport is oversized (staged=%s)", async experimentalStagedCompaction => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-large-fallback-compact-"));
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web", baseUrl: `browser://large-fallback-${root}`,
@@ -1511,7 +1511,7 @@ test("large Plus compaction bypasses an oversized retained page and stages every
       brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true,
       solAvailable: true, extraHighAvailable: false, proAvailable: false,
       experimentalBiggerContext: true, experimentalSkillAttachments: true,
-      experimentalStagedCompaction: true,
+      experimentalStagedCompaction,
     },
   };
   const compact = request(true);

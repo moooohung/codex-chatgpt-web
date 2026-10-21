@@ -74,10 +74,11 @@ test("an unrelated page alert does not trigger the rejection path", async () => 
 test("page-level classification excludes transcript, hidden and unrelated alerts", () => {
   const { createWindow } = require("@mixmark-io/domino");
   const window = createWindow(`<body>
-    <div class="markdown"><aside id="quoted" role="alert">${UNUSUAL_ACTIVITY}<button>Retry</button></aside></div>
+    <div data-turn-key="old"><div class="markdown"><aside id="quoted" role="alert">${UNUSUAL_ACTIVITY}<button>Retry</button></aside></div></div>
+    <div data-turn-key="user"><div data-user-message-bubble><aside role="alert">${UNUSUAL_ACTIVITY}<button>Retry</button></aside></div></div>
     <aside id="hidden" role="alert" hidden>${UNUSUAL_ACTIVITY}<button>Retry</button></aside>
     <aside id="unrelated" role="alert">Projects could not be loaded<button>Retry</button></aside>
-    <aside id="rejected" role="alert">Something went wrong. Please try again.<button>Retry</button></aside>
+    <div data-turn-key="current"><aside id="rejected" role="alert">Something went wrong. Please try again.<button>Retry</button></aside></div>
   </body>`);
   const originalConnected = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "isConnected");
   const originalBounds = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "getBoundingClientRect");
@@ -102,7 +103,7 @@ test("page-level classification excludes transcript, hidden and unrelated alerts
     const unusual = window.document.createElement("aside");
     unusual.setAttribute("role", "alert");
     unusual.textContent = UNUSUAL_ACTIVITY;
-    window.document.body.appendChild(unusual);
+    window.document.querySelector('[data-turn-key="current"]').appendChild(unusual);
     expect(chatGptPageRequestRejectionUiState(
       Array.from(window.document.querySelectorAll('[role="alert"]')) as unknown as Element[],
     )).toEqual({ kind: "unusual_activity", text: UNUSUAL_ACTIVITY });

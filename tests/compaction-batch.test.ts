@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { planLargeContextCompaction, runLargeContextCompaction, COMPACTION_BATCH_FRAGMENTS } from "../src/adapters/chatgpt-web/large-context-compaction";
-import { prepareCompactionStageTransport, COMPACTION_STAGE_PAGE_CHAR_BUDGET } from "../src/adapters/chatgpt-web/compaction-stage-transport";
+import { directCompactionFits, prepareCompactionStageTransport, COMPACTION_STAGE_PAGE_CHAR_BUDGET } from "../src/adapters/chatgpt-web/compaction-stage-transport";
 import { compiledChatGptWebMessages, estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
 import { estimateTokens } from "../src/lib/token-estimate";
@@ -18,6 +18,20 @@ function request(chars: number): CodexParsedRequest {
     ] }, _rawBody: { input: [{ type: "message", role: "user", content: "Later correction: preserve the original model and evidence.", internal_chat_message_metadata_passthrough: { turn_id: "source_turn" } }],
       client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "fixture_compaction_batch", turn_id: "compact_turn" }) } } };
 }
+
+test.each([true, false])("fresh direct compaction preflight detects oversized history without discarding data (Pro=%s)", proAvailable => {
+  const capabilities = { solAvailable: true, extraHighAvailable: true, proAvailable, localToolsEnabled: false };
+  const small = request(8_000);
+  const original = JSON.stringify(small);
+  expect(directCompactionFits(small, capabilities, true)).toBeTrue();
+  expect(JSON.stringify(small)).toBe(original);
+  for (const chars of [320_000, 1_000_000]) {
+    const large = request(chars), before = JSON.stringify(large);
+    expect(directCompactionFits(large, capabilities, true)).toBeFalse();
+    expect(directCompactionFits(large, capabilities, false)).toBeFalse();
+    expect(JSON.stringify(large)).toBe(before);
+  }
+}, 15_000);
 
 test.each([true, false])("batched %s account compaction preserves every compiled source byte, order and checkpoint with fewer summaries", async proAvailable => {
   const parsed = request(870_774), capabilities = { solAvailable: true, extraHighAvailable: true, proAvailable, localToolsEnabled: false };

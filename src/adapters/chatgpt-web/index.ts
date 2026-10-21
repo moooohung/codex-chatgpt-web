@@ -28,7 +28,7 @@ import type { ChatGptAccountPreparation } from "./account-context";
 import { resolveChatGptWebContextLimits, type ChatGptWebBackendModel } from "../../chatgpt-web-models";
 import { PreparedChatGptTurnStore } from "./prepared-turn";
 import { planLargeContextCompaction, runLargeContextCompaction } from "./large-context-compaction";
-import { prepareCompactionStageTransport } from "./compaction-stage-transport";
+import { directCompactionFits, prepareCompactionStageTransport } from "./compaction-stage-transport";
 import { compiledChatGptWebMessages } from "./input-tokens";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import { emitChatGptRoundEvent, isChatGptObserverAbort, chatGptRoundFailureEvidence } from "./round-observer";
@@ -1164,8 +1164,18 @@ export function createChatGptWebAdapter(
                   armHandoffDeadline();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
                   const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
-                  const largeCompaction = manualRequest || !stagedCompaction ? undefined : planLargeContextCompaction(parsed);
+                  let largeCompaction = manualRequest || !stagedCompaction ? undefined : planLargeContextCompaction(parsed);
                   const runFreshCompaction = async (reason: string): Promise<string> => {
+                    // Retained handoff and fitting fresh handoffs still follow upstream.
+                    // An oversized fresh input cannot be repaired by telling Codex to
+                    // compact again: it is already compacting. Choose bounded, lossless
+                    // source stages before opening a browser, even with the experiment off.
+                    if (!manualRequest && !largeCompaction && !directCompactionFits(
+                      parsed, turnCapabilities, experimentalBiggerContext === true,
+                    )) {
+                      largeCompaction = planLargeContextCompaction(parsed);
+                      if (largeCompaction) reason = "direct_compaction_budget_exceeded";
+                    }
                     handoffPhase = "fresh_compaction";
                     console.info(`[chatgpt-web] compaction_strategy ${JSON.stringify({ traceId: compactionTraceId, strategy: largeCompaction ? "staged" : "upstream_direct", reason })}`);
                     if (freshConversationPerTurn) console.info("[chatgpt-web] compaction uses configured fresh conversation mode");
