@@ -14,6 +14,9 @@ mode, lifecycle state, and matching persisted configuration. It atomically and
 durably commits only the preference, preserving unrelated keys and a UTF-8 BOM,
 before updating its live configuration. Already admitted response and compact
 requests keep their configuration snapshots. New adapters receive the new value.
+The mutable approval preference is excluded from execution identity; reconnects,
+tool-result requests and compaction sharing retain the existing physical runtime
+and its original policy instead of starting duplicate browser work.
 The launcher verifies the acknowledgement and disk readback. It does not drain,
 rewrite the Codex route, restart the daemon, or restart tunnels for this setting.
 DEV keeps its isolated setup path. Authentication, tool ACK, Codex permissions,

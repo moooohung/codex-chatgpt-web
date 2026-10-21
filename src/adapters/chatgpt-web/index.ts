@@ -223,9 +223,12 @@ function safeManualTerminalError(status: "cancelled" | "failed"): ChatGptWebAdap
 }
 
 export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): string {
+  // This live next-turn policy must not change an existing native turn's identity.
+  // The registry retains that turn's runtime (and its original approval policy).
+  const { autoApproveToolCalls: _approvalPolicy, ...identity } = provider.chatgptWeb ?? {};
   return createHash("sha256").update(JSON.stringify({
     baseUrl: provider.baseUrl,
-    chatgptWeb: provider.chatgptWeb ?? {},
+    chatgptWeb: identity,
   })).digest("hex");
 }
 
