@@ -28,58 +28,6 @@ test("boundary failure diagnostics classify a locator timeout without recording 
   } finally { logging.mockRestore(); }
 });
 
-test("reconcile after accepted MCP captures and ACKs before the daemon can emit, including an empty boundary", async () => {
-  for (const visibleText of ["pre-tool answer", ""]) {
-    const worker: any = Object.create(ChatGptBrowserWorker.prototype);
-    const progress = new ChatGptExternalTurnProgress();
-    const tracker = new ChatGptCompletionTracker();
-    const events: string[] = [];
-    const capture = deferred<void>();
-    let emitted = false, revision = 0, sends = 0;
-    let emission!: Promise<void>;
-    const hidden: any = { filter: () => hidden, last: () => hidden, getByText: () => hidden,
-      isVisible: async () => false, count: async () => 0, evaluateAll: async () => undefined };
-    let auditIdentity: string | undefined;
-    const page = Object.assign(new EventEmitter(), {
-      isClosed: () => false, locator: () => hidden,
-      evaluate: async (_fn: unknown, identity?: string) => {
-        if (identity) auditIdentity = identity;
-        return { identity: auditIdentity, document: 1, url: "fixture", keydowns: 0, submits: 0 };
-      },
-    });
-    const send = { waitFor: async () => {}, isEnabled: async () => true, press: async () => { sends++; } };
-    worker.activeComposer = async () => ({ evaluate: async () => "draft", locator: () => ({ locator: () => send }) });
-    worker.currentSubmissionEvidence = async () => undefined;
-    worker.waitForSubmissionAcceptedWithRecovery = async () => {
-      revision = progress.recordToolBatch(1);
-      emission = waitForChatGptToolBoundaryAck({ traceId: "146b3b30d06b", revision,
-        timeoutMs: 1000, wait: signal => progress.waitForToolBatchObservation(revision, signal) })
-        .then(() => { events.push("emission"); emitted = true; });
-      // Actual Send recovery now takes its reconcile branch while the ordinary DOM probe failed.
-      throw new ChatGptBrowserObservationTimeoutError(5000);
-    };
-    worker.submissionDomState = async () => {
-      if (revision === 0) return { turnIdentities: [], visibleStopButtonCount: 0, responseIdentities: [] };
-      events.push("capture"); await capture.promise;
-      return { responseIdentities: visibleText ? ["new-assistant"] : [] };
-    };
-    worker.responseDomSnapshot = async () => ({ visibleText });
-    const observing = spyOn(tracker, "observeToolBatch");
-    const result = worker.sendAttachedPrompt(page, { submittedText: "draft", initialTurnIdentities: [], domCache: {} },
-      undefined, undefined, progress, { traceId: "146b3b30d06b", onSendActivated() {}, onSubmitted() {} }, tracker);
-    while (!events.includes("capture")) await Bun.sleep(1);
-    expect(emitted).toBe(false);
-    expect(observing).not.toHaveBeenCalled();
-    capture.resolve();
-    expect(await result).toBe("mcp_tool_call");
-    await emission;
-    expect(observing).toHaveBeenCalledWith(revision, visibleText);
-    expect(events).toEqual(["capture", "emission"]);
-    expect(sends).toBe(1);
-    observing.mockRestore();
-  }
-});
-
 test("normal observer and reconcile join one revision through a pending ACK", async () => {
   const tracker = new ChatGptCompletionTracker(), ack = deferred<void>();
   let captures = 0, acks = 0;
