@@ -1,0 +1,55 @@
+{
+  "at": "2026-10-21T10:01:54.026Z",
+  "scope": "isolated synthetic Chromium; DOM projection work only, not live provider memory",
+  "liveSends": 0,
+  "results": [
+    {
+      "name": "baseline",
+      "chars": 320000,
+      "iterations": 100,
+      "elapsedMs": 71.80000000074506,
+      "textReads": 900,
+      "textCharsRead": 64004800,
+      "attributeWrites": 2300,
+      "bodyTextChars": 320048,
+      "deferredHistoryNodes": 6,
+      "deferredInputNodes": 8
+    },
+    {
+      "name": "candidate",
+      "chars": 320000,
+      "iterations": 100,
+      "elapsedMs": 0.10000000149011612,
+      "textReads": 0,
+      "textCharsRead": 0,
+      "attributeWrites": 0,
+      "bodyTextChars": 320048,
+      "deferredHistoryNodes": 6,
+      "deferredInputNodes": 8
+    },
+    {
+      "name": "baseline",
+      "chars": 1000000,
+      "iterations": 100,
+      "elapsedMs": 138.80000000074506,
+      "textReads": 900,
+      "textCharsRead": 200004800,
+      "attributeWrites": 2300,
+      "bodyTextChars": 1000048,
+      "deferredHistoryNodes": 6,
+      "deferredInputNodes": 8
+    },
+    {
+      "name": "candidate",
+      "chars": 1000000,
+      "iterations": 100,
+      "elapsedMs": 0.29999999701976776,
+      "textReads": 0,
+      "textCharsRead": 0,
+      "attributeWrites": 0,
+      "bodyTextChars": 1000048,
+      "deferredHistoryNodes": 6,
+      "deferredInputNodes": 8
+    }
+  ]
+}

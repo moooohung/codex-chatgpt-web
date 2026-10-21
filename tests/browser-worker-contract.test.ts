@@ -125,6 +125,7 @@ test("submission DOM tracks logical identities and retains virtualized history i
     MutationObserver: class {
       constructor(callback: () => void) { observers.push(callback); }
       observe() {}
+      takeRecords() { return []; }
     },
   });
   const page = {
@@ -168,7 +169,7 @@ test("a current submission error without an assistant fails immediately and igno
   const context = createContext({
     document: window.document, performance: { timeOrigin: 1, now: () => 0 },
     getComputedStyle: () => ({ visibility: "visible" }),
-    MutationObserver: class { constructor(notify: () => void) { notifications.push(notify); } observe() {} },
+    MutationObserver: class { constructor(notify: () => void) { notifications.push(notify); } observe() {} takeRecords() { return []; } },
   });
   const hiddenLocator = { filter() { return this; }, last() { return this; }, isVisible: async () => false, evaluateAll: async () => [] };
   const page = { isClosed: () => false, locator: () => hiddenLocator,
@@ -243,6 +244,7 @@ test("power turn identity separates roles and keeps virtualized groups in the su
         expect(options.attributeFilter).toContain("data-turn-key");
         expect(options.attributeFilter).toContain("data-conversation-role");
       }
+      takeRecords() { return []; }
     },
   });
   const page = {

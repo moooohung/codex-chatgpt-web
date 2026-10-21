@@ -64,6 +64,7 @@ const TURN_HEARTBEAT_SWEEP_MS = 5_000;
 const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
+const HIDDEN_FAILED_TURN_TAB_TTL_MS = 60_000;
 const TURN_MEMORY_PROBE_TIMEOUT_MS = 1_000;
 
 function rendererPidFor(contents) {
@@ -1050,17 +1051,14 @@ class BrowserHost {
     const assignedPartition = assignedAccount
       ? this.accountPaths.partition(assignedAccount)
       : this.partition;
-    try {
-      const partSession = session.fromPartition(assignedPartition);
-      await this.configureLocalePreferences(partSession);
-    } catch {}
     const view = new WebContentsView({
       webPreferences: {
         partition: assignedPartition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
-        spellcheck: true,
+        // This editor receives large machine-generated prompts, not human prose.
+        spellcheck: false,
         backgroundThrottling: false,
       },
     });
@@ -1096,17 +1094,33 @@ class BrowserHost {
       recycleOnResume: false,
       retainedUrl: null,
     };
+    // Reserve the ordinal synchronously, before locale setup can yield. Otherwise a
+    // burst of starts can all pass the capacity check and create the same ordinal.
     this.turnTabs.set(id, tab);
-    this.syncPowerSaveBlocker();
-    this.window.contentView.addChildView(view);
-    this.presentTurnView(tab, false);
-    view.webContents.setZoomFactor(this.state.zoomFactor);
-    this.bindShellZoomShortcuts(view.webContents);
-    this.bindTurnContents(tab);
-    await this.initializeTurnTab(tab, signal);
-    try { this.commitAccountBinding(conversationKey, tab.accountName); }
-    catch (error) { this.removeTurnTab(tab, false); throw error; }
-    return tab;
+    try {
+      this.syncPowerSaveBlocker();
+      this.window.contentView.addChildView(view);
+      this.presentTurnView(tab, false);
+      view.webContents.setZoomFactor(this.state.zoomFactor);
+      this.bindShellZoomShortcuts(view.webContents);
+      this.bindTurnContents(tab);
+      try {
+        const partSession = session.fromPartition(assignedPartition);
+        await waitForBrowserMemoryTransition(this.configureLocalePreferences(partSession), signal);
+      } catch {
+        // Locale preferences remain best-effort; cancellation must not be swallowed.
+        signal?.throwIfAborted();
+      }
+      signal?.throwIfAborted();
+      await this.initializeTurnTab(tab, signal);
+      this.commitAccountBinding(conversationKey, tab.accountName);
+      return tab;
+    } catch (error) {
+      // WebContentsView removal alone does not destroy its renderer. Release the
+      // exact pending view even if setup failed before initializeTurnTab ran.
+      if (this.turnTabs.get(id) === tab) this.removeTurnTab(tab, false);
+      throw error;
+    }
   }
 
   async initializeTurnTab(tab, signal) {
@@ -1243,7 +1257,7 @@ class BrowserHost {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
-        spellcheck: true,
+        spellcheck: false,
         backgroundThrottling: false,
       },
     });
@@ -2425,8 +2439,15 @@ class BrowserHost {
     for (const tab of [...this.turnTabs.values()]) {
       if (tab.memoryTransition) continue;
       if (tab.failedAt !== undefined) {
-        if (now - tab.failedAt < RETAINED_TURN_TAB_TTL_MS) continue;
-        this.logger.info("browser.failed_tab_expired", { tabId: tab.id, traceId: tab.traceId });
+        // Keep the upstream error-inspection page while the user is viewing it,
+        // but do not pin a failed megabyte-sized renderer for half an hour in
+        // the background. This is terminal ownership, never an active request.
+        const inspecting = this.selectedTabId === tab.id && this.visible && this.surfaceActive
+          && this.window?.isVisible?.() && !this.window.isMinimized?.();
+        const ttl = inspecting ? RETAINED_TURN_TAB_TTL_MS : HIDDEN_FAILED_TURN_TAB_TTL_MS;
+        if (now - tab.failedAt < ttl) continue;
+        this.logger.info("browser.failed_tab_expired", { tabId: tab.id, traceId: tab.traceId,
+          ageMs: now - tab.failedAt, inspecting: inspecting === true });
         this.removeTurnTab(tab, false);
         continue;
       }

@@ -4,6 +4,40 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
   // stall its read before the small assistant answer is even inspected. Acceptance,
   // failure alerts and completion continue to use the complete submission projection.
   const boundary = options.purpose === "tool_boundary";
+  type ProjectionMetrics = { key: string; budgetKey: string; bodyTextChars: number;
+    deferredHistoryNodes: number; deferredInputNodes: number; reducedMotionNodes: number };
+  type ObserverState = { id: string; revision: number; observer: MutationObserver; metrics?: ProjectionMetrics };
+  const scope = globalThis as typeof globalThis & {
+    __CODEX_WEB_GPT_TURN_OBSERVER__?: ObserverState;
+  };
+  const observerState = scope.__CODEX_WEB_GPT_TURN_OBSERVER__ ??= (() => {
+    const state: ObserverState = {
+      id: `${performance.timeOrigin}:${Math.random().toString(36).slice(2)}`,
+      revision: 0,
+      observer: undefined as unknown as MutationObserver,
+    };
+    state.observer = new MutationObserver(() => { state.revision += 1; });
+    state.observer.observe(document.documentElement, {
+      subtree: true, childList: true, characterData: true, attributes: true,
+      attributeFilter: options.attributeFilter,
+    });
+    return state;
+  })();
+  // An evaluation can run before the mutation callback. Never return a cached
+  // acceptance/identity snapshot while a relevant DOM mutation is queued.
+  if (observerState.observer.takeRecords().length > 0) observerState.revision += 1;
+  const observerKey = `${observerState.id}:${observerState.revision}`;
+  const budgetKey = JSON.stringify([options.renderBudget?.history !== false,
+    options.renderBudget?.multipart !== false, options.renderBudget?.motion !== false,
+    options.renderBudget?.sidebar !== false]);
+  const metrics = observerState.metrics;
+  // Check the revision before walking or serializing a megabyte-sized transcript.
+  // Cache only numbers, never DOM nodes or copied message/composer text.
+  if (!boundary && options.knownKey === observerKey && metrics?.key === observerKey
+    && metrics.budgetKey === budgetKey) {
+    const { budgetKey: _budgetKey, ...cached } = metrics;
+    return { ...cached, projectionElapsedMs: performance.now() - projectionStarted };
+  }
   // Preserve every DOM identity and text node. Only older offscreen layout can be skipped.
   // Keep the latest user/assistant pair fully rendered for acceptance and tool boundaries.
   const renderRoots = (boundary ? [] : [...document.querySelectorAll('[data-turn-key], [data-turn-id-container]')])
@@ -33,7 +67,9 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
       } else if (element.hasAttribute("data-codex-history-render-budget")) element.removeAttribute("data-codex-history-render-budget");
       // The streaming answer can use animation completion to reveal its controls.
       // Restrict reduced motion to settled history and submitted user content.
-      if (motion && index < renderRoots.length - 2) element.setAttribute("data-codex-turn-motion", "reduced");
+      if (motion && index < renderRoots.length - 2) {
+        if (element.getAttribute("data-codex-turn-motion") !== "reduced") element.setAttribute("data-codex-turn-motion", "reduced");
+      }
       else element.removeAttribute("data-codex-turn-motion");
     });
     const inputSelector = '[data-user-message-bubble], [data-message-author-role="user"]';
@@ -41,42 +77,25 @@ export function chatGptSubmissionDomProjection(options: { userTurnSelector: stri
     for (const input of inputs) {
       if (multipart && (input.textContent?.length ?? 0) >= 32_768
         && !input.querySelector('textarea,input,[contenteditable="true"]')) {
-        input.setAttribute("data-codex-input-render-budget", "auto"); deferredInputNodes++;
+        if (input.getAttribute("data-codex-input-render-budget") !== "auto") input.setAttribute("data-codex-input-render-budget", "auto");
+        deferredInputNodes++;
       } else input.removeAttribute("data-codex-input-render-budget");
-      if (motion) input.setAttribute("data-codex-turn-motion", "reduced");
+      if (motion) {
+        if (input.getAttribute("data-codex-turn-motion") !== "reduced") input.setAttribute("data-codex-turn-motion", "reduced");
+      }
       else input.removeAttribute("data-codex-turn-motion");
     }
     reducedMotionNodes = document.querySelectorAll('[data-codex-turn-motion="reduced"]').length;
-    if (sidebar) document.documentElement.setAttribute("data-codex-sidebar-budget", "reduced");
+    if (sidebar) {
+      if (document.documentElement.getAttribute("data-codex-sidebar-budget") !== "reduced") document.documentElement.setAttribute("data-codex-sidebar-budget", "reduced");
+    }
     else document.documentElement.removeAttribute("data-codex-sidebar-budget");
   }
   // A boundary read must not serialize the full transcript/composer just to
   // refresh a size hint. Ordinary diagnostics/submission reads keep that metric.
   const bodyTextChars = boundary ? undefined : document.body?.textContent?.length ?? 0;
-  type ObserverState = { id: string; revision: number; observer: MutationObserver };
-  const scope = globalThis as typeof globalThis & {
-    __CODEX_WEB_GPT_TURN_OBSERVER__?: ObserverState;
-  };
-  const observerState = scope.__CODEX_WEB_GPT_TURN_OBSERVER__ ??= (() => {
-    const state: ObserverState = {
-      id: `${performance.timeOrigin}:${Math.random().toString(36).slice(2)}`,
-      revision: 0,
-      observer: undefined as unknown as MutationObserver,
-    };
-    state.observer = new MutationObserver(() => {
-      state.revision += 1;
-    });
-    state.observer.observe(document.documentElement, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: options.attributeFilter,
-    });
-    return state;
-  })();
-  const observerKey = `${observerState.id}:${observerState.revision}`;
-  if (!boundary && options.knownKey === observerKey) return { key: observerKey, bodyTextChars, deferredHistoryNodes, deferredInputNodes, reducedMotionNodes, projectionElapsedMs: performance.now() - projectionStarted };
+  if (!boundary) observerState.metrics = { key: observerKey, budgetKey, bodyTextChars: bodyTextChars!,
+    deferredHistoryNodes, deferredInputNodes, reducedMotionNodes };
   const identities = (elements: Element[], attribute: string): string[] => {
     const values = elements.map(element => element.getAttribute(attribute));
     if (values.some(value => typeof value !== "string" || value.trim().length === 0)) {

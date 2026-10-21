@@ -3761,8 +3761,8 @@ function failedAutomaticTurnFixture() {
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]), userCancelledTurnOwners: new Map(), closedTurnOwners: new Map(),
     readAccountContext: readFakeAccountContext,
-    selectedTabId: tab.id, manualOperation: null,
-    window: { contentView: { removeChildView() {} } },
+    selectedTabId: tab.id, manualOperation: null, visible: true, surfaceActive: true,
+    window: { isVisible: () => true, isMinimized: () => false, contentView: { removeChildView() {} } },
     syncViewVisibility() {}, presentTurnView() {}, writeDescriptor() {}, publishState() {}, snapshot: () => ({ tabs: [] }),
     hide() { throw new Error("do not hide the failed page the user is inspecting"); },
     logger: { info() {} },
@@ -3824,6 +3824,28 @@ test("failed pages cannot supply retained history and a same-trace retry gets a 
   assert.deepEqual(closed, [tab.id]);
   assert.equal([...fixture.turnTabs.values()].filter(item => item.traceId === tab.traceId).length, 1);
 });
+
+for (const reason of ["unselected", "hidden", "inactive surface", "hidden window", "minimized window"]) {
+  test(`failed renderer expires after one minute when ${reason}, without closing active work`, async () => {
+    const { fixture, tab, closed } = failedAutomaticTurnFixture();
+    await fixture.endTurn(tab.traceId, tab.helperPid, "failed", false);
+    const active = { id: "protected-active", traceId: "protected", status: "running", lastHeartbeatAt: tab.failedAt };
+    fixture.turnTabs.set(active.id, active);
+    if (reason === "unselected") fixture.selectedTabId = active.id;
+    if (reason === "hidden") fixture.visible = false;
+    if (reason === "inactive surface") fixture.surfaceActive = false;
+    if (reason === "hidden window") fixture.window.isVisible = () => false;
+    if (reason === "minimized window") fixture.window.isMinimized = () => true;
+    fixture.lastTurnSweepAt = tab.failedAt + 60_000 - 2;
+    await fixture.reapExpiredTurnTabs(tab.failedAt + 60_000 - 1);
+    assert.equal(fixture.turnTabs.get(tab.id), tab, "retain the short diagnostic inspection window");
+    active.lastHeartbeatAt = tab.failedAt + 60_000;
+    await fixture.reapExpiredTurnTabs(tab.failedAt + 60_000);
+    assert.deepEqual(closed, [tab.id]);
+    assert.equal(fixture.turnTabs.get(active.id), active);
+    assert.equal(active.status, "running");
+  });
+}
 
 test("failed pages free capacity before reusable conversations without evicting active error states", async () => {
   const { fixture, tab, closed } = failedAutomaticTurnFixture();
