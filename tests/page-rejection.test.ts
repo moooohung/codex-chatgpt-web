@@ -136,6 +136,9 @@ test("unusual activity cooldown configuration is bounded and defaults to 3 minut
 test("provider-specified waits are floors and remain distinct from a local estimate", async () => {
   expect(unusualActivityProviderWaitMs("Please try again in 30 minutes.")).toBe(30 * 60_000);
   expect(unusualActivityProviderWaitMs("Please wait for 2 hours.")).toBe(120 * 60_000);
+  expect(unusualActivityProviderWaitMs("Please retry after 48 hours.")).toBe(48 * 60 * 60_000);
+  expect(unusualActivityProviderWaitMs("Please wait for 2 days.")).toBe(48 * 60 * 60_000);
+  expect(() => unusualActivityProviderWaitMs("Please wait for 999999999999999999 days.")).toThrow("unsupported retry time");
   expect(unusualActivityProviderWaitMs("10분 후 다시 시도하세요.")).toBe(10 * 60_000);
   expect(unusualActivityProviderWaitMs("Please try again later.")).toBeUndefined();
   await expect(throwIfChatGptPageRequestRejected(pageWithRejection({

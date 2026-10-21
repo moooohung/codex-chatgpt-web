@@ -70,11 +70,15 @@ export function chatGptPageRequestRejectionUiState(alerts: Element[]): ChatGptPa
 }
 
 export function unusualActivityProviderWaitMs(text: string): number | undefined {
-  const matches = [...text.matchAll(/(?:try again|retry|wait)\s+(?:(?:in|after|for)\s+)?(\d+)\s*(seconds?|minutes?|hours?)\b/gi)];
-  for (const match of text.matchAll(/(\d+)\s*(초|분|시간)\s*(?:후|뒤)/g)) matches.push(match);
+  const matches = [...text.matchAll(/(?:try again|retry|wait)\s+(?:(?:in|after|for)\s+)?(\d+)\s*(seconds?|minutes?|hours?|days?)\b/gi)];
+  for (const match of text.matchAll(/(\d+)\s*(초|분|시간|일)\s*(?:후|뒤)/g)) matches.push(match);
   const waits = matches.map(match => Number(match[1])
-    * (/^(?:hour|시간)/i.test(match[2]!) ? 3_600_000 : /^(?:minute|분)/i.test(match[2]!) ? 60_000 : 1000))
-    .filter(wait => Number.isSafeInteger(wait) && wait > 0 && wait <= 24 * 60 * 60_000);
+    * (/^(?:day|일)/i.test(match[2]!) ? 86_400_000
+      : /^(?:hour|시간)/i.test(match[2]!) ? 3_600_000 : /^(?:minute|분)/i.test(match[2]!) ? 60_000 : 1000));
+  if (waits.some(wait => !Number.isSafeInteger(wait) || wait <= 0 || Date.now() + wait > 8_640_000_000_000_000)) {
+    throw new ChatGptWebAdapterError("ChatGPT supplied an unsupported retry time. Check the page before resuming.",
+      { status: 429, errorType: "rate_limit_error", code: "chatgpt_retry_time_unavailable", retryable: false });
+  }
   return waits.length ? Math.max(...waits) : undefined;
 }
 
