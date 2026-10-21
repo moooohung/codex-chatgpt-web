@@ -1908,6 +1908,10 @@ test("a timed-out fresh compaction retains its owner until helper cleanup comple
     expect(events.filter(event => event.type === "error")).toHaveLength(2);
     expect(events.some(event => event.type === "done")).toBeFalse();
     await observe();
+    expect(browserStarts).toBe(1);
+    expect(events.at(-1)).toMatchObject({ type: "error", code: "compaction_cooldown", retryable: false });
+    mock.timers.tick(30_001);
+    await observe();
     expect(browserStarts).toBe(2);
     expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
   } finally {

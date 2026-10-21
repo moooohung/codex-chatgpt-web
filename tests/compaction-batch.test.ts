@@ -65,13 +65,15 @@ test.each([true, false])("batched %s account compaction preserves every compiled
   expect(canonicalizeCompactionHandoff(parsed, summary)).toContain('CODEX_LATEST_USER_PROMPT_JSON\n"Later correction: preserve the original model and evidence."');
 }, 30_000);
 
-test("disabled multipart retains one source fragment per summary", async () => {
+test("disabled multipart packs the largest fitting suffix without losing any source fragment", async () => {
   const parsed = request(120_000), plan = planLargeContextCompaction(parsed)!;
+  const observed: typeof plan.fragments = [];
   let calls = 0;
   await runLargeContextCompaction({ parsed, plan, signal: new AbortController().signal,
     prepare: (stage, options) => prepareCompactionStageTransport(stage, { solAvailable: true, extraHighAvailable: true, proAvailable: false, localToolsEnabled: false }, { ...options, multipart: false }),
-    run: async (_stage, prepared) => { expect(prepared!.multipart).toBeUndefined(); calls++; return "checkpoint"; } });
-  expect(calls).toBe(plan.fragments.length);
+    run: async (_stage, prepared) => { expect(prepared!.multipart).toBeUndefined(); observed.push(...compactionStageData(prepared!).fragments); calls++; return "checkpoint"; } });
+  expect(calls).toBeLessThanOrEqual(plan.fragments.length);
+  expect(observed).toEqual(plan.fragments);
 });
 
 test("preflight rejection or cancellation cannot submit a partial history", async () => {

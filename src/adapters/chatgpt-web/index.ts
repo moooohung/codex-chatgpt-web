@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
-import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
+import { defaultBrokerEndpoint, expandUserPath, getConfigDir, resolveBrokerEndpoint } from "../../config";
 import {
   admitLauncherAccount,
   cancelLauncherManualTurn,
@@ -27,7 +27,8 @@ import { runWithChatGptPlusPreparation, type ChatGptPlusPreparation } from "./ac
 import type { ChatGptAccountPreparation } from "./account-context";
 import { resolveChatGptWebContextLimits, type ChatGptWebBackendModel } from "../../chatgpt-web-models";
 import { PreparedChatGptTurnStore } from "./prepared-turn";
-import { planLargeContextCompaction, runLargeContextCompaction } from "./large-context-compaction";
+import { compactionSourceHash, planLargeContextCompaction, runLargeContextCompaction } from "./large-context-compaction";
+import { CompactionJournal, type CompactionProgress } from "./compaction-journal";
 import { directCompactionFits, prepareCompactionStageTransport } from "./compaction-stage-transport";
 import { compiledChatGptWebMessages } from "./input-tokens";
 import type { CompiledChatGptWebPrompt } from "./prompt";
@@ -416,6 +417,10 @@ export function createChatGptWebAdapter(
     && provider.chatgptWeb.browserHostDescriptorPath
       ? resolve(expandUserPath(provider.chatgptWeb.browserHostDescriptorPath))
       : undefined;
+  const compactionJournal = new CompactionJournal(resolve(
+    retainedLauncherDescriptor ? dirname(retainedLauncherDescriptor) : resolve(getConfigDir(), "runtime"), "compaction-checkpoints",
+    createHash("sha256").update(retainedLauncherDescriptor ?? "default").digest("hex").slice(0, 16),
+  ));
   const modeBeforeAccountLease = (input: CodexParsedRequest, capabilities: ChatGptWebCapabilities) =>
     resolveChatGptWebModelMode(input.modelId, input.options.reasoning,
       retainedLauncherDescriptor && !manualInteraction
@@ -1108,6 +1113,7 @@ export function createChatGptWebAdapter(
                     : {}),
                 },
                 async (operatorSignal, retainOwnershipUntil) => {
+                  const execute = async (resume: CompactionProgress | undefined, saveCheckpoint: (progress: CompactionProgress) => void): Promise<string> => {
                   const handoffTimeoutMs = Math.min(
                     timeoutMs ?? MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
                     MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
@@ -1164,7 +1170,7 @@ export function createChatGptWebAdapter(
                   armHandoffDeadline();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
                   const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
-                  let largeCompaction = manualRequest || !stagedCompaction ? undefined : planLargeContextCompaction(parsed);
+                  let largeCompaction = manualRequest || (!stagedCompaction && !resume) ? undefined : planLargeContextCompaction(parsed);
                   const runFreshCompaction = async (reason: string): Promise<string> => {
                     // Retained handoff and fitting fresh handoffs still follow upstream.
                     // An oversized fresh input cannot be repaired by telling Codex to
@@ -1203,11 +1209,18 @@ export function createChatGptWebAdapter(
                         fallbackRuntime.cancel(error instanceof Error ? error : new Error(String(error)));
                         // The shared owner retains physical settlement independently of this error.
                         // Neither a timeout nor operator cancellation can open a competing trace.
+                        // A no-submission account-budget failure may resize the next
+                        // batch, but only after this helper has physically released.
+                        if (error instanceof ChatGptWebAdapterError && error.code === "compaction_stage_too_large") {
+                          await withAbort(fallbackRuntime.physicalSettlement, operationSignal);
+                        }
                         throw error;
                       }
                     };
                     const rawSummary = largeCompaction ? await runLargeContextCompaction({
                       parsed, plan: largeCompaction, signal: operationSignal, run: runStage,
+                      resume, onCheckpoint: saveCheckpoint,
+                      onResume: event => console.info(`[chatgpt-web] compaction_resumed ${JSON.stringify({ traceId: compactionTraceId, sourceHash: largeCompaction!.sourceHash, ...event })}`),
                       prepare: (stage, options) => prepareCompactionStageTransport(stage, turnCapabilities, { ...options, multipart: experimentalBiggerContext === true }),
                       onPlan: event => console.info(`[chatgpt-web] compaction_plan ${JSON.stringify({ traceId: compactionTraceId,
                         nativeThreadId: compactionNativeIdentity.threadId, nativeTurnId: compactionNativeIdentity.turnId,
@@ -1359,6 +1372,10 @@ export function createChatGptWebAdapter(
                     stopSourceProgress?.();
                     if (handoffTimer) clearTimeout(handoffTimer);
                   }
+                  };
+                  return manualRequest ? execute(undefined, () => {}) : compactionJournal.run(
+                    chatGptThreadOwnershipKey(parsed), compactionSourceHash(parsed), operatorSignal, execute,
+                  );
                 },
               );
             }
@@ -1389,6 +1406,8 @@ export function createChatGptWebAdapter(
                 // Compaction retry remains an explicit operator decision even when its source
                 // failure was retryable; preserve the cause without opening a new retry loop.
                 retryable: false,
+                ...(upstreamError?.retryAt !== undefined ? { retryAt: upstreamError.retryAt } : {}),
+                ...(upstreamError?.retryAfterSeconds !== undefined ? { retryAfterSeconds: upstreamError.retryAfterSeconds } : {}),
               });
               return;
             }
