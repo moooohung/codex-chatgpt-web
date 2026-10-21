@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "playwright-core";
 import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
@@ -278,6 +278,44 @@ export async function selectLauncherPage(
   throw new Error("Launcher browser host did not expose its owned browser surface");
 }
 
+/**
+ * ChatGPT turn pages accumulate collectable garbage (multipart staging, streaming)
+ * that V8 does not reclaim while the page stays in the foreground. Tower measurement
+ * 2026-10-21: one collection took a page from 1,357 to 383 MB of JS heap, and all
+ * renderers' working sets fell 5.4 to 4.3 GB within 5 s. A collection pauses the page
+ * for about 0.1-0.4 s, so it runs at most once a minute and only above the threshold.
+ * CODEX_WEB_GPT_PAGE_GC_MB=0 disables it.
+ */
+export function launcherPageHeapReclaimPolicy(env: NodeJS.ProcessEnv = process.env): { thresholdBytes: number; intervalMs: number } {
+  const raw = env.CODEX_WEB_GPT_PAGE_GC_MB;
+  const parsed = raw === undefined || raw === "" ? 768 : Number(raw);
+  const mb = Number.isInteger(parsed) && parsed >= 0 && parsed <= 16_384 ? parsed : 768;
+  return { thresholdBytes: mb * 1024 * 1024, intervalMs: 60_000 };
+}
+
+export async function reclaimLauncherPageHeap(
+  session: Pick<CDPSession, "send">, thresholdBytes: number,
+): Promise<"collected" | "below_threshold"> {
+  const { usedSize } = await session.send("Runtime.getHeapUsage");
+  if (usedSize < thresholdBytes) return "below_threshold";
+  await session.send("HeapProfiler.collectGarbage");
+  return "collected";
+}
+
+function startLauncherPageHeapReclaim(browser: Browser, session: CDPSession): void {
+  const { thresholdBytes, intervalMs } = launcherPageHeapReclaimPolicy();
+  if (thresholdBytes <= 0) return;
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    // Best effort only: a detached session or closing page simply stops reclaiming.
+    void reclaimLauncherPageHeap(session, thresholdBytes).catch(() => clearInterval(timer)).finally(() => { running = false; });
+  }, intervalMs);
+  timer.unref?.();
+  browser.once("disconnected", () => clearInterval(timer));
+}
+
 export async function connectLauncherBrowserHost(
   descriptorPath: string,
   timeoutMs = 20_000,
@@ -317,6 +355,7 @@ export async function connectLauncherBrowserHost(
     const inputSession = await context.newCDPSession(page);
     await inputSession.send("Emulation.setFocusEmulationEnabled", { enabled: true });
     // The browser connection owns this session; disconnect releases the override.
+    startLauncherPageHeapReclaim(browser, inputSession);
     return { descriptor, browser, context, page };
   } catch (error) {
     await browser.close().catch(() => {});
