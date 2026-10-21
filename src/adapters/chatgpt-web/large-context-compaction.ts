@@ -159,8 +159,10 @@ export async function runLargeContextCompaction(options: {
       : Math.min(1, plan.fragments.length - fragmentsProcessed);
     let prepared: CompiledChatGptWebPrompt | undefined;
     for (; count > 0; count--) {
+      signal.throwIfAborted();
       const probe = stageRequest(plan.fragments.slice(fragmentsProcessed, fragmentsProcessed + count), [], 0, index, totalStages, checkpoint);
       prepared = options.prepare?.(probe, { reserveCheckpoint: false });
+      signal.throwIfAborted();
       if (!options.prepare || prepared) break;
     }
     if (!count && fragmentsProcessed < plan.fragments.length) throw stageBudgetError();
@@ -172,8 +174,8 @@ export async function runLargeContextCompaction(options: {
     const finalSource = fragmentsProcessed + fragments.length === plan.fragments.length && imagesProcessed + images.length === plan.images.length;
     const stage = stageRequest(fragments, images, imageOffset, index, totalStages, checkpoint, finalSource);
     prepared = options.prepare?.(stage, { reserveCheckpoint: false });
-    if (options.prepare && !prepared) throw stageBudgetError();
     signal.throwIfAborted();
+    if (options.prepare && !prepared) throw stageBudgetError();
     const started = Date.now();
     let answer: string;
     try { answer = (await options.run(stage, prepared)).trim(); }
