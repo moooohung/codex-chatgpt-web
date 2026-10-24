@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { planLargeContextCompaction, runLargeContextCompaction, splitCompactionSource, COMPACTION_CHUNK_JSON_BYTES } from "../src/adapters/chatgpt-web/large-context-compaction";
+import { planLargeContextCompaction, runLargeContextCompaction, splitCompactionSource, COMPACTION_CHUNK_JSON_BYTES, COMPACTION_CHECKPOINT_BYTES } from "../src/adapters/chatgpt-web/large-context-compaction";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { canonicalizeCompactionHandoff } from "../src/adapters/chatgpt-web/compaction-handoff";
 import type { CodexParsedRequest } from "../src/types";
@@ -74,7 +74,7 @@ test("historical images remain actual ordered attachments, and image-like tool a
 
 test("cancellation and oversized/empty summaries cannot advance or commit a partial checkpoint", async () => {
   const parsed = request(120000), plan = planLargeContextCompaction(parsed)!;
-  for (const answer of ["", "x".repeat(24001)]) {
+  for (const answer of ["", "x".repeat(COMPACTION_CHECKPOINT_BYTES + 1)]) {
     let calls = 0;
     await expect(runLargeContextCompaction({ parsed, plan, signal: new AbortController().signal, run: async () => { calls++; return answer; } })).rejects.toMatchObject({ retryable: false });
     expect(calls).toBe(1);

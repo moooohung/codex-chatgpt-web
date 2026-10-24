@@ -301,6 +301,11 @@ class BrowserTurnCancelledError extends Error {
   }
 }
 
+/** A page this tab replaced (renderer recycle); its late events no longer describe the tab. */
+function retiredTurnContents(tab, contents) {
+  return tab.retiredContents?.has(contents) === true;
+}
+
 function loadCommittedBrowserSurface(
   contents,
   url,
@@ -1307,6 +1312,11 @@ class BrowserHost {
       replacement.webContents.setZoomFactor(this.state.zoomFactor);
       this.bindShellZoomShortcuts(replacement.webContents);
       this.bindTurnContents(tab);
+      // The old page still carries this tab's destroyed/render-gone/load-failure listeners.
+      // Closing it is not an external close of the tab: retire it first, or those listeners
+      // remove the tab and close the replacement mid-restore (live 2026-10-24: every memory
+      // recycle lost the conversation and forced a full staged compaction).
+      (tab.retiredContents ??= new WeakSet()).add(previousView.webContents);
       try { this.window.contentView.removeChildView(previousView); } catch {}
       if (!previousView.webContents.isDestroyed()) previousView.webContents.close();
       tab.retainedTurnCount = 0;
@@ -1588,7 +1598,7 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
-      if (!mainFrame || errorCode === -3) return;
+      if (!mainFrame || errorCode === -3 || retiredTurnContents(tab, contents)) return;
       tab.url = url;
       tab.message = errorDescription;
       this.logger.error("browser.tab_navigation_failed", {
@@ -1601,6 +1611,7 @@ class BrowserHost {
       this.removeTurnTab(tab, true);
     });
     contents.on("render-process-gone", (_event, details) => {
+      if (retiredTurnContents(tab, contents)) return;
       tab.message = `Browser renderer stopped: ${details.reason}`;
       this.logger.error("browser.tab_renderer_gone", {
         tabId: tab.id,
@@ -1874,7 +1885,7 @@ class BrowserHost {
       // CDP or native window teardown can close the page without closeTab().
       // Electron then clears WebContentsView.webContents; retire this exact owner
       // before lease expiry, view synchronization or reuse can touch the dead page.
-      if (this.destroyed || this.turnTabs.get(tab.id) !== tab) return;
+      if (this.destroyed || this.turnTabs.get(tab.id) !== tab || retiredTurnContents(tab, contents)) return;
       this.logger.warn("browser.tab_closed_externally", { tabId: tab.id, traceId: tab.traceId });
       if (tab.interactionMode === "manual") this.signalManualTerminal(tab, "failed");
       this.removeTurnTab(tab, true);

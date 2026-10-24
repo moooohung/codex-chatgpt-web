@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "../../config";
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { COMPACTION_CHECKPOINT_BYTES } from "./large-context-compaction";
 
 export interface CompactionProgress {
   fragmentsProcessed: number;
@@ -109,7 +110,7 @@ export class CompactionJournal {
     try { raw = readFileSync(path, "utf8"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
     try {
-      if (Buffer.byteLength(raw) > 128_000) throw Error();
+      if (Buffer.byteLength(raw) > 256_000) throw Error(); // summary + checkpoint escaped as JSON
       const value = JSON.parse(raw) as Entry;
       if (value.version !== 1 || typeof value.sourceHash !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceHash)
         || ![value.updatedAt, value.retryAt, value.failures, value.consecutiveFailures].every(n => Number.isSafeInteger(n) && n >= 0)
@@ -119,7 +120,8 @@ export class CompactionJournal {
         || value.progress !== undefined && (!value.progress || typeof value.progress !== "object" || Array.isArray(value.progress)
           || !Number.isSafeInteger(value.progress.fragmentsProcessed) || value.progress.fragmentsProcessed < 0
           || !Number.isSafeInteger(value.progress.imagesProcessed) || value.progress.imagesProcessed < 0
-          || typeof value.progress.checkpoint !== "string" || Buffer.byteLength(value.progress.checkpoint) > 24_000)) throw Error();
+          || typeof value.progress.checkpoint !== "string"
+          || Buffer.byteLength(value.progress.checkpoint) > COMPACTION_CHECKPOINT_BYTES)) throw Error();
       return this.now() - value.updatedAt > MAX_AGE ? undefined : value;
     } catch {
       // Corrupt receipts must not silently trigger a complete replay of a large context.

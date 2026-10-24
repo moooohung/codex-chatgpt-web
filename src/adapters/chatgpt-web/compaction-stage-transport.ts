@@ -7,6 +7,7 @@ import {
 import { estimateTokens } from "../../lib/token-estimate";
 import { compiledChatGptWebMessages, estimateCompiledChatGptWebInputTokens } from "./input-tokens";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+import { COMPACTION_CHECKPOINT_BYTES } from "./large-context-compaction";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET, compileChatGptWebPrompt,
   type CompiledChatGptWebPrompt, type ChatGptWebMultipartPartCount,
@@ -15,8 +16,8 @@ import {
 // Bound the whole temporary document as well as each physical Send. More parts do
 // not expand the selected model's ordinary context window for a checkpoint.
 export const COMPACTION_STAGE_PAGE_CHAR_BUDGET = 320_000;
-const CHECKPOINT_JSON_RESERVE = 24_000;
-const CHECKPOINT_TOKEN_RESERVE = 8_000;
+const CHECKPOINT_JSON_RESERVE = COMPACTION_CHECKPOINT_BYTES;
+const CHECKPOINT_TOKEN_RESERVE = 16_000; // COMPACTION_CHECKPOINT_CHARS of non-Latin text
 
 /** A fresh direct handoff must fit without trimming any historical record. */
 export function directCompactionFits(

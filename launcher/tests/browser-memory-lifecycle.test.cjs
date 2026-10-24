@@ -255,6 +255,56 @@ test("restoring a retained renderer reserves ownership before navigation can blo
   await first;
 });
 
+test("recycling a retained renderer keeps the replacement when the old page reports destruction", async () => {
+  // 2026-10-24 live log: tab_memory_suspended (renderer_memory, recycleOnResume) was followed on
+  // the next turn by tab_closed_externally + "Browser closed during idle document bootstrap":
+  // the OLD page's destroyed/render-gone listeners removed the tab, closing the replacement.
+  for (const signal of ["destroyed", "render-process-gone", "did-fail-load"]) {
+    const f = fixture(IDLE_BROWSER_URL);
+    Object.assign(f.tab, { status: "ready", memorySuspended: true, recycleOnResume: true,
+      retainedUrl: "https://chatgpt.com/c/saved" });
+    let oldDestroyed = false;
+    f.contents.isDestroyed = () => oldDestroyed;
+    f.contents.setWindowOpenHandler = () => {};
+    f.contents.close = () => {
+      if (signal === "render-process-gone") f.contents.emit(signal, {}, { reason: "killed", exitCode: 1 });
+      if (signal === "did-fail-load") f.contents.emit(signal, {}, -2, "closed", "https://chatgpt.com/c/saved", true);
+      oldDestroyed = true;
+      f.contents.emit("destroyed");
+    };
+    f.host.bindTurnContents(f.tab); // the live bindings the old renderer carries
+    let url = IDLE_BROWSER_URL;
+    const replacement = Object.assign(new EventEmitter(), {
+      session: {}, isDestroyed: () => false, getURL: () => url,
+      loadURL: async next => { url = next; }, setZoomFactor() {}, setWindowOpenHandler() {},
+      getProcessMemoryInfo: async () => ({ private: 100 * 1024 }), setBackgroundThrottling() {},
+      close() { throw new Error("the replacement renderer must stay open"); },
+    });
+    Object.assign(f.host, {
+      window: { contentView: { addChildView() {}, removeChildView() {} } },
+      state: { zoomFactor: 1 }, bindShellZoomShortcuts() {},
+    });
+    f.host.logger.error = (...args) => f.events.push(args);
+    // restoreRetainedTurnTab calls the prototype method directly (Electron's View is absent here).
+    const createView = BrowserHost.prototype.createAutomaticTurnView;
+    BrowserHost.prototype.createAutomaticTurnView = () => ({ webContents: replacement });
+    let lease;
+    try {
+      lease = await f.host.beginTurn("next_trace", false, process.pid, f.tab.conversationKey, undefined, true);
+    } finally {
+      BrowserHost.prototype.createAutomaticTurnView = createView;
+    }
+    assert.equal(lease.reused, true, signal);
+    assert.equal(f.tab.view.webContents, replacement, signal);
+    assert.equal(url, "https://chatgpt.com/c/saved", signal);
+    assert.equal(f.host.turnTabs.get("tab"), f.tab, signal);
+    assert.equal(f.tab.status, "running", signal);
+    assert.ok(f.events.some(([event]) => event === "browser.tab_renderer_recycled"), signal);
+    assert.ok(!f.events.some(([event]) => ["browser.tab_closed_externally", "browser.tab_renderer_gone",
+      "browser.tab_navigation_failed"].includes(event)), signal);
+  }
+});
+
 test("cancelling while memory is being released cannot claim or evict the old owner's tab", async () => {
   const f = fixture();
   f.tab.status = "ready";
