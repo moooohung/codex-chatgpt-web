@@ -160,6 +160,11 @@ export async function runLargeContextCompaction(options: {
     totalFragments: plan.fragments.length, totalStages });
   let index = 0;
   let batchLimit = COMPACTION_BATCH_FRAGMENTS;
+  // One resend of the current stage when ChatGPT accepted it but returned no checkpoint
+  // (stalled or empty). A stage is a pure summary request over the committed checkpoint,
+  // so a resend cannot double-apply anything; without it one stalled stage of 5-7 failed
+  // the whole compaction (2026-10-25: 11 of 20 web compactions).
+  let stageResent = false;
   while (fragmentsProcessed < plan.fragments.length || imagesProcessed < plan.images.length) {
     signal.throwIfAborted();
     let count = options.prepare ? Math.min(batchLimit, plan.fragments.length - fragmentsProcessed)
@@ -189,14 +194,22 @@ export async function runLargeContextCompaction(options: {
     catch (error) {
       // Account admission can discover a smaller budget than offline planning.
       // This typed error guarantees no message was sent. Never retry an ambiguous
-      // Send, a provider rejection, or a stage that may already have been accepted.
+      // Send or a provider rejection; only an accepted stage that ended without a
+      // checkpoint is resent, once (see stageResent).
       if (count > 1 && error instanceof ChatGptWebAdapterError && error.code === "compaction_stage_too_large") {
         batchLimit = count - 1;
+        continue;
+      }
+      if (!stageResent && error instanceof ChatGptWebAdapterError
+        && (error.code === "chatgpt_response_incomplete" || error.code === "compaction_handoff_missing")) {
+        signal.throwIfAborted();
+        stageResent = true;
         continue;
       }
       throw error;
     }
     signal.throwIfAborted();
+    if (!answer && !stageResent) { stageResent = true; continue; }
     if (!answer) throw new ChatGptWebAdapterError("ChatGPT returned an empty staged context checkpoint", {
       status: 409, errorType: "invalid_request_error", code: "compaction_handoff_missing", retryable: false,
     });
@@ -209,6 +222,7 @@ export async function runLargeContextCompaction(options: {
     fragmentsProcessed += fragments.length;
     imagesProcessed += images.length;
     batchLimit = COMPACTION_BATCH_FRAGMENTS;
+    stageResent = false;
     options.onCheckpoint?.({ fragmentsProcessed, imagesProcessed, checkpoint });
     const text = stage.context.messages.map(message => typeof message.content === "string" ? message.content
       : message.content.filter(part => part.type === "text").map(part => part.text).join("\n")).join("\n");

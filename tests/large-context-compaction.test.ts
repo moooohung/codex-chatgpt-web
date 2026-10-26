@@ -74,10 +74,11 @@ test("historical images remain actual ordered attachments, and image-like tool a
 
 test("cancellation and oversized/empty summaries cannot advance or commit a partial checkpoint", async () => {
   const parsed = request(120000), plan = planLargeContextCompaction(parsed)!;
-  for (const answer of ["", "x".repeat(COMPACTION_CHECKPOINT_BYTES + 1)]) {
+  // An empty checkpoint resends the same stage once (2026-10-25), an oversized one never.
+  for (const [answer, sends] of [["", 2], ["x".repeat(COMPACTION_CHECKPOINT_BYTES + 1), 1]] as const) {
     let calls = 0;
     await expect(runLargeContextCompaction({ parsed, plan, signal: new AbortController().signal, run: async () => { calls++; return answer; } })).rejects.toMatchObject({ retryable: false });
-    expect(calls).toBe(1);
+    expect(calls).toBe(sends);
   }
   const controller = new AbortController(); let calls = 0;
   await expect(runLargeContextCompaction({ parsed, plan, signal: controller.signal, run: async () => { calls++; controller.abort(new Error("cancel fixture")); return "Partial checkpoint"; } })).rejects.toThrow("cancel fixture");

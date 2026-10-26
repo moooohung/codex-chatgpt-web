@@ -91,6 +91,33 @@ test("three consecutive failures open a 15 minute circuit without losing complet
   expect(sends).toBe(3);
 }));
 
+test("a stage that ChatGPT accepted but left without a checkpoint is resent once; a second stall fails", async () => {
+  const parsed = fixture(), plan = planLargeContextCompaction(parsed)!;
+  const capabilities = { solAvailable: true, extraHighAvailable: true, proAvailable: true, localToolsEnabled: false };
+  const stalled = () => new ChatGptWebAdapterError("ChatGPT stopped showing generation", { status: 502, errorType: "server_error", code: "chatgpt_response_incomplete", retryable: false });
+  let calls = 0, stalls = 0;
+  const observed: typeof plan.fragments = [];
+  const summary = await runLargeContextCompaction({ parsed, plan, signal: signal(),
+    prepare: (stage, options) => prepareCompactionStageTransport(stage, capabilities, { ...options, multipart: true }),
+    run: async (_stage, prepared) => {
+      calls++;
+      // Every stage stalls once; each is resent with the same committed checkpoint.
+      if (calls % 2 === 1) { stalls++; throw stalled(); }
+      const data = compactionStageData(prepared!);
+      expect(data.checkpoint).toBe(observed.length ? `checkpoint ${observed.length}` : "");
+      observed.push(...data.fragments);
+      return `checkpoint ${observed.length}`;
+    },
+  });
+  expect(observed).toEqual(plan.fragments);
+  expect(summary).toBe(`checkpoint ${plan.fragments.length}`);
+  expect(calls).toBe(2 * stalls);
+  calls = 0;
+  await expect(runLargeContextCompaction({ parsed, plan, signal: signal(), run: async () => { calls++; throw stalled(); } }))
+    .rejects.toMatchObject({ code: "chatgpt_response_incomplete" });
+  expect(calls).toBe(2);
+}, 30_000);
+
 test("concurrent observers share the completed receipt and corrupt receipts fail closed", () => temporary(async directory => {
   let sends = 0;
   const attempt = () => new CompactionJournal(directory).run("owner", "a".repeat(64), signal(), async () => { sends++; await Bun.sleep(2); return "complete handoff"; });
