@@ -56,7 +56,7 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
-import { externalAuthorization, externalResponseRequest, loadExternalToken, type ExternalBrowserRun } from "./external-client";
+import { createExternalContinuationStore, externalAuthorization, externalResponseRequest, loadExternalToken, type ExternalBrowserRun } from "./external-client";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
 
@@ -1036,6 +1036,7 @@ export function startServer(
   }
   const startedAt = Date.now();
   const externalToken = loadExternalToken();
+  const externalState = createExternalContinuationStore(externalToken);
   const settingsConfigPath = getConfigPath();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
@@ -1348,7 +1349,7 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return rejectDuringMaintenance("responses");
         if (external === "external") return httpTurns.track(
-          signal => externalResponseRequest(new Request(req, { signal }), config, dependencies.externalBrowserRun),
+          signal => externalResponseRequest(new Request(req, { signal }), config, externalState, dependencies.externalBrowserRun),
           req.signal, process.platform, "responses",
         );
         return httpTurns.track(
@@ -1408,6 +1409,7 @@ export function startServer(
     chatGptTurnSessions.clear();
     modelCatalogFetches.close();
     flushResponseState();
+    externalState.flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([
         closeChatGptBrowserWorkers(),

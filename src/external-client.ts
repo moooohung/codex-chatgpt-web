@@ -1,11 +1,11 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { getConfigDir, providerConfig, type AppConfig } from "./config";
 import { readJsonRequestBody } from "./http-body";
 import { parseRequest } from "./responses/parser";
-import { expandPreviousResponseInput, rememberResponseState } from "./responses/state";
+import { createResponseStateStore } from "./responses/state";
 import { requireChatGptWebModelRoute } from "./chatgpt-web-models";
 import { AsyncEventQueue } from "./event-queue";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
@@ -53,12 +53,21 @@ export function externalAuthorization(req: Request, address: string | undefined,
 
 export type ExternalBrowserRun = (turn: BrowserTurn) => Promise<string>;
 
+/** Scope comes ONLY from authenticated server credentials, never request metadata or response IDs. */
+export function createExternalContinuationStore(token: string) {
+  const scope = createHash("sha256").update(token).digest("hex");
+  const path = join(getConfigDir(), "external-client", `responses-${scope}.json`);
+  return createResponseStateStore({ snapshotPath: () => path, maxResponses: 128,
+    maxBytes: 8 * 1024 * 1024, snapshotBytes: 4 * 1024 * 1024 });
+}
+
 /** A fresh browser turn has no broker, native identity, cwd, retained native conversation or authority. */
-export async function externalResponseRequest(req: Request, config: AppConfig, runBrowser?: ExternalBrowserRun): Promise<Response> {
+export async function externalResponseRequest(req: Request, config: AppConfig,
+  state: ReturnType<typeof createExternalContinuationStore>, runBrowser?: ExternalBrowserRun): Promise<Response> {
   let body: any, parsed: ReturnType<typeof parseRequest>, route: ReturnType<typeof requireChatGptWebModelRoute>;
   try {
     const raw = await readJsonRequestBody(req);
-    body = expandPreviousResponseInput(raw);
+    body = state.expandPreviousResponseInput(raw);
     if (body === raw && (raw as any)?.previous_response_id) throw new Error("External continuation state is unavailable; supply complete input");
     parsed = parseRequest(body);
     route = requireChatGptWebModelRoute(parsed.modelId, config, parsed.options.reasoning);
@@ -87,7 +96,7 @@ export async function externalResponseRequest(req: Request, config: AppConfig, r
   const cancel = () => abort.abort();
   req.signal.addEventListener("abort", cancel, { once: true });
   if (req.signal.aborted) cancel();
-  const remember = (response: Record<string, unknown>) => rememberResponseState(body, response, { force: true });
+  const remember = (response: Record<string, unknown>) => state.rememberResponseState(body, response, { force: true });
   const run = async () => {
     try {
       const worker = runBrowser ? { run: runBrowser } : ChatGptBrowserWorker.forProvider(provider);

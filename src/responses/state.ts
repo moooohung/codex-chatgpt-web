@@ -2,17 +2,26 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:f
 import { dirname, join } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../config";
 
-const MAX_STORED_RESPONSES = 1_000;
+// Provenance is request-local and shared with the parser, never persisted or caller-selected.
+const replayedInputPrefixLengths = new WeakMap<object, number>();
+
+export function createResponseStateStore(options: {
+  snapshotPath?: () => string;
+  maxResponses?: number;
+  maxBytes?: number;
+  snapshotBytes?: number;
+} = {}) {
+const MAX_STORED_RESPONSES = options.maxResponses ?? 1_000;
 const RESPONSE_TTL_MS = 60 * 60 * 1_000;
 const SNAPSHOT_DEBOUNCE_MS = 2_000;
 /** In-memory high-water byte cap across all entries. Forced store:false continuation chains
  * store the full expanded input each turn — ~quadratic bytes per chain —
  * so a count cap alone cannot bound memory. Oldest-first eviction applies past this mark. */
-const MAX_STORED_RESPONSE_BYTES = 64 * 1024 * 1024;
+const MAX_STORED_RESPONSE_BYTES = options.maxBytes ?? 64 * 1024 * 1024;
 /** Entries whose serialized size exceeds this are kept in memory but skipped on disk: inputs can
  * carry base64 `input_image` data URLs, and one screenshot-heavy thread must not balloon the file. */
 const SNAPSHOT_ENTRY_MAX_BYTES = 2 * 1024 * 1024;
-const SNAPSHOT_TOTAL_MAX_BYTES = 24 * 1024 * 1024;
+const SNAPSHOT_TOTAL_MAX_BYTES = options.snapshotBytes ?? 24 * 1024 * 1024;
 
 interface StoredResponseState {
   createdAt: number;
@@ -50,7 +59,6 @@ function deleteEntry(id: string): void {
 // newly appended input suffix without adding an unknown field that native passthrough could send
 // upstream. Consumers use the prefix length to bind trusted history and rolling checkpoints to the
 // exact replayed portion of this request.
-const replayedInputPrefixLengths = new WeakMap<object, number>();
 let loaded = false;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingPersistPath: string | null = null;
@@ -65,7 +73,7 @@ function now(): number {
 }
 
 function snapshotPath(): string {
-  return join(getConfigDir(), "responses-state.json");
+  return options.snapshotPath?.() ?? join(getConfigDir(), "responses-state.json");
 }
 
 /**
@@ -153,7 +161,7 @@ function schedulePersist(): void {
 }
 
 /** Flush any pending debounced snapshot write (graceful shutdown / deterministic tests). */
-export function flushResponseState(): void {
+function flushResponseState(): void {
   if (!persistTimer) return;
   // Use the path captured when the write was scheduled; CODEX_CHATGPT_WEB_HOME may have moved.
   persistNow(pendingPersistPath ?? snapshotPath());
@@ -183,7 +191,7 @@ function pruneResponses(at = now()): void {
   }
 }
 
-export function expandPreviousResponseInput(body: unknown): unknown {
+function expandPreviousResponseInput(body: unknown): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
   const request = body as Record<string, unknown>;
   const previousId = typeof request.previous_response_id === "string" ? request.previous_response_id : undefined;
@@ -201,16 +209,11 @@ export function expandPreviousResponseInput(body: unknown): unknown {
 }
 
 /** Number of leading input items restored from previous_response_id state for this exact body. */
-export function previousResponseReplayPrefixLength(body: unknown): number {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return 0;
-  return replayedInputPrefixLengths.get(body) ?? 0;
-}
-
 /**
  * Cache completed output and max_output_tokens partial output for previous_response_id replay.
  * Content-filtered incomplete and failed output are not authoritative replay history.
  */
-export function rememberResponseState(
+function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
   opts?: { force?: boolean },
@@ -236,4 +239,14 @@ export function rememberResponseState(
   });
   pruneResponses();
   schedulePersist();
+}
+return { expandPreviousResponseInput, rememberResponseState, flushResponseState };
+}
+
+const nativeStore = createResponseStateStore();
+export const { expandPreviousResponseInput, rememberResponseState, flushResponseState } = nativeStore;
+
+export function previousResponseReplayPrefixLength(body: unknown): number {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return 0;
+  return replayedInputPrefixLengths.get(body) ?? 0;
 }

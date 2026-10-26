@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { externalAuthorization, externalResponseRequest } from "../src/external-client";
+import { createExternalContinuationStore, externalAuthorization, externalResponseRequest } from "../src/external-client";
+import { createResponseStateStore } from "../src/responses/state";
 import { defaultConfig } from "../src/config";
 import { externalTokenPath } from "../src/external-client";
 import { startServer } from "../src/server";
@@ -21,10 +22,11 @@ test("external mode requires the reserved bearer token; native Codex headers sta
 
 test("external function round trip uses Responses calls and accepts function_call_output without native authority", async () => {
   const config = defaultConfig("full");
+  const state = createExternalContinuationStore(token);
   const tools = [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object", properties: { key: { type: "string" } }, required: ["key"] } }];
   const request = (input: unknown, stream = false) => new Request("http://localhost/v1/responses", { method: "POST",
     body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input, tools, stream }) });
-  const first = await externalResponseRequest(request("lookup hello"), config, async turn => {
+  const first = await externalResponseRequest(request("lookup hello"), config, state, async turn => {
     expect(turn.capabilities.localToolsEnabled).toBeFalse();
     expect(turn.nativeConnector).toBeUndefined();
     expect(turn.conversationKey).toBeUndefined();
@@ -40,7 +42,7 @@ test("external function round trip uses Responses calls and accepts function_cal
     model: "chatgpt-web/gpt-5.6-sol", previous_response_id: result.id, tools, stream: true,
     input: [{ type: "function_call_output", call_id: call.call_id, output: "world" }],
   }) });
-  const second = await externalResponseRequest(continuation, config, async turn => {
+  const second = await externalResponseRequest(continuation, config, state, async turn => {
     expect((await turn.prepare()).text).toContain('"output":"world"');
     return '{"text":"world","calls":[]}';
   });
@@ -48,10 +50,42 @@ test("external function round trip uses Responses calls and accepts function_cal
   expect(sse).toContain("response.output_text.delta");
   expect(sse).toContain("response.completed");
   expect(sse).toContain("world");
-  const streamed = await externalResponseRequest(request("lookup", true), config,
+  const streamed = await externalResponseRequest(request("lookup", true), config, state,
     async () => '{"text":"","calls":[{"name":"lookup","arguments":{"key":"x"}}]}');
   const events = await streamed.text();
   for (const name of ["response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"]) expect(events).toContain(name);
+});
+
+test("continuations isolate native and authenticated external histories, persistence and eviction", () => {
+  const home = mkdtempSync(join(tmpdir(), "cgw-state-scope-"));
+  const previous = process.env.CODEX_CHATGPT_WEB_HOME;
+  process.env.CODEX_CHATGPT_WEB_HOME = home;
+  try {
+    const native = createResponseStateStore({ snapshotPath: () => join(home, "responses-state.json") });
+    const external = createExternalContinuationStore(token);
+    const other = createExternalContinuationStore(`cwext_${"b".repeat(64)}`);
+    const remember = (store: typeof native, id: string, text: string) =>
+      store.rememberResponseState({ input: text }, { id, output: [], status: "completed" });
+    remember(native, "native-id", "PRIVATE NATIVE");
+    remember(external, "external-id", "external");
+    native.flushResponseState(); external.flushResponseState();
+    const probe = (id: string) => ({ previous_response_id: id, input: "next" });
+    const nativeProbe = probe("native-id"), externalProbe = probe("external-id");
+    expect(external.expandPreviousResponseInput(nativeProbe)).toBe(nativeProbe);
+    expect(native.expandPreviousResponseInput(externalProbe)).toBe(externalProbe);
+    expect(other.expandPreviousResponseInput(externalProbe)).toBe(externalProbe);
+    const reloaded = createExternalContinuationStore(token);
+    expect(reloaded.expandPreviousResponseInput(nativeProbe)).toBe(nativeProbe);
+    expect((reloaded.expandPreviousResponseInput(externalProbe) as any).input).toEqual([{ role: "user", content: "external" }, { role: "user", content: "next" }]);
+    for (let i = 0; i < 129; i++) remember(external, `ext-${i}`, "bounded");
+    expect(external.expandPreviousResponseInput(externalProbe)).toBe(externalProbe);
+    expect(native.expandPreviousResponseInput(nativeProbe)).not.toBe(nativeProbe);
+    external.flushResponseState();
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
+    else process.env.CODEX_CHATGPT_WEB_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("HTTP admission preserves native traffic, rejects bad external tokens and persists a private token", async () => {
