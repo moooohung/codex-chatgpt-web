@@ -56,6 +56,7 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import { isLocalBridgeHost } from "./local-host";
 import { createExternalContinuationStore, externalAuthorization, externalResponseRequest, loadExternalToken, type ExternalBrowserRun } from "./external-client";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
@@ -1082,6 +1083,9 @@ export function startServer(
     port: config.port,
     idleTimeout: 0,
     async fetch(req, listener) {
+      if (!isLocalBridgeHost(req.headers.get("host"), listener.port!)) {
+        return formatErrorResponse(403, "invalid_request_error", "Non-local Host authority refused");
+      }
       const url = new URL(req.url);
       const external = externalAuthorization(req, listener.requestIP(req)?.address, externalToken);
       if (typeof external === "number") return formatErrorResponse(external, "authentication_error", "External client authorization refused");

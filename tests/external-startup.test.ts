@@ -21,6 +21,9 @@ test("unsafe external credentials disable only reserved-prefix admission, never 
   try {
     const base = `http://127.0.0.1:${server.port}`;
     expect((await fetch(`${base}/healthz`)).status).toBe(200);
+    for (const path of ["/healthz", "/admin/drain", "/v1/models", "/v1/responses"]) {
+      expect((await fetch(`${base}${path}`, { headers: { host: "rebind.example" } })).status).toBe(403);
+    }
     const send = (authorization?: string) => fetch(`${base}/v1/responses`, { method: "POST",
       headers: authorization ? { authorization } : {}, body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input: "OK" }) });
     expect((await send()).status).toBe(200);
