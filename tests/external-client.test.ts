@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { externalAuthorization, externalResponseRequest } from "../src/external-client";
 import { defaultConfig } from "../src/config";
-import { loadExternalToken, externalTokenPath } from "../src/external-client";
+import { externalTokenPath } from "../src/external-client";
 import { startServer } from "../src/server";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -68,8 +68,8 @@ test("HTTP admission preserves native traffic, rejects bad external tokens and p
     externalBrowserRun: async () => { external++; return '{"text":"external","calls":[]}'; },
   });
   try {
-    const secret = loadExternalToken();
-    expect(loadExternalToken()).toBe(secret);
+    const secret = readFileSync(externalTokenPath(), "utf8").trim();
+    expect(secret).toMatch(/^cwext_[a-f0-9]{64}$/);
     if (process.platform === "win32") {
       const proof = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
         "$a=[IO.File]::GetAccessControl($env:CGW_TOKEN_TEST); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; if(@($a.Access | Where-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -ne $sid}).Count){exit 1}"], {
