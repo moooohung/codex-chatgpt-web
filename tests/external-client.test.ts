@@ -51,6 +51,12 @@ test("tool continuations stay in the same turn; a user message after a final ans
   expect(next.input.at(-1).content[0].text).toBe("next");
 });
 
+test("Mixdog's environment-tier Cwd bullet supplies the working directory without its trailing note", () => {
+  const environment = { role: "system", content: `- Cwd: ${cwd} — the active Project root; relative paths resolve here.\n- Shell: PowerShell.` };
+  const body = nativeShapedExternalBody({ prompt_cache_key: "s", input: [{ role: "system", content: "rules" }, environment, user("hi")] }) as any;
+  expect(body.input.find((item: any) => item.content?.[0]?.text?.startsWith("<environment_context>")).content[0].text).toContain(`<cwd>${cwd}</cwd>`);
+});
+
 test("external requests without a working directory or with server-side continuation are refused", () => {
   expect(() => shape([user("hi")])).toThrow("Cwd:");
   expect(() => nativeShapedExternalBody({ previous_response_id: "r", input: [system, user("hi")] })).toThrow("previous_response_id");

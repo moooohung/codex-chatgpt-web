@@ -27,16 +27,20 @@ function messageText(item: Item): string {
     ? item.content.map(part => (isRecord(part) && typeof part.text === "string" ? part.text : "")).join("\n") : "";
 }
 
-/** The client's working directory, from the `Cwd:` line of its system prompt (Mixdog's Session section). */
+/** The client's working directory, from the `Cwd:` line of its runtime context (Mixdog's Session section).
+ * Mixdog lowers that context to a system, developer or user item depending on the route, so instructions and
+ * system/developer items are searched first, then the rest. */
 function clientCwd(body: Item, input: unknown[]): string {
+  const messages = input.filter((item): item is Item => isRecord(item) && item.type === "message");
+  const system = (item: Item) => item.role === "system" || item.role === "developer";
   const texts = [typeof body.instructions === "string" ? body.instructions : "",
-    ...input.filter(item => isRecord(item) && item.type === "message" && (item.role === "system" || item.role === "developer"))
-      .map(item => messageText(item as Item))];
+    ...messages.filter(system).map(messageText), ...messages.filter(item => !system(item)).map(messageText)];
   for (const text of texts) {
-    const cwd = /^\s*Cwd:\s*(.+?)\s*$/m.exec(text)?.[1];
+    // Mixdog writes `- Cwd: D:\project — the active Project root; ...`; the path ends before the dash note.
+    const cwd = /^[\s>*#-]*Cwd:\s*`?(.+?)`?(?:\s+[—–]\s.*)?\s*$/m.exec(text)?.[1];
     if (cwd && isAbsolute(cwd)) return cwd;
   }
-  throw new Error("External request has no absolute `Cwd:` line in its system prompt");
+  throw new Error(`External request has no absolute \`Cwd:\` line (message roles: ${messages.map(item => item.role).join(",") || "none"})`);
 }
 
 /**
