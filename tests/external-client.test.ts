@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { createExternalContinuationStore, externalAuthorization, externalResponseRequest, parseExternalEnvelope } from "../src/external-client";
+import { createExternalContinuationStore, EXTERNAL_INLINE_REQUEST_CHARS, EXTERNAL_REQUEST_FILE, externalAuthorization,
+  externalResponseRequest, parseExternalEnvelope } from "../src/external-client";
 import { createResponseStateStore } from "../src/responses/state";
 import { defaultConfig } from "../src/config";
 import { externalTokenPath } from "../src/external-client";
@@ -30,6 +31,30 @@ test("external mode requires the reserved bearer token; native Codex headers sta
   expect(externalAuthorization(request(`Bearer ${token}`), "192.168.1.1", token)).toBe(403);
   expect(externalAuthorization(request(`Bearer ${token}`), undefined, token)).toBe(403);
   for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) expect(externalAuthorization(request(`Bearer ${token}`), ip, token)).toBe("external");
+});
+
+test("large external requests travel as an attached file and keep the inline prompt small", async () => {
+  const config = defaultConfig("full");
+  const state = createExternalContinuationStore(token);
+  const big = "x".repeat(EXTERNAL_INLINE_REQUEST_CHARS * 3);
+  const small = "hello";
+  const call = (input: string) => externalResponseRequest(new Request("http://localhost/v1/responses", { method: "POST",
+    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input }) }), config, state, async turn => {
+    const prepared = await turn.prepare();
+    if (input === big) {
+      expect(prepared.text.length).toBeLessThan(EXTERNAL_INLINE_REQUEST_CHARS);
+      expect(prepared.text).toContain(EXTERNAL_REQUEST_FILE);
+      expect(prepared.skillFiles).toHaveLength(1);
+      expect(prepared.skillFiles![0]!.name).toBe(EXTERNAL_REQUEST_FILE);
+      expect(JSON.parse(prepared.skillFiles![0]!.text).input).toBe(big);
+    } else {
+      expect(prepared.skillFiles).toBeUndefined();
+      expect(prepared.text).toContain('"input":"hello"');
+    }
+    return '{"text":"ok","calls":[]}';
+  });
+  expect((await (await call(big)).json() as any).status).toBe("completed");
+  expect((await (await call(small)).json() as any).status).toBe("completed");
 });
 
 test("external function round trip uses Responses calls and accepts function_call_output without native authority", async () => {
