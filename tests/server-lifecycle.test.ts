@@ -49,6 +49,31 @@ async function waitForTurnCount(turns: HttpTurnCounter, expected: number): Promi
   expect(turns.count()).toBe(expected);
 }
 
+for (const [endpoint, handler] of [
+  ["responses", responseRequest], ["compact", compactRequest],
+] as const) test(`over-limit native ${endpoint} body promptly rejects and releases its tracked HTTP turn`, async () => {
+  const turns = new HttpTurnCounter();
+  const client = new AbortController();
+  let cancelled = false;
+  const chunk = new Uint8Array(1024 * 1024).fill(32);
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) { controller.enqueue(chunk); },
+    cancel() { cancelled = true; },
+  });
+  try {
+    const response = await Promise.race([
+      turns.track(signal => handler(new Request(`http://127.0.0.1/v1/${endpoint}`, {
+        method: "POST", body, signal, duplex: "half",
+      } as RequestInit), defaultConfig("browser-only")), client.signal),
+      Bun.sleep(2_000).then(() => { throw new Error("Native body rejection did not promptly return"); }),
+    ]);
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("Encoded request body exceeds");
+    await waitForTurnCount(turns, 0);
+    expect(cancelled).toBeTrue();
+  } finally { client.abort(); }
+});
+
 test("HTTP turn tracking follows the response stream instead of Bun's global request count", async () => {
   const turns = new HttpTurnCounter();
   let source!: ReadableStreamDefaultController<Uint8Array>;

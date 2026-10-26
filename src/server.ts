@@ -632,6 +632,8 @@ export async function responseRequest(
   try {
     raw = await readJsonRequestBody(req);
   } catch (error) {
+    void req.body?.cancel().catch(() => {});
+    void nativeRequest.body?.cancel().catch(() => {});
     return formatErrorResponse(
       400,
       "invalid_request_error",
@@ -905,6 +907,8 @@ export async function compactRequest(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     raw = parsed as Record<string, unknown>;
   } catch (error) {
+    void req.body?.cancel().catch(() => {});
+    void nativeRequest.body?.cancel().catch(() => {});
     return formatErrorResponse(
       400,
       "invalid_request_error",

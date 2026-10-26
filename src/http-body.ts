@@ -50,7 +50,9 @@ export async function readJsonRequestBody(request: Request, limits: {
     else await pipeline(source, sink, { signal });
   } finally {
     signal.removeEventListener("abort", cancel);
-    await reader?.cancel().catch(() => {});
+    // A tee cancellation settles only after its sibling closes. Cleanup must not block
+    // the rejection response while the caller still owns an unused native clone.
+    void reader?.cancel().catch(() => {});
   }
   const text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, decodedBytes));
   return JSON.parse(text) as unknown;
@@ -58,4 +60,3 @@ export async function readJsonRequestBody(request: Request, limits: {
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createZstdDecompress } from "node:zlib";
-
