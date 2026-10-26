@@ -37,7 +37,7 @@ test("streaming encoded limits cancel the source before consuming the complete r
 
 test("streaming zstd decoded limits stop expansion of compressed oversized JSON", async () => {
   const body = Bun.zstdCompressSync(Buffer.from(JSON.stringify("x".repeat(1024 * 1024))));
-  const request = new Request("http://localhost", { method: "POST", headers: { "content-encoding": "zstd" }, body });
+  const request = new Request("http://localhost", { method: "POST", headers: { "content-encoding": "zstd" }, body: new Uint8Array(body).buffer });
   await expect(readJsonRequestBody(request, { decodedBytes: 4096 })).rejects.toThrow("Decoded request body");
 });
 
