@@ -14,16 +14,17 @@ $packageRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web
 $backupRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web/backups/bridge-6114-integrated-r2-20261027')
 $installRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/AppData/Local/Programs/Codex Web GPT')
 $oldRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web/versions/6.1.4-win32-x64')
-$preparedRuntime = Join-Path $packageRoot 'runtime-ready'
 if ($FixtureRoot) {
     $expectedFixture = [IO.Path]::GetFullPath('E:/c_offload_20261024/.codex-chatgpt-web/worktrees/integrate-6114-20261027/scratch/install-fixture-6114-integrated-r2')
     if ([IO.Path]::GetFullPath($FixtureRoot) -ne $expectedFixture) { throw 'Fixture root is not the exact owned workspace' }
     $installRoot = Join-Path $expectedFixture 'launcher'
     $oldRoot = Join-Path $expectedFixture 'core/versions/6.1.4-win32-x64'
     $backupRoot = Join-Path $expectedFixture 'backup'
-    $preparedRuntime = Join-Path $expectedFixture 'runtime-ready'
 } elseif ($FixtureFailAfterRuntime -or $FixtureFailAfterEngine -or $FixtureFailDuringEngine) { throw 'Failure injection requires the isolated fixture' }
 $runtimeTarget = [IO.Path]::GetFullPath((Join-Path $installRoot 'resources/runtime'))
+# Builds/backups may be junctions to another drive. Both atomic rename endpoints
+# must stay beside the installed runtime; verified durable backups remain separate.
+$preparedRuntime = [IO.Path]::GetFullPath($runtimeTarget + '.' + $plan.id + '.ready')
 $archiveTarget = [IO.Path]::GetFullPath((Join-Path $installRoot 'resources/app.asar'))
 $sourceRuntime = Join-Path $packageRoot 'runtime-final'
 $originalBackup = Join-Path $backupRoot 'resources/runtime'
@@ -176,9 +177,10 @@ function SwitchRuntime([string]$Source, [string]$Version, [string]$BundleId) {
         CopyReviewedTree $Source $incoming
     }
     VerifyBundle $incoming $Version $BundleId | Out-Null
-    $displaced = Join-Path $backupRoot ('displaced/runtime-' + [Guid]::NewGuid().ToString('N'))
-    $displaced = RequireInside $displaced $backupRoot
-    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($displaced)) | Out-Null
+    $displaced = [IO.Path]::GetFullPath($runtimeTarget + '.' + $plan.id + '.previous-' + [Guid]::NewGuid().ToString('N'))
+    if ([IO.Path]::GetDirectoryName($displaced) -ne [IO.Path]::GetDirectoryName($runtimeTarget) -or
+        $displaced -notmatch ('^' + [regex]::Escape($runtimeTarget + '.' + $plan.id + '.previous-') + '[a-f0-9]{32}$') -or
+        (Test-Path -LiteralPath $displaced)) { throw 'Runtime displacement directory is not exact, adjacent and fresh' }
     RequireIdle
     [IO.Directory]::Move($runtimeTarget, $displaced)
     try { [IO.Directory]::Move($incoming, $runtimeTarget) }

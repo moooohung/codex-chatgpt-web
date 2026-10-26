@@ -1,7 +1,8 @@
+param([string]$InstallerPath)
 $ErrorActionPreference = 'Stop'
 $candidate = 'C:/Users/Administrator/.codex-chatgpt-web/builds/bridge-6114-integrated-r2-20261027'
 $fixture = 'E:/c_offload_20261024/.codex-chatgpt-web/worktrees/integrate-6114-20261027/scratch/install-fixture-6114-integrated-r2'
-$installer = Join-Path $candidate 'install-reviewed.ps1'
+$installer = if ($InstallerPath) { (Resolve-Path -LiteralPath $InstallerPath).Path } else { Join-Path $candidate 'install-reviewed.ps1' }
 $fixturePlan = Join-Path $candidate 'fixture-plan.json'
 $report = [Collections.Generic.List[object]]::new()
 function Invoke-Fixture([string]$Label, [string]$Action, [string]$Injection = '') {

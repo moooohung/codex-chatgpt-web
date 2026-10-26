@@ -79,6 +79,15 @@ if (['package','seal'].includes(process.argv[2])) {
   const plan = json(planPath);
   if(fs.existsSync(fixture)) throw Error('Preserve existing fixture');
   const fixtureLauncher=path.join(fixture,'launcher'), fixtureOld=path.join(fixture,'core/versions/6.1.4-win32-x64');
+  const crossVolume = process.argv[3] === '--cross-volume';
+  if (crossVolume) {
+    const localFixture = path.resolve('C:/Users/Administrator/AppData/Local/Temp/codex-bridge-6114-r2-cross-volume');
+    if (fs.existsSync(localFixture)) throw Error('Preserve existing cross-volume fixture');
+    fs.mkdirSync(localFixture, { recursive: true });
+    fs.mkdirSync(fixture, { recursive: true });
+    fs.symlinkSync(localFixture, fixtureLauncher, 'junction');
+    if (fs.statSync(fixtureLauncher).dev === fs.statSync(fixture).dev) throw Error('Cross-volume fixture must use different actual volumes');
+  }
   fs.mkdirSync(fixtureLauncher,{recursive:true});
   fs.cpSync(path.join(installed,'resources/runtime'),path.join(fixtureLauncher,'resources/runtime'),{recursive:true});
   copy(path.join(installed,'resources/app.asar'),path.join(fixtureLauncher,'resources/app.asar'));
@@ -94,7 +103,7 @@ if (['package','seal'].includes(process.argv[2])) {
   clone.backupRoot=path.join(fixture,'backup');clone.runtimeBundle.target=path.join(fixtureLauncher,'resources/runtime');
   for(const item of [...clone.files,...clone.launcherFiles]){ item.target=remap(item.target);item.originalSha256=fs.existsSync(item.target)?hash(item.target):null; }
   clone.readOnlyDependencies=clone.readOnlyDependencies.map(item=>({target:remap(item.target),sha256:hash(remap(item.target))}));
-  clone.fixtureOnly={root:fixture,modifiedOriginalEngineFiles:different.map(item=>path.relative(installed,item.target))};
+  clone.fixtureOnly={root:fixture,crossVolume,launcherRealPath:fs.realpathSync(fixtureLauncher),backupVolume:fs.statSync(fixture).dev,launcherVolume:fs.statSync(fixtureLauncher).dev,modifiedOriginalEngineFiles:different.map(item=>path.relative(installed,item.target))};
   write(path.join(output,'fixture-plan.json'),clone);
   console.log(JSON.stringify({fixtureRoot:fixture,modifiedEngineOriginals:clone.fixtureOnly.modifiedOriginalEngineFiles}));
 } else if(process.argv[2] === 'verify-fixture') {
