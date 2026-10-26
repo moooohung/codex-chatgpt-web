@@ -45,6 +45,10 @@ test("string-encoded function arguments are accepted; undeclared functions are r
   const ok = await (await call('{"text":"","calls":[{"name":"lookup","arguments":"{\\"key\\":\\"x\\"}"}]}')).json() as any;
   expect(ok.status).toBe("completed");
   expect(JSON.parse(ok.output.find((item: any) => item.type === "function_call").arguments)).toEqual({ key: "x" });
+  // ChatGPT Web reports no usage; the estimate must still let clients track context.
+  expect(ok.usage.input_tokens).toBeGreaterThan(0);
+  expect(ok.usage.output_tokens).toBeGreaterThan(0);
+  expect(ok.usage.total_tokens).toBe(ok.usage.input_tokens + ok.usage.output_tokens);
   const bad = await (await call('{"text":"","calls":[{"name":"nope","arguments":{}}]}')).json() as any;
   expect(bad.status).toBe("failed");
   expect(JSON.stringify(bad.error)).toContain("undeclared function");

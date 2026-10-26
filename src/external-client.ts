@@ -10,7 +10,9 @@ import { AsyncEventQueue } from "./event-queue";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import { ChatGptBrowserWorker, type BrowserTurn } from "./adapters/chatgpt-web/browser-worker";
 import { runWithChatGptPlusPreparation } from "./adapters/chatgpt-web/account-fallback";
-import type { AdapterEvent } from "./types";
+import type { AdapterEvent, CodexUsage } from "./types";
+import { estimateTokens } from "./lib/token-estimate";
+import { CHATGPT_WEB_PLATFORM_RESERVE_TOKENS } from "./chatgpt-web-models";
 import { ExternalAdmission, ExternalAdmissionError, waitExternal } from "./external-admission";
 
 /** The reserved bearer prefix selects this protocol. All other traffic keeps its native route. */
@@ -170,7 +172,13 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
         queue.push({ type: "tool_call_delta", arguments: JSON.stringify(call.arguments) });
         queue.push({ type: "tool_call_end" });
       }
-      queue.push({ type: "done", stopReason: output.calls.length ? "tool_use" : "stop", endTurn: !output.calls.length });
+      // ChatGPT Web reports no token usage; estimate it the way the context preflight does
+      // (hidden platform reserve + visible prompt + attached request) so clients can track context.
+      const inputTokens = CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + estimateTokens(prompt, route.backendModel)
+        + (attachRequest ? estimateTokens(request, route.backendModel) : 0);
+      const outputTokens = estimateTokens(answer, route.backendModel);
+      const usage: CodexUsage = { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, estimated: true };
+      queue.push({ type: "done", stopReason: output.calls.length ? "tool_use" : "stop", endTurn: !output.calls.length, usage });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[codex-chatgpt-web] external turn rejected: ${message.slice(0, 300)}`);
