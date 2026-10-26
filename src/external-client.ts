@@ -1,7 +1,6 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+export { externalTokenPath, loadExternalToken } from "./external-token";
 import { getConfigDir, providerConfig, type AppConfig } from "./config";
 import { readJsonRequestBody } from "./http-body";
 import { parseRequest } from "./responses/parser";
@@ -12,34 +11,6 @@ import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./
 import { ChatGptBrowserWorker, type BrowserTurn } from "./adapters/chatgpt-web/browser-worker";
 import { runWithChatGptPlusPreparation } from "./adapters/chatgpt-web/account-fallback";
 import type { AdapterEvent } from "./types";
-
-const PREFIX = "cwext_";
-export const externalTokenPath = () => join(getConfigDir(), "external-client", "token");
-
-/** Protect the directory BEFORE writing a secret; POSIX modes alone do not protect Windows files. */
-export function loadExternalToken(): string {
-  const directory = join(getConfigDir(), "external-client");
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  if (process.platform === "win32") {
-    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
-      $ErrorActionPreference='Stop'
-      $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
-      $acl=[Security.AccessControl.DirectorySecurity]::new()
-      $acl.SetOwner($sid)
-      $acl.SetAccessRuleProtection($true,$false)
-      $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
-      $acl.AddAccessRule($rule)
-      [IO.Directory]::SetAccessControl($env:CGW_EXTERNAL_AUTH_DIR,$acl)
-    `], { env: { ...process.env, CGW_EXTERNAL_AUTH_DIR: directory }, stdio: "pipe" });
-  } else chmodSync(directory, 0o700);
-  const path = externalTokenPath();
-  try { writeFileSync(path, `${PREFIX}${randomBytes(32).toString("hex")}\n`, { flag: "wx", mode: 0o600 }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-  if (process.platform !== "win32") chmodSync(path, 0o600);
-  const token = readFileSync(path, "utf8").trim();
-  if (!/^cwext_[a-f0-9]{64}$/.test(token)) throw new Error("External client token file is invalid");
-  return token;
-}
 
 /** The reserved bearer prefix selects this protocol. All other traffic keeps its native route. */
 export function externalAuthorization(req: Request, address: string | undefined, token: string): "native" | "external" | 401 | 403 {
