@@ -56,6 +56,7 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import { externalAuthorization, externalResponseRequest, loadExternalToken, type ExternalBrowserRun } from "./external-client";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
 
@@ -1027,12 +1028,14 @@ export function startServer(
     fetchUpstream?: NativeFetch;
     adapterFactory?: ChatGptWebAdapterFactory;
     modelCatalogFetches?: ModelCatalogFetches;
+    externalBrowserRun?: ExternalBrowserRun;
   } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
+  const externalToken = loadExternalToken();
   const settingsConfigPath = getConfigPath();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
@@ -1075,8 +1078,15 @@ export function startServer(
     hostname: config.host,
     port: config.port,
     idleTimeout: 0,
-    async fetch(req) {
+    async fetch(req, listener) {
       const url = new URL(req.url);
+      const external = url.pathname.startsWith("/v1/")
+        ? externalAuthorization(req, listener.requestIP(req)?.address, externalToken) : "native";
+      if (typeof external === "number") return formatErrorResponse(external, "authentication_error", "External client authorization refused");
+      if (external === "external" && !(
+        (req.method === "POST" && url.pathname === "/v1/responses")
+        || (req.method === "GET" && url.pathname === "/v1/models")
+      )) return formatErrorResponse(404, "invalid_request_error", "External clients support Responses and model discovery only");
       // Loopback is reachable from any web page, cross-site or same-origin after DNS rebinding,
       // and this route has no bearer secret. Browsers attach Origin to every such request that
       // can start or control work; Codex and the launcher are not browsers and never send it.
@@ -1279,6 +1289,9 @@ export function startServer(
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
         if (draining) return rejectDuringMaintenance("models");
+        if (external === "external") return Response.json({ object: "list", data: [
+          { id: "chatgpt-web/gpt-5.6-sol", object: "model", created: 0, owned_by: "chatgpt-web" },
+        ] });
         return httpTurns.track(async signal => {
           const request = ++modelCatalogRequests;
           const started = Date.now();
@@ -1334,6 +1347,10 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return rejectDuringMaintenance("responses");
+        if (external === "external") return httpTurns.track(
+          signal => externalResponseRequest(new Request(req, { signal }), config, dependencies.externalBrowserRun),
+          req.signal, process.platform, "responses",
+        );
         return httpTurns.track(
           (signal, bindIdentity) => responseRequest(
             new Request(req, { signal }),
