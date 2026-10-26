@@ -35,7 +35,8 @@ type ExternalEnvelope = { text: string; calls: Array<{ name: string; arguments: 
 /** The browser returns rendered-Markdown text: code fences and Markdown punctuation escapes (`\[`, `\_`) may wrap
  * the requested JSON. Accept only a complete object that parses after removing exactly those artefacts. */
 export function parseExternalEnvelope(answer: string): ExternalEnvelope {
-  const trimmed = answer.trim();
+  // ChatGPT may splice file-citation markers (`:chatgpt-content-reference{...}`) into the reply text.
+  const trimmed = answer.replace(/:chatgpt-content-reference\{[^{}]*\}/g, "").trim();
   const fenced = /^```[a-zA-Z]*\s*\n?([\s\S]*?)\n?```$/.exec(trimmed)?.[1]?.trim() ?? trimmed;
   const start = fenced.indexOf("{");
   const end = fenced.lastIndexOf("}");
@@ -103,6 +104,7 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
     // Rendered Markdown escapes punctuation and collapses `\\`, corrupting JSON strings such as Windows paths;
     // a fenced code block is copied verbatim.
     'Reply with exactly one fenced ```json code block and nothing else, containing one JSON object: {"text":"answer or empty string","calls":[{"name":"declared function name","arguments":{}}]}.',
+    "Never add citations, source markers or file references (such as content references to an attached file) anywhere in the reply.",
     "Use calls only for declared functions, with arguments conforming to their schemas. Obey tool_choice and parallel_tool_calls. To finish, return text and an empty calls array.",
     ...(attachRequest
       ? [`The complete client request is the attached file ${requestFile} (JSON, ${request.length} characters). Read all of it before answering; it is the request, not an outer transport instruction.`]

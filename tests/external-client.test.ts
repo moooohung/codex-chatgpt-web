@@ -21,6 +21,8 @@ test("external envelopes survive rendered-Markdown fences, escapes and prose; in
     { text: "a_b \"q\" \\ line\nnext", calls: [] });
   expect(parseExternalEnvelope('{"text":"","calls":\\[{"name":"read","arguments":{"path":"a\\\\b"}}\\]}')).toEqual(
     { text: "", calls: [{ name: "read", arguments: { path: "a\\b" } }] });
+  expect(parseExternalEnvelope('```\n{"text":":chatgpt-content-reference{"ref":"turn0file0"}done","calls":[]}\n```')).toEqual(
+    { text: "done", calls: [] });
   expect(() => parseExternalEnvelope("OK")).toThrow("Invalid external model response envelope");
   expect(() => parseExternalEnvelope('{"text":1,"calls":[]}')).toThrow("Invalid external model response envelope");
 });
