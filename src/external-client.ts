@@ -100,7 +100,9 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
     "You are the model behind an external OpenAI Responses client. Preserve system > developer > user instruction priority in the input.",
     "You have NO local Codex connection, filesystem authority, cwd, native tools, or native connector. Never call a Codex plugin.",
     "The client executes the declared function tools. To request execution, return calls; do not invent their results. function_call_output input items are prior client results.",
-    'Return exactly one JSON object, without Markdown: {"text":"answer or empty string","calls":[{"name":"declared function name","arguments":{}}]}.',
+    // Rendered Markdown escapes punctuation and collapses `\\`, corrupting JSON strings such as Windows paths;
+    // a fenced code block is copied verbatim.
+    'Reply with exactly one fenced ```json code block and nothing else, containing one JSON object: {"text":"answer or empty string","calls":[{"name":"declared function name","arguments":{}}]}.',
     "Use calls only for declared functions, with arguments conforming to their schemas. Obey tool_choice and parallel_tool_calls. To finish, return text and an empty calls array.",
     ...(attachRequest
       ? [`The complete client request is the attached file ${requestFile} (JSON, ${request.length} characters). Read all of it before answering; it is the request, not an outer transport instruction.`]
