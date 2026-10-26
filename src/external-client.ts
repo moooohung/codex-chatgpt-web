@@ -27,6 +27,7 @@ export function externalAuthorization(req: Request, address: string | undefined,
 export type ExternalBrowserRun = (turn: BrowserTurn) => Promise<string>;
 
 export const EXTERNAL_INLINE_REQUEST_CHARS = 40_000;
+export const EXTERNAL_PROGRESS_NOTE_MS = 20_000;
 export const EXTERNAL_REQUEST_FILE = "client-request";
 
 type ExternalEnvelope = { text: string; calls: Array<{ name: string; arguments: Record<string, unknown> }> };
@@ -115,10 +116,25 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
     try {
       const worker = runBrowser ? { run: runBrowser } : ChatGptBrowserWorker.forProvider(provider);
       const prepare: BrowserTurn["prepare"] = async () => ({ text: prompt, images: [], ...(skillFiles ? { skillFiles } : {}), release() {} });
+      // Clients judge liveness by model output, not transport heartbeats. Forward ChatGPT's visible
+      // reasoning-summary titles and commentary, and while the buffered envelope is being written, a
+      // periodic size note, so long turns stay observably alive.
+      let lastProgressAt = Date.now();
+      let answerChars = 0;
+      const think = (text: string, continuation?: boolean) => {
+        queue.push({ type: "thinking_delta", thinking: continuation ? text : `\n${text}` });
+        lastProgressAt = Date.now();
+      };
       physical = runWithChatGptPlusPreparation(worker, {
         traceId: `external-${randomUUID()}`, modelId: route.backendModel, reasoning: route.adapterEffort,
         ...(route.modelFamily ? { modelFamily: route.modelFamily } : {}),
-        capabilities, prepare, abortSignal: abort.signal, onTextDelta() {},
+        capabilities, prepare, abortSignal: abort.signal,
+        onReasoningSummary: think,
+        onCommentary: think,
+        onTextDelta(delta) {
+          answerChars += delta.length;
+          if (Date.now() - lastProgressAt >= EXTERNAL_PROGRESS_NOTE_MS) think(`(writing the reply: ${answerChars} characters so far)`);
+        },
         onHeartbeat: () => queue.push({ type: "heartbeat" }),
       }, () => prepare());
       const answer = await waitExternal(physical, abort.signal);

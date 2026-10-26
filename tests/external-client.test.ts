@@ -34,6 +34,23 @@ test("external mode requires the reserved bearer token; native Codex headers sta
   for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) expect(externalAuthorization(request(`Bearer ${token}`), ip, token)).toBe("external");
 });
 
+test("visible ChatGPT reasoning summaries stream to external clients as reasoning progress", async () => {
+  const config = defaultConfig("full");
+  const state = createExternalContinuationStore(token);
+  const response = await externalResponseRequest(new Request("http://localhost/v1/responses", { method: "POST",
+    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input: "hi", stream: true }) }), config, state, async turn => {
+    turn.onReasoningSummary?.("Reading the request");
+    turn.onCommentary?.("Checking the tools");
+    turn.onTextDelta('{"text":"ok","calls":[]}');
+    return '{"text":"ok","calls":[]}';
+  });
+  const sse = await response.text();
+  expect(sse).toContain("response.reasoning_summary_text.delta");
+  expect(sse).toContain("Reading the request");
+  expect(sse).toContain("Checking the tools");
+  expect(sse).toContain("response.completed");
+});
+
 test("large external requests travel as an attached file and keep the inline prompt small", async () => {
   const config = defaultConfig("full");
   const state = createExternalContinuationStore(token);
