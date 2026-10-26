@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createExternalContinuationStore, externalAuthorization, externalResponseRequest } from "../src/external-client";
+import { createExternalContinuationStore, externalAuthorization, externalResponseRequest, parseExternalEnvelope } from "../src/external-client";
 import { createResponseStateStore } from "../src/responses/state";
 import { defaultConfig } from "../src/config";
 import { externalTokenPath } from "../src/external-client";
@@ -10,6 +10,18 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 const token = `cwext_${"a".repeat(64)}`;
+test("external envelopes survive rendered-Markdown fences, escapes and prose; invalid text is rejected", () => {
+  const plain = { text: "OK", calls: [] };
+  expect(parseExternalEnvelope(JSON.stringify(plain))).toEqual(plain);
+  expect(parseExternalEnvelope('{"text":"OK","calls":\\[\\]}')).toEqual(plain);
+  expect(parseExternalEnvelope("```json\n{\"text\":\"OK\",\"calls\":[]}\n```")).toEqual(plain);
+  expect(parseExternalEnvelope('Here you go:\n{"text":"a\\_b \\"q\\" \\\\ line\\nnext","calls":\\[\\]}')).toEqual(
+    { text: "a_b \"q\" \\ line\nnext", calls: [] });
+  expect(parseExternalEnvelope('{"text":"","calls":\\[{"name":"read","arguments":{"path":"a\\\\b"}}\\]}')).toEqual(
+    { text: "", calls: [{ name: "read", arguments: { path: "a\\b" } }] });
+  expect(() => parseExternalEnvelope("OK")).toThrow("Invalid external model response envelope");
+  expect(() => parseExternalEnvelope('{"text":1,"calls":[]}')).toThrow("Invalid external model response envelope");
+});
 test("external mode requires the reserved bearer token; native Codex headers stay unchanged", () => {
   const request = (authorization?: string) => new Request("http://localhost/v1/responses", { headers: authorization ? { authorization } : {} });
   expect(externalAuthorization(request(), "127.0.0.1", token)).toBe("native");

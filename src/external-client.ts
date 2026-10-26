@@ -26,6 +26,28 @@ export function externalAuthorization(req: Request, address: string | undefined,
 
 export type ExternalBrowserRun = (turn: BrowserTurn) => Promise<string>;
 
+type ExternalEnvelope = { text: string; calls: Array<{ name: string; arguments: Record<string, unknown> }> };
+
+/** The browser returns rendered-Markdown text: code fences and Markdown punctuation escapes (`\[`, `\_`) may wrap
+ * the requested JSON. Accept only a complete object that parses after removing exactly those artefacts. */
+export function parseExternalEnvelope(answer: string): ExternalEnvelope {
+  const trimmed = answer.trim();
+  const fenced = /^```[a-zA-Z]*\s*\n?([\s\S]*?)\n?```$/.exec(trimmed)?.[1]?.trim() ?? trimmed;
+  const start = fenced.indexOf("{");
+  const end = fenced.lastIndexOf("}");
+  const object = start >= 0 && end > start ? fenced.slice(start, end + 1) : fenced;
+  // JSON escapes are \" \\ \/ \b \f \n \r \t \uXXXX; any other backslash is a Markdown escape.
+  const unescaped = object.replace(/\\\\|\\(.)/g, (match, next: string | undefined) =>
+    next === undefined || `"/bfnrtu`.includes(next) ? match : next);
+  for (const candidate of [trimmed, object, unescaped]) {
+    let output: unknown;
+    try { output = JSON.parse(candidate); } catch { continue; }
+    const value = output as ExternalEnvelope;
+    if (value && typeof value === "object" && typeof value.text === "string" && Array.isArray(value.calls)) return value;
+  }
+  throw new Error(`Invalid external model response envelope (${answer.length} chars, starts ${JSON.stringify(answer.slice(0, 40))})`);
+}
+
 /** Scope comes ONLY from authenticated server credentials, never request metadata or response IDs. */
 export function createExternalContinuationStore(token: string) {
   const scope = createHash("sha256").update(token).digest("hex");
@@ -89,8 +111,7 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
         onHeartbeat: () => queue.push({ type: "heartbeat" }),
       }, () => prepare());
       const answer = await waitExternal(physical, abort.signal);
-      const output = JSON.parse(answer);
-      if (!output || typeof output.text !== "string" || !Array.isArray(output.calls)) throw new Error("Invalid external model response envelope");
+      const output = parseExternalEnvelope(answer);
       // Validate the entire batch before publishing any calls to the client.
       for (const call of output.calls) {
         if (!call || !tools.some(tool => tool.name === call.name) || !call.arguments || typeof call.arguments !== "object" || Array.isArray(call.arguments)) throw new Error("Invalid external function call");
