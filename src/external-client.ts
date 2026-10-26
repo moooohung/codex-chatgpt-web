@@ -89,7 +89,9 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
   const choice = parsed.options.toolChoice;
   const provider = providerConfig(config);
   const capabilities = { localToolsEnabled: false, solAvailable: provider.chatgptWeb?.solAvailable !== false,
-    extraHighAvailable: provider.chatgptWeb?.extraHighAvailable === true, proAvailable: provider.chatgptWeb?.proAvailable === true };
+    extraHighAvailable: provider.chatgptWeb?.extraHighAvailable === true, proAvailable: provider.chatgptWeb?.proAvailable === true,
+    // Follow the launcher's Bigger Context setting for the context-window preflight, as native turns do.
+    experimentalBiggerContext: provider.chatgptWeb?.experimentalBiggerContext === true };
   const request = JSON.stringify({ instructions: body.instructions, input: body.input, tools: body.tools ?? [],
     tool_choice: body.tool_choice ?? "auto", parallel_tool_calls: body.parallel_tool_calls ?? true });
   // The ChatGPT composer accepts about 60k inline characters; agent requests are far larger, so they travel
