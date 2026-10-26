@@ -14,9 +14,10 @@ import type { AdapterEvent } from "./types";
 import { ExternalAdmission, ExternalAdmissionError, waitExternal } from "./external-admission";
 
 /** The reserved bearer prefix selects this protocol. All other traffic keeps its native route. */
-export function externalAuthorization(req: Request, address: string | undefined, token: string): "native" | "external" | 401 | 403 {
+export function externalAuthorization(req: Request, address: string | undefined, token?: string): "native" | "external" | 401 | 403 | 503 {
   const header = req.headers.get("authorization") ?? "";
   if (!/^Bearer cwext_/i.test(header)) return "native";
+  if (!token) return 503;
   if (!(address === "::1" || address === "127.0.0.1" || address?.startsWith("::ffff:127.") || /^127\.\d+\.\d+\.\d+$/.test(address ?? ""))) return 403;
   const actual = Buffer.from(header);
   const expected = Buffer.from(`Bearer ${token}`);

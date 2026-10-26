@@ -1035,8 +1035,10 @@ export function startServer(
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
-  const externalToken = loadExternalToken();
-  const externalState = createExternalContinuationStore(externalToken);
+  let externalToken: string | undefined;
+  try { externalToken = loadExternalToken(); }
+  catch { console.warn("[codex-chatgpt-web] external admission disabled: credential initialization refused"); }
+  const externalState = externalToken ? createExternalContinuationStore(externalToken) : undefined;
   const settingsConfigPath = getConfigPath();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
@@ -1081,8 +1083,7 @@ export function startServer(
     idleTimeout: 0,
     async fetch(req, listener) {
       const url = new URL(req.url);
-      const external = url.pathname.startsWith("/v1/")
-        ? externalAuthorization(req, listener.requestIP(req)?.address, externalToken) : "native";
+      const external = externalAuthorization(req, listener.requestIP(req)?.address, externalToken);
       if (typeof external === "number") return formatErrorResponse(external, "authentication_error", "External client authorization refused");
       if (external === "external" && !(
         (req.method === "POST" && url.pathname === "/v1/responses")
@@ -1349,7 +1350,7 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return rejectDuringMaintenance("responses");
         if (external === "external") return httpTurns.track(
-          signal => externalResponseRequest(new Request(req, { signal }), config, externalState, dependencies.externalBrowserRun),
+          signal => externalResponseRequest(new Request(req, { signal }), config, externalState!, dependencies.externalBrowserRun),
           req.signal, process.platform, "responses",
         );
         return httpTurns.track(
@@ -1409,7 +1410,7 @@ export function startServer(
     chatGptTurnSessions.clear();
     modelCatalogFetches.close();
     flushResponseState();
-    externalState.flushResponseState();
+    externalState?.flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([
         closeChatGptBrowserWorkers(),
