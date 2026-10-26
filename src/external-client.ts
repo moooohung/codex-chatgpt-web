@@ -11,6 +11,7 @@ import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./
 import { ChatGptBrowserWorker, type BrowserTurn } from "./adapters/chatgpt-web/browser-worker";
 import { runWithChatGptPlusPreparation } from "./adapters/chatgpt-web/account-fallback";
 import type { AdapterEvent } from "./types";
+import { ExternalAdmission, ExternalAdmissionError, waitExternal } from "./external-admission";
 
 /** The reserved bearer prefix selects this protocol. All other traffic keeps its native route. */
 export function externalAuthorization(req: Request, address: string | undefined, token: string): "native" | "external" | 401 | 403 {
@@ -34,10 +35,16 @@ export function createExternalContinuationStore(token: string) {
 
 /** A fresh browser turn has no broker, native identity, cwd, retained native conversation or authority. */
 export async function externalResponseRequest(req: Request, config: AppConfig,
-  state: ReturnType<typeof createExternalContinuationStore>, runBrowser?: ExternalBrowserRun): Promise<Response> {
+  state: ReturnType<typeof createExternalContinuationStore>, runBrowser?: ExternalBrowserRun,
+  admission = defaultExternalAdmission): Promise<Response> {
+  let lease: Awaited<ReturnType<ExternalAdmission["acquire"]>>;
+  try { lease = await admission.acquire(req.signal); }
+  catch (error) { return formatErrorResponse(error instanceof ExternalAdmissionError ? error.status : 408, "invalid_request_error", error instanceof Error ? error.message : "External admission cancelled"); }
+  const bodySignal = AbortSignal.any([lease.signal, AbortSignal.timeout(15_000)]);
   let body: any, parsed: ReturnType<typeof parseRequest>, route: ReturnType<typeof requireChatGptWebModelRoute>;
   try {
-    const raw = await readJsonRequestBody(req);
+    const raw = await readJsonRequestBody(req, { encodedBytes: 2 * 1024 * 1024, decodedBytes: 8 * 1024 * 1024,
+      signal: bodySignal });
     body = state.expandPreviousResponseInput(raw);
     if (body === raw && (raw as any)?.previous_response_id) throw new Error("External continuation state is unavailable; supply complete input");
     parsed = parseRequest(body);
@@ -45,7 +52,8 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
     if (route.interactionMode !== "automatic" || parsed._compactionRequest) throw new Error("External clients require an automatic Web model and ordinary Responses input");
     if (body.tools?.some((tool: any) => tool.type !== "function")) throw new Error("External clients support function tools only");
   } catch (error) {
-    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+    lease.release();
+    return formatErrorResponse(bodySignal.aborted ? 408 : 400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   const tools = parsed.context.tools ?? [];
   const choice = parsed.options.toolChoice;
@@ -63,21 +71,23 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
       tool_choice: body.tool_choice ?? "auto", parallel_tool_calls: body.parallel_tool_calls ?? true }),
   ].join("\n");
   const queue = new AsyncEventQueue<AdapterEvent>();
-  const abort = new AbortController();
+  const abort = lease;
   const cancel = () => abort.abort();
   req.signal.addEventListener("abort", cancel, { once: true });
   if (req.signal.aborted) cancel();
   const remember = (response: Record<string, unknown>) => state.rememberResponseState(body, response, { force: true });
   const run = async () => {
+    let physical: Promise<string> | undefined;
     try {
       const worker = runBrowser ? { run: runBrowser } : ChatGptBrowserWorker.forProvider(provider);
       const prepare: BrowserTurn["prepare"] = async () => ({ text: prompt, images: [], release() {} });
-      const answer = await runWithChatGptPlusPreparation(worker, {
+      physical = runWithChatGptPlusPreparation(worker, {
         traceId: `external-${randomUUID()}`, modelId: route.backendModel, reasoning: route.adapterEffort,
         ...(route.modelFamily ? { modelFamily: route.modelFamily } : {}),
         capabilities, prepare, abortSignal: abort.signal, onTextDelta() {},
         onHeartbeat: () => queue.push({ type: "heartbeat" }),
       }, () => prepare());
+      const answer = await waitExternal(physical, abort.signal);
       const output = JSON.parse(answer);
       if (!output || typeof output.text !== "string" || !Array.isArray(output.calls)) throw new Error("Invalid external model response envelope");
       // Validate the entire batch before publishing any calls to the client.
@@ -97,7 +107,13 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
       queue.push({ type: "done", stopReason: output.calls.length ? "tool_use" : "stop", endTurn: !output.calls.length });
     } catch (error) {
       queue.push({ type: "error", message: error instanceof Error ? error.message : String(error) });
-    } finally { req.signal.removeEventListener("abort", cancel); queue.close(); }
+    } finally {
+      req.signal.removeEventListener("abort", cancel);
+      // A cancelled observer cannot open another physical slot until the worker actually settles.
+      if (physical) void physical.then(() => lease.release(), () => lease.release());
+      else lease.release();
+      queue.close();
+    }
   };
   if (parsed.stream) {
     void run();
@@ -109,3 +125,4 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
   remember(json);
   return Response.json(json);
 }
+const defaultExternalAdmission = new ExternalAdmission();
