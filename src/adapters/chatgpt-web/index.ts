@@ -517,6 +517,7 @@ export function createChatGptWebAdapter(
       return {
         preparation,
         appName: worker.appName,
+        includeContextTokenBreakdown: true,
         captureLunaCheckpoint,
         experimentalSkillAttachments,
         preserveCompactionHistory: experimentalBiggerContext && minimal,

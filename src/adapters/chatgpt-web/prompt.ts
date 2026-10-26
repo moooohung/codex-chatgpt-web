@@ -11,6 +11,9 @@ import {
   supportsChatGptWebBiggerContext,
 } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { restoreCompactionTaskMessages } from "./compaction-continuation";
+import { chatGptTurnUserRevisionHistory, extractChatGptTurnIdentity } from "./environment";
+import { estimateTokens } from "../../lib/token-estimate";
 import { createRequestTokenEstimator, type TokenEstimator } from "../../lib/token-estimate";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
@@ -36,7 +39,14 @@ export interface CompiledChatGptWebPrompt {
   multipart?: ChatGptWebMultipartPrompt;
   /** Oldest history items removed by native-style compaction fit recovery; absent on normal turns. */
   trimmedCompactionMessages?: number;
+  /** Numeric counts of the submitted context records, never their contents or identifiers. */
+  contextTokenBreakdown?: ChatGptContextTokenBreakdown;
 }
+
+export type ChatGptContextTokenBreakdown = Partial<Record<
+  "system" | "developer" | "user" | "assistant" | "tool_result" | "agent_message",
+  { records: number; chars: number; tokens: number }
+>>;
 
 export interface CompileChatGptWebPromptOptions {
   /** Created once for a single request; never retained by a global cache. */
@@ -48,6 +58,8 @@ export interface CompileChatGptWebPromptOptions {
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
   /** The transport planner must inspect every record instead of silently trimming a candidate. */
   preserveCompactionHistory?: boolean;
+  /** Capture only when preparing a real browser submission, not during budget-planning probes. */
+  includeContextTokenBreakdown?: boolean;
   /**
    * Manual Zero Risk transport keeps ChatGPT model/effort selection and prompt submission under the
    * user's control. The browser bridge may open the owned tab and copy this prompt, but it never
@@ -224,7 +236,7 @@ const DROPPED_IMAGE_NOTE =
 /**
  * A fresh compaction epoch receives the complete canonical context, so every still-relevant image
  * must be attached on that first message. Retained continuation messages send only their new
- * canonical suffix because prior images remain in the same Temporary Chat. The per-message image
+ * canonical suffix because prior images remain in the same ChatGPT conversation. The per-message image
  * limit still drops overflow from the oldest end so the images the task is actively working on
  * survive.
  */
@@ -364,6 +376,17 @@ interface MultipartRecordWeight {
   chars: number;
 }
 
+function serializeMultipartContext(value: unknown): string {
+  const json = withoutRetiredTurnHandles(JSON.stringify(value));
+  // #886: even fenced JSON can enter ChatGPT's rich user-message renderer, which
+  // rewrites escaped quotes and Markdown and auto-links URLs. Encode string
+  // lexemes only; structural JSON punctuation and decoded context stay unchanged.
+  return json.replace(/"(?:\\.|[^"\\])*"/g, lexeme => lexeme.replace(
+    /\\(["\\])|[<>[\]*_~():#`]/g,
+    (match, escaped: string | undefined) => "\\u" + (escaped ?? match).charCodeAt(0).toString(16).padStart(4, "0"),
+  ));
+}
+
 interface PreparedMultipartRecord {
   text: string;
   weight: MultipartRecordWeight;
@@ -387,8 +410,28 @@ export function createChatGptWebPromptPreparation(request: CodexParsedRequest): 
 }
 
 function prepareMultipartRecord(record: MultipartContextRecord, estimate: TokenEstimator): PreparedMultipartRecord {
-  const text = withoutRetiredTurnHandles(JSON.stringify(record));
+  const text = serializeMultipartContext(record);
   return { text, weight: { tokens: estimate(text) + 1, chars: text.length + 1 } };
+}
+
+function contextTokenBreakdown(
+  system: string[],
+  messages: Record<string, unknown>[],
+  multipart: boolean,
+): ChatGptContextTokenBreakdown {
+  const counts: ChatGptContextTokenBreakdown = {};
+  const add = (role: keyof ChatGptContextTokenBreakdown, value: unknown): void => {
+    const text = multipart ? serializeMultipartContext(value) : withoutRetiredTurnHandles(JSON.stringify(value));
+    const group = counts[role] ??= { records: 0, chars: 0, tokens: 0 };
+    group.records += 1;
+    group.chars += text.length;
+    group.tokens += estimateTokens(text);
+  };
+  system.forEach((content, system_index) => add("system",
+    multipart ? { kind: "system", system_index, content } : content));
+  messages.forEach((message, message_index) => add(message.role as keyof ChatGptContextTokenBreakdown,
+    multipart ? { kind: "message", message_index, message } : message));
+  return counts;
 }
 
 function partitionMultipartRecordWeights(
@@ -696,6 +739,9 @@ export function compileChatGptWebPrompt(
     const attachments = {
       ...(skillFiles.length ? { skillFiles } : {}),
       ...(mode.localTools && !manualControl && !parsed._compactionRequest ? { turnToken } : {}),
+      ...(options?.includeContextTokenBreakdown
+        ? { contextTokenBreakdown: contextTokenBreakdown(system, messages, multipartEnabled) }
+        : {}),
     };
     const answerContract = captureLunaCheckpoint
       ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
@@ -803,7 +849,9 @@ export function compileChatGptWebPrompt(
     return { text, images, ...attachments };
   };
 
-  let sourceMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
+  let sourceMessages = withoutSupersededModelSwitchContracts(restoreCompactionTaskMessages(
+    parsed, extractChatGptTurnIdentity(parsed), chatGptTurnUserRevisionHistory(parsed),
+  ));
   const initialMessageCount = sourceMessages.length;
   let compiled = build(sourceMessages);
   if (!parsed._compactionRequest) return compiled;

@@ -16,6 +16,7 @@ import {
   extractCodexTurnIdentityFromBody,
   extractChatGptCompactionSourceRevision,
   isChatGptCompactionContinuation,
+  findChatGptCompactionSourceRevision,
   isCodexComposerPrediction,
 } from "./adapters/chatgpt-web/environment";
 import { assertComposerPredictionFits, configureComposerPrediction } from "./composer-predictions";
@@ -725,15 +726,13 @@ export async function responseRequest(
     // Authenticate both exact producer-defined representations, never arbitrary rewrites.
     // Inspect the literal retained representation: an unchanged summary can match the
     // previous checkpoint, but must not substitute its recovered delegation here.
-    const v1Source = extractChatGptCompactionSourceRevision({
+    // A child can have only parent instructions and contextual user items. Use the canonical
+    // instruction classifier: retained user-role content need not contain a human source.
+    const v1Source = findChatGptCompactionSourceRevision({
       ...parsed,
       _rawBody: { ...body, input: buildCompactV1Output(extractCompactUserMessages(body.input), summary) },
     }, { recoverCheckpoint: false });
-    rememberCompactionContinuation(parsed, identity, [source, v1Source], summary);
-    console.info(`[chatgpt-web] compaction_response_prepared ${JSON.stringify({
-      nativeThreadId: identity.threadId, nativeTurnId: identity.turnId,
-      responseFormat: compactionItem ? "compaction" : "message", summaryBytes: Buffer.byteLength(summary, "utf8"),
-    })}`);
+    rememberCompactionContinuation(parsed, identity, v1Source ? [source, v1Source] : [source], summary);
   };
   // Native checkpoint + current turn_context are the durable control plane. Reconstruct their
   // exact authority before transcript-derived trace/revision validation can reject a reconnect.

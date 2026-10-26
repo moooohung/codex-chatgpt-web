@@ -125,7 +125,6 @@ export interface AppConfig {
   experimentalMinimalContextTransport?: boolean;
   experimentalStagedCompaction?: boolean;
   experimentalReuseVerifiedEffort?: boolean;
-  useSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
   /** Transport silence and automatic browser response/tool-progress budget, in seconds. */
@@ -262,7 +261,6 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     experimentalMinimalContextTransport: true,
     experimentalStagedCompaction: false,
     experimentalReuseVerifiedEffort: true,
-    useSavedChats: true,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
     controlToken: randomBytes(32).toString("base64url"),
@@ -417,7 +415,9 @@ export function loadConfigForSetup(): AppConfig {
 
 function parseConfig(value: unknown, path: string): AppConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid configuration object in ${path}`);
-  const parsed = value as Partial<AppConfig>;
+  const parsed = { ...value } as Partial<AppConfig> & { useSavedChats?: unknown };
+  // Retire the old chat-mode preference without invalidating existing installations.
+  delete parsed.useSavedChats;
   if (parsed.version !== 3) throw new Error(`Unsupported configuration version in ${path}; rerun setup to migrate it`);
   if (parsed.purpose !== undefined && parsed.purpose !== "dev-harness") {
     throw new Error(`Invalid configuration purpose in ${path}`);
@@ -579,10 +579,6 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalReuseVerifiedEffort in ${path}`);
   }
   const experimentalReuseVerifiedEffort = parsed.experimentalReuseVerifiedEffort !== false;
-  if (parsed.useSavedChats !== undefined && typeof parsed.useSavedChats !== "boolean") {
-    throw new Error(`Invalid useSavedChats in ${path}`);
-  }
-  const useSavedChats = parsed.useSavedChats !== false;
   if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
   }
@@ -613,7 +609,6 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalMinimalContextTransport,
     experimentalStagedCompaction,
     experimentalReuseVerifiedEffort,
-    useSavedChats,
     zeroRiskProEnabled,
   } as AppConfig;
 }
@@ -694,7 +689,6 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalMinimalContextTransport: config.experimentalMinimalContextTransport !== false,
       experimentalStagedCompaction: !manual && config.experimentalStagedCompaction === true,
       experimentalReuseVerifiedEffort: config.experimentalReuseVerifiedEffort !== false,
-      useSavedChats: config.useSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,
     },

@@ -22,7 +22,6 @@ const DEFAULT_STATE = Object.freeze({
   composerPredictionsEnabled: true,
   experimentalSkillAttachments: false,
   experimentalFreshConversationPerTurn: false,
-  useSavedChats: true,
   zeroRiskProEnabled: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
@@ -64,6 +63,7 @@ function readState(filePath) {
       state.unusualActivityHistory = sanitizeUnusualActivityHistory(state.unusualActivityHistory);
     }
     delete state.bridgeEnabled;
+    delete state.useSavedChats;
     if (state.language !== null && (typeof state.language !== "string" || !Object.hasOwn(languages, state.language))) {
       state.language = DEFAULT_STATE.language;
     }
@@ -79,7 +79,6 @@ function readState(filePath) {
       "composerPredictionsEnabled",
       "experimentalSkillAttachments",
       "experimentalFreshConversationPerTurn",
-      "useSavedChats",
       "zeroRiskProEnabled",
       "browserSmokePassed",
       "sidebarOpen",

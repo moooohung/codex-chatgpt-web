@@ -29,7 +29,7 @@ test("real helper capture sends a revision ACK through production IPC before the
     surfaceId: "launcher_surface_id_0123456789AB", surfaceTargets: { launcher_surface_id_0123456789AB: "fixture-target" }, createdAt: new Date().toISOString() }), { mode: 0o600 });
   const client = new LauncherBrowserHelperClient({ appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptor,
     browserHelperScriptPath: helper, storageStatePath: join(root, "unused.json"), chromeExecutablePath: join(root, "unused"),
-    turnTimeoutMs: 1000, headed: true, autoApproveToolCalls: false, useSavedChats: true });
+    turnTimeoutMs: 1000, headed: true, autoApproveToolCalls: false });
   const progress = new ChatGptExternalTurnProgress(), revision = progress.recordToolBatch(1);
   const gateLifetime = new AbortController();
   let gate: Promise<void> | undefined;

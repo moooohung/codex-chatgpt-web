@@ -7,16 +7,15 @@ import {
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
   activateChatGptEffortMenu,
   assertNewChatPage,
-  chatGptNewChatUrl,
+  CHATGPT_NEW_CHAT_URL,
   detectChatGptAccountCapabilities,
 } from "../src/chatgpt-session";
 
-test("saved chats start empty and cannot reuse an arbitrary conversation or a Temporary Chat", async () => {
-  expect(chatGptNewChatUrl()).toBe("https://chatgpt.com/?temporary-chat=true");
-  expect(chatGptNewChatUrl(true)).toBe("https://chatgpt.com/");
+test("new chats are always ordinary and reject a previous conversation or Temporary Chat", async () => {
+  expect(CHATGPT_NEW_CHAT_URL).toBe("https://chatgpt.com/");
   const prepare = (ChatGptBrowserWorker.prototype as any).prepareChatSurface;
-  for (const saved of [false, true]) {
-    let url = "https://chatgpt.com/c/previous-task";
+  for (const initial of ["https://chatgpt.com/c/previous-task", "https://chatgpt.com/?temporary-chat=true", "about:blank", CHATGPT_NEW_CHAT_URL]) {
+    let url = initial;
     const navigations: string[] = [];
     const absent: any = { filter: () => absent, last: () => absent, isVisible: async () => false,
       evaluateAll: async (observe: (nodes: Element[]) => unknown) => observe([]) };
@@ -26,11 +25,13 @@ test("saved chats start empty and cannot reuse an arbitrary conversation or a Te
       goto: async (next: string) => { url = next; navigations.push(next); },
       locator: (selector: string) => selector === CHATGPT_COMPOSER_SELECTOR ? composer : absent,
     };
-    expect(await prepare.call({ activeComposer: async () => composer }, page, undefined, saved)).toBe(composer);
-    expect(navigations).toEqual([chatGptNewChatUrl(saved)]);
-    await expect(assertNewChatPage(page, !saved)).rejects.toThrow("requested new");
-    url = "https://chatgpt.com/c/previous-task";
-    await expect(assertNewChatPage(page, saved)).rejects.toThrow("requested new");
+    expect(await prepare.call({ activeComposer: async () => composer }, page)).toBe(composer);
+    expect(navigations).toEqual(initial === CHATGPT_NEW_CHAT_URL ? [] : [CHATGPT_NEW_CHAT_URL]);
+    await expect(assertNewChatPage(page)).resolves.toBeUndefined();
+    for (const invalid of ["https://chatgpt.com/c/previous-task", "https://chatgpt.com/?temporary-chat=true", "https://example.com/"]) {
+      url = invalid;
+      await expect(assertNewChatPage(page)).rejects.toThrow("requested new chat");
+    }
   }
 });
 
@@ -299,7 +300,7 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
     getByRole: () => ({ filter() { return this; }, count: async () => 0 }),
   };
   const page = {
-    url: () => "https://chatgpt.com/?temporary-chat=true",
+    url: () => "https://chatgpt.com/",
     evaluate: async () => true,
     locator: (selector: string) => {
       if (selector === CHATGPT_COMPOSER_SELECTOR) return composer;

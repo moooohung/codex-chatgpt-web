@@ -82,6 +82,21 @@ test.each(["5.6 Sol Instant", "6 Pro", ""])("generic effort announcements requir
   if (header === "5.6 Sol Instant") await confirmation;
   else await expect(confirmation).rejects.toThrow("could not be selected and verified");
 });
+test("Simplified Chinese effort announcements preserve exact model and effort verification (#911)", () => {
+  for (const [label, effort] of [["即时", "low"], ["中", "medium"], ["高", "high"]] as const) {
+    expect(chatGptModelFamilyMatches([`GPT-6 Sol ${label}，第 3 项，共 3 项`, `6 ${label}`], "6", effort)).toBeTrue();
+    expect(chatGptModelFamilyMatches([`5.6 ${label}`], "6", effort)).toBeFalse();
+    expect(chatGptModelFamilyMatches([`6 Astra ${label}`], "6", effort)).toBeFalse();
+    expect(chatGptModelFamilyMatches([`6 ${label}`, "6 Pro"], "6", effort)).toBeFalse();
+  }
+  for (const effort of ["low", "medium", "xhigh", "max"] as const) {
+    expect(chatGptModelFamilyMatches(["6 高"], "6", effort)).toBeFalse();
+  }
+  for (const label of ["超高", "高级", "高 reasoning", "高 6.1"]) {
+    expect(chatGptModelFamilyMatches([`6 ${label}`], "6", "high")).toBeFalse();
+  }
+});
+
 
 test("model verification accepts Unicode announcement punctuation without weakening identity", () => {
   for (const separator of ["、", "，", "،", "؛", "：", "—", "。", ",", ";"]) {
