@@ -10,13 +10,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $planFile = (Resolve-Path -LiteralPath $PlanPath).Path
 $plan = Get-Content -LiteralPath $planFile -Raw | ConvertFrom-Json
-$packageRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web/builds/bridge-6114-integrated-20261027')
-$backupRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web/backups/bridge-6114-integrated-20261027')
+$packageRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web/builds/bridge-6114-integrated-r2-20261027')
+$backupRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web/backups/bridge-6114-integrated-r2-20261027')
 $installRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/AppData/Local/Programs/Codex Web GPT')
 $oldRoot = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web/versions/6.1.4-win32-x64')
 $preparedRuntime = Join-Path $packageRoot 'runtime-ready'
 if ($FixtureRoot) {
-    $expectedFixture = [IO.Path]::GetFullPath('C:/Users/Administrator/.codex-chatgpt-web/worktrees/integrate-6114-20261027/scratch/install-fixture-6114-integrated')
+    $expectedFixture = [IO.Path]::GetFullPath('E:/c_offload_20261024/.codex-chatgpt-web/worktrees/integrate-6114-20261027/scratch/install-fixture-6114-integrated-r2')
     if ([IO.Path]::GetFullPath($FixtureRoot) -ne $expectedFixture) { throw 'Fixture root is not the exact owned workspace' }
     $installRoot = Join-Path $expectedFixture 'launcher'
     $oldRoot = Join-Path $expectedFixture 'core/versions/6.1.4-win32-x64'
@@ -32,7 +32,7 @@ $allowed = @($archiveTarget)
 foreach ($root in @($oldRoot, $runtimeTarget)) {
     foreach ($relative in @('app/cli.js', 'app/browser-helper.cjs', 'manifest.json')) { $allowed += [IO.Path]::GetFullPath((Join-Path $root $relative)) }
 }
-if ($plan.schemaVersion -ne 1 -or $plan.id -ne 'bridge-6114-integrated-20261027' -or $plan.operation -ne 'full-launcher-upgrade' -or
+if ($plan.schemaVersion -ne 1 -or $plan.id -ne 'bridge-6114-integrated-r2-20261027' -or $plan.operation -ne 'full-launcher-upgrade' -or
     $plan.files.Count -ne 7 -or [IO.Path]::GetFullPath($plan.packageRoot) -ne $packageRoot -or
     [IO.Path]::GetFullPath($plan.backupRoot) -ne $backupRoot -or
     [IO.Path]::GetFullPath($plan.runtimeBundle.target) -ne $runtimeTarget -or

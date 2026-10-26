@@ -9,7 +9,7 @@ import { compiledChatGptWebMessages, estimateCompiledChatGptWebInputTokens } fro
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { COMPACTION_CHECKPOINT_BYTES } from "./large-context-compaction";
 import {
-  CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET, compileChatGptWebPrompt,
+  CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET, compileChatGptWebPrompt, createChatGptWebPromptPreparation,
   type CompiledChatGptWebPrompt, type ChatGptWebMultipartPartCount,
 } from "./prompt";
 
@@ -60,10 +60,13 @@ export function prepareCompactionStageTransport(
   );
   const jsonReserve = options.reserveCheckpoint ? CHECKPOINT_JSON_RESERVE : 0;
   const tokenReserve = options.reserveCheckpoint ? CHECKPOINT_TOKEN_RESERVE : 0;
+  // Reuse the exact immutable stage and token counts while probing multipart sizes.
+  // The upstream rich-text escaping and every transport limit remain unchanged.
+  const preparation = createChatGptWebPromptPreparation(stage);
   const parts: (ChatGptWebMultipartPartCount | undefined)[] = options.multipart ? [undefined, 2, 4, 6, 8] : [undefined];
   for (const count of parts) {
     const compiled = compileChatGptWebPrompt(stage, capabilities, undefined, {
-      preserveCompactionHistory: true, ...(count ? { experimentalMultipartParts: count } : {}),
+      preserveCompactionHistory: true, preparation, ...(count ? { experimentalMultipartParts: count } : {}),
     });
     const messages = compiledChatGptWebMessages(compiled);
     if (messages.reduce((sum, text) => sum + text.length, 0) + jsonReserve > COMPACTION_STAGE_PAGE_CHAR_BUDGET) continue;
@@ -77,11 +80,11 @@ export function prepareCompactionStageTransport(
       return !efforts.some(effort => {
         const limits = resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
         return text.length + reserveFor(text) <= (limits.browserComposerCharLimit ?? Infinity)
-          && estimateTokens(text, stage.modelId) + tokenReserve
+          && preparation.estimate(text, stage.modelId) + tokenReserve
             <= resolveChatGptWebStagingTokenBudget(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
       });
     })) continue;
-    if (estimateCompiledChatGptWebInputTokens(compiled, stage.modelId) + tokenReserve >= autoCompactTokenLimit) continue;
+    if (estimateCompiledChatGptWebInputTokens(compiled, stage.modelId, preparation.estimate) + tokenReserve >= autoCompactTokenLimit) continue;
     return compiled;
   }
   return undefined;

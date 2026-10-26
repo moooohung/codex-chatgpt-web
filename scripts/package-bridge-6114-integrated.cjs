@@ -2,13 +2,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
-const workspace = process.cwd();
-const id = 'bridge-6114-integrated-20261027';
+const workspace = fs.realpathSync(process.cwd());
+const id = 'bridge-6114-integrated-r2-20261027';
 const home = 'C:/Users/Administrator/.codex-chatgpt-web';
 const output = path.resolve(home, 'builds', id);
 const installed = path.resolve('C:/Users/Administrator/AppData/Local/Programs/Codex Web GPT');
 const oldRoot = path.resolve(home, 'versions/6.1.4-win32-x64');
-const fixture = path.resolve(workspace, 'scratch/install-fixture-6114-integrated');
+const fixture = path.resolve(workspace, 'scratch/install-fixture-6114-integrated-r2');
 const hash = p => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const json = p => JSON.parse(fs.readFileSync(p, 'utf8'));
 const write = (p, value) => { fs.mkdirSync(path.dirname(p), {recursive:true}); fs.writeFileSync(p, JSON.stringify(value, null, 2)+'\n'); };
@@ -20,7 +20,7 @@ const record = (target, source, backupRelativePath) => ({target, source, backupR
 const planPath = path.join(output, 'install-plan.json');
 if (['package','seal'].includes(process.argv[2])) {
   if(fs.existsSync(planPath)) throw Error('Preserve existing sealed package');
-  const staging = path.join(workspace, 'scratch/6114-integrated-package');
+  const staging = path.join(workspace, 'scratch/6114-integrated-r2-package');
   if(!fs.existsSync(path.join(staging, 'win-unpacked/resources/runtime/manifest.json'))) throw Error('Complete package is required');
   fs.mkdirSync(output, {recursive:true});
   if(process.argv[2] === 'package') fs.cpSync(staging, path.join(output, 'package'), {recursive:true, errorOnExist:true, force:false});
