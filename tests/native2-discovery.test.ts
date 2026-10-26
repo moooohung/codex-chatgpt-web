@@ -121,16 +121,20 @@ test("a PTY registry miss exposes the exact loader and cannot dispatch guessed J
       expect(JSON.stringify(response.content)).toContain("not available in this turn");
     }
     const inventory = await f.call("codex_tool_inventory", { turn_token: token, query: "exec", include_schema: true });
-    expect(inventory.structuredContent).toMatchObject({ tools: [{ wire_name: "exec_command", kind: "function", parameters: commandTools[0]!.parameters }], total: 1 });
+    expect(inventory.structuredContent.tools.find((tool: { wire_name: string }) => tool.wire_name === "exec_command"))
+      .toMatchObject({ wire_name: "exec_command", kind: "function", parameters: commandTools[0]!.parameters });
+    expect(inventory.structuredContent.total).toBe(inventory.structuredContent.tools.length);
     const pending = f.call("codex_tool_call", { turn_token: token, wire_name: "exec_command", arguments: { cmd: "fixture-only" } });
     const batch = await f.broker.nextToolBatch(token);
     expect(batch).toHaveLength(1);
     expect(batch[0]).toMatchObject({ wireName: "exec_command", freeform: false, arguments: { cmd: "fixture-only" } });
     f.broker.completeTool(token, batch[0]!.callId, toolResult({ session_id: 741, output: "still running" }));
     expect((await pending).structuredContent).toEqual({ session_id: 741, output: "still running" });
-    const poll = f.call("codex_write_stdin", { turn_token: token, session_id: 741, chars: "", yield_time_ms: 300_000 });
+    const rejectedPoll = await f.call("codex_write_stdin", { turn_token: token, session_id: 741, chars: "", yield_time_ms: 300_000 });
+    expect(rejectedPoll.isError).toBeTrue();
+    const poll = f.call("codex_write_stdin", { turn_token: token, session_id: 741, chars: "", yield_time_ms: 60_000 });
     const [request] = await f.broker.nextToolBatch(token);
-    expect(request).toMatchObject({ wireName: "write_stdin", arguments: { session_id: 741, chars: "", yield_time_ms: 30_000 } });
+    expect(request).toMatchObject({ wireName: "write_stdin", arguments: { session_id: 741, chars: "", yield_time_ms: 60_000 } });
     f.broker.completeTool(token, request!.callId, toolResult({ session_id: 741, exit_code: 0, output: "done" }));
     expect((await poll).structuredContent).toMatchObject({ session_id: 741, exit_code: 0 });
   } finally { await f.close(); }

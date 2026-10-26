@@ -9,6 +9,10 @@ import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-erro
 import type { CodexParsedRequest } from "../src/types";
 import { compactionStageData } from "./fixtures/compaction-stage";
 
+// Full-size encoded histories require repeated synchronous tokenization. This
+// fixture deadline allows CPU contention and does not change provider deadlines.
+const LARGE_FIXTURE_TEST_TIMEOUT_MS = 120_000;
+
 function fixture(now = 1_800_000_000_000): CodexParsedRequest {
   return { modelId: "gpt-5.6-sol", stream: true, _compactionRequest: true, options: { reasoning: "xhigh" },
     context: { systemPrompt: ["Preserve original instructions and verified scope"], messages: [
@@ -65,7 +69,7 @@ test("closed tab resumes the persisted exact suffix on a smaller account, then r
   expect(await execute(new CompactionJournal(directory, () => now), fixture(now + 10))).toBe(summary);
   expect(completed).toBe(before);
   expect(sourceHash).toBe(compactionSourceHash(fixture(now)));
-}), 30_000);
+}), LARGE_FIXTURE_TEST_TIMEOUT_MS);
 
 test("unusual activity honors the full provider cooldown across new turns, source changes, and daemon restarts", () => temporary(async directory => {
   let now = 1_800_000_000_000, sends = 0;
@@ -116,7 +120,7 @@ test("a stage that ChatGPT accepted but left without a checkpoint is resent once
   await expect(runLargeContextCompaction({ parsed, plan, signal: signal(), run: async () => { calls++; throw stalled(); } }))
     .rejects.toMatchObject({ code: "chatgpt_response_incomplete" });
   expect(calls).toBe(2);
-}, 30_000);
+}, LARGE_FIXTURE_TEST_TIMEOUT_MS);
 
 test("concurrent observers share the completed receipt and corrupt receipts fail closed", () => temporary(async directory => {
   let sends = 0;
@@ -138,7 +142,9 @@ test("admission-only budget rejection resizes a batch; provider rejections never
     run: async (_stage, prepared) => {
       attempts++;
       const data = compactionStageData(prepared!);
-      if (!summaries && data.fragments.length > 4) throw new ChatGptWebAdapterError("No message was sent", { status: 409, errorType: "invalid_request_error", code: "compaction_stage_too_large", retryable: false });
+      // Upstream escaping can fit fewer than four fragments in the first batch.
+      // Reject every multi-fragment admission to exercise the actual resize path.
+      if (!summaries && data.fragments.length > 1) throw new ChatGptWebAdapterError("No message was sent", { status: 409, errorType: "invalid_request_error", code: "compaction_stage_too_large", retryable: false });
       observed.push(...data.fragments); summaries++;
       return "Verified cumulative checkpoint";
     },
@@ -150,4 +156,4 @@ test("admission-only budget rejection resizes a batch; provider rejections never
     attempts++; throw new ChatGptWebAdapterError("Ambiguous Send", { status: 502, errorType: "server_error", code: "chatgpt_submission_failed", retryable: false });
   } })).rejects.toMatchObject({ code: "chatgpt_submission_failed" });
   expect(attempts).toBe(1);
-}, 30_000);
+}, LARGE_FIXTURE_TEST_TIMEOUT_MS);

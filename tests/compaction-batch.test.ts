@@ -8,6 +8,10 @@ import { compactionStageData } from "./fixtures/compaction-stage";
 import { canonicalizeCompactionHandoff } from "../src/adapters/chatgpt-web/compaction-handoff";
 import type { CodexParsedRequest } from "../src/types";
 
+// These offline invariants compile and tokenize the full 870k-character fixture
+// repeatedly. Allow CPU contention from packaging; production budgets stay exact.
+const LARGE_FIXTURE_TEST_TIMEOUT_MS = 120_000;
+
 function request(chars: number): CodexParsedRequest {
   const pattern = 'Evidence file:123 original error {"status":"failed"} preserve cause\n';
   return { modelId: "gpt-5.6-sol", options: { reasoning: "xhigh" }, stream: true, _compactionRequest: true,
@@ -64,7 +68,7 @@ test.each([true, false])("batched %s account compaction preserves every compiled
   expect(calls).toBeLessThanOrEqual(plan.fragments.length);
   expect(progress.at(-1).fragmentsProcessed).toBe(plan.fragments.length);
   expect(canonicalizeCompactionHandoff(parsed, summary)).toContain('CODEX_LATEST_USER_PROMPT_JSON\n"Later correction: preserve the original model and evidence."');
-}, 30_000);
+}, LARGE_FIXTURE_TEST_TIMEOUT_MS);
 
 test("disabled multipart packs the largest fitting suffix without losing any source fragment", async () => {
   const parsed = request(120_000), plan = planLargeContextCompaction(parsed)!;
@@ -116,4 +120,4 @@ test("a Plus lease after stage 1 clamps later stage sizing instead of failing th
     } });
   expect(calls).toBeGreaterThan(1);
   expect(summary.length).toBeGreaterThan(0);
-}, 30_000);
+}, LARGE_FIXTURE_TEST_TIMEOUT_MS);

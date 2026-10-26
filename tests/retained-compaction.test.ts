@@ -1464,7 +1464,8 @@ test.each([[false, undefined], [true, undefined], [true, false], [true, true]] a
     expect(turn.conversationKey).toBeUndefined();
     expect(turn.compaction).toBeTrue();
     const prepared = await turn.prepare();
-    const contextText = prepared.multipart?.parts.join("\n") ?? prepared.text;
+    // Assert decoded context, while checking the actual escaped wire bytes below.
+    const contextText = prepared.multipart?.parts.map(part => JSON.stringify(JSON.parse(part))).join("\n") ?? prepared.text;
     if (experimentalBiggerContext) {
       expect(prepared.trimmedCompactionMessages).toBeUndefined();
       expect(contextText).toContain("codex_compaction_stage_json");
