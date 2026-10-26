@@ -1,10 +1,6 @@
 import { expect, test } from "bun:test";
-import { createExternalContinuationStore, EXTERNAL_INLINE_REQUEST_CHARS, EXTERNAL_REQUEST_FILE, externalAuthorization,
-  externalResponseRequest, parseExternalEnvelope } from "../src/external-client";
-import { createResponseStateStore } from "../src/responses/state";
-import { validateSkillFiles } from "../src/adapters/chatgpt-web/skill-attachments";
+import { externalAuthorization, externalTokenPath, nativeShapedExternalBody } from "../src/external-client";
 import { defaultConfig } from "../src/config";
-import { externalTokenPath } from "../src/external-client";
 import { startServer } from "../src/server";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,20 +8,12 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 const token = `cwext_${"a".repeat(64)}`;
-test("external envelopes survive rendered-Markdown fences, escapes and prose; invalid text is rejected", () => {
-  const plain = { text: "OK", calls: [] };
-  expect(parseExternalEnvelope(JSON.stringify(plain))).toEqual(plain);
-  expect(parseExternalEnvelope('{"text":"OK","calls":\\[\\]}')).toEqual(plain);
-  expect(parseExternalEnvelope("```json\n{\"text\":\"OK\",\"calls\":[]}\n```")).toEqual(plain);
-  expect(parseExternalEnvelope('Here you go:\n{"text":"a\\_b \\"q\\" \\\\ line\\nnext","calls":\\[\\]}')).toEqual(
-    { text: "a_b \"q\" \\ line\nnext", calls: [] });
-  expect(parseExternalEnvelope('{"text":"","calls":\\[{"name":"read","arguments":{"path":"a\\\\b"}}\\]}')).toEqual(
-    { text: "", calls: [{ name: "read", arguments: { path: "a\\b" } }] });
-  expect(parseExternalEnvelope('```\n{"text":":chatgpt-content-reference{"ref":"turn0file0"}done","calls":[]}\n```')).toEqual(
-    { text: "done", calls: [] });
-  expect(() => parseExternalEnvelope("OK")).toThrow("Invalid external model response envelope");
-  expect(() => parseExternalEnvelope('{"text":1,"calls":[]}')).toThrow("Invalid external model response envelope");
-});
+const cwd = process.cwd();
+const system = { role: "system", content: `# Session\nCwd: ${cwd}\nModel: x` };
+const user = (text: string) => ({ role: "user", content: [{ type: "input_text", text }] });
+const shape = (input: unknown[]) => nativeShapedExternalBody({ model: "chatgpt-web/gpt-5.6-sol", prompt_cache_key: "sess-1", input }) as any;
+const turnOf = (body: any) => JSON.parse(body.client_metadata["x-codex-turn-metadata"]);
+
 test("external mode requires the reserved bearer token; native Codex headers stay unchanged", () => {
   const request = (authorization?: string) => new Request("http://localhost/v1/responses", { headers: authorization ? { authorization } : {} });
   expect(externalAuthorization(request(), "127.0.0.1", token)).toBe("native");
@@ -36,147 +24,49 @@ test("external mode requires the reserved bearer token; native Codex headers sta
   for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) expect(externalAuthorization(request(`Bearer ${token}`), ip, token)).toBe("external");
 });
 
-test("string-encoded function arguments are accepted; undeclared functions are rejected by name", async () => {
-  const config = defaultConfig("full");
-  const state = createExternalContinuationStore(token);
-  const tools = [{ type: "function", name: "lookup", parameters: { type: "object", properties: { key: { type: "string" } } } }];
-  const call = (answer: string) => externalResponseRequest(new Request("http://localhost/v1/responses", { method: "POST",
-    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input: "go", tools }) }), config, state, async () => answer);
-  const ok = await (await call('{"text":"","calls":[{"name":"lookup","arguments":"{\\"key\\":\\"x\\"}"}]}')).json() as any;
-  expect(ok.status).toBe("completed");
-  expect(JSON.parse(ok.output.find((item: any) => item.type === "function_call").arguments)).toEqual({ key: "x" });
-  // ChatGPT Web reports no usage; the estimate must still let clients track context.
-  expect(ok.usage.input_tokens).toBeGreaterThan(0);
-  expect(ok.usage.output_tokens).toBeGreaterThan(0);
-  expect(ok.usage.total_tokens).toBe(ok.usage.input_tokens + ok.usage.output_tokens);
-  const bad = await (await call('{"text":"","calls":[{"name":"nope","arguments":{}}]}')).json() as any;
-  expect(bad.status).toBe("failed");
-  expect(JSON.stringify(bad.error)).toContain("undeclared function");
+test("a new external turn gets native identity, a full-access environment before its user message, and reminders as context", () => {
+  const body = shape([system, user("do it"), user("<system-reminder>note</system-reminder>")]);
+  const { thread_id, turn_id } = turnOf(body);
+  expect(thread_id).toBe("sess-1");
+  expect(body.prompt_cache_key).toBe("sess-1");
+  const [, environment, instruction, reminder] = body.input;
+  expect(environment.role).toBe("user");
+  expect(environment.content[0].text).toContain(`<cwd>${cwd}</cwd>`);
+  expect(environment.content[0].text).toContain('<permission_profile type="disabled"><file_system type="unrestricted" />');
+  expect(instruction.content[0].text).toBe("do it");
+  expect(reminder.role).toBe("developer");
+  for (const item of [environment, instruction, reminder]) expect(item.internal_chat_message_metadata_passthrough.turn_id).toBe(turn_id);
 });
 
-test("visible ChatGPT reasoning summaries stream to external clients as reasoning progress", async () => {
-  const config = defaultConfig("full");
-  const state = createExternalContinuationStore(token);
-  const response = await externalResponseRequest(new Request("http://localhost/v1/responses", { method: "POST",
-    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input: "hi", stream: true }) }), config, state, async turn => {
-    turn.onReasoningSummary?.("Reading the request");
-    turn.onCommentary?.("Checking the tools");
-    turn.onTextDelta('{"text":"ok","calls":[]}');
-    return '{"text":"ok","calls":[]}';
-  });
-  const sse = await response.text();
-  expect(sse).toContain("response.reasoning_summary_text.delta");
-  expect(sse).toContain("Reading the request");
-  expect(sse).toContain("Checking the tools");
-  expect(sse).toContain("response.completed");
+test("tool continuations stay in the same turn; a user message after a final answer starts a new one", () => {
+  const first = turnOf(shape([system, user("do it"), user("reminder 1")])).turn_id;
+  const call = { type: "function_call", call_id: "c1", name: "read", arguments: "{}" };
+  const output = { type: "function_call_output", call_id: "c1", output: "x" };
+  const continued = shape([system, user("do it"), call, output, user("reminder 2")]);
+  expect(turnOf(continued).turn_id).toBe(first);
+  expect(continued.input.at(-1).role).toBe("developer");
+  const next = shape([system, user("do it"), call, output, { role: "assistant", content: [{ type: "output_text", text: "done" }] }, user("next")]);
+  expect(turnOf(next).turn_id).not.toBe(first);
+  expect(next.input.at(-2).content[0].text).toContain("<environment_context>");
+  expect(next.input.at(-1).content[0].text).toBe("next");
 });
 
-test("large external requests travel as an attached file and keep the inline prompt small", async () => {
-  const config = defaultConfig("full");
-  const state = createExternalContinuationStore(token);
-  const big = "x".repeat(EXTERNAL_INLINE_REQUEST_CHARS * 3);
-  const small = "hello";
-  const call = (input: string) => externalResponseRequest(new Request("http://localhost/v1/responses", { method: "POST",
-    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input }) }), config, state, async turn => {
-    const prepared = await turn.prepare();
-    if (input === big) {
-      expect(prepared.text.length).toBeLessThan(EXTERNAL_INLINE_REQUEST_CHARS);
-      expect(prepared.text).toContain(EXTERNAL_REQUEST_FILE);
-      expect(prepared.skillFiles).toHaveLength(1);
-      expect(() => validateSkillFiles(prepared.skillFiles)).not.toThrow();
-      expect(prepared.skillFiles![0]!.name.startsWith(`${EXTERNAL_REQUEST_FILE}--`)).toBeTrue();
-      expect(prepared.text).toContain(prepared.skillFiles![0]!.name);
-      expect(JSON.parse(prepared.skillFiles![0]!.text).input).toBe(big);
-    } else {
-      expect(prepared.skillFiles).toBeUndefined();
-      expect(prepared.text).toContain('"input":"hello"');
-    }
-    return '{"text":"ok","calls":[]}';
-  });
-  expect((await (await call(big)).json() as any).status).toBe("completed");
-  expect((await (await call(small)).json() as any).status).toBe("completed");
+test("external requests without a working directory or with server-side continuation are refused", () => {
+  expect(() => shape([user("hi")])).toThrow("Cwd:");
+  expect(() => nativeShapedExternalBody({ previous_response_id: "r", input: [system, user("hi")] })).toThrow("previous_response_id");
 });
 
-test("external function round trip uses Responses calls and accepts function_call_output without native authority", async () => {
-  const config = defaultConfig("full");
-  const state = createExternalContinuationStore(token);
-  const tools = [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object", properties: { key: { type: "string" } }, required: ["key"] } }];
-  const request = (input: unknown, stream = false) => new Request("http://localhost/v1/responses", { method: "POST",
-    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input, tools, stream }) });
-  const first = await externalResponseRequest(request("lookup hello"), config, state, async turn => {
-    expect(turn.capabilities.localToolsEnabled).toBeFalse();
-    expect(turn.nativeConnector).toBeUndefined();
-    expect(turn.conversationKey).toBeUndefined();
-    expect((await turn.prepare()).text).toContain('"name":"lookup"');
-    return JSON.stringify({ text: "", calls: [{ name: "lookup", arguments: { key: "hello" } }] });
-  });
-  const result = await first.json() as any;
-  expect(result.status).toBe("completed");
-  const call = result.output.find((item: any) => item.type === "function_call");
-  expect(call.name).toBe("lookup");
-  expect(JSON.parse(call.arguments)).toEqual({ key: "hello" });
-  const continuation = new Request("http://localhost/v1/responses", { method: "POST", body: JSON.stringify({
-    model: "chatgpt-web/gpt-5.6-sol", previous_response_id: result.id, tools, stream: true,
-    input: [{ type: "function_call_output", call_id: call.call_id, output: "world" }],
-  }) });
-  const second = await externalResponseRequest(continuation, config, state, async turn => {
-    expect((await turn.prepare()).text).toContain('"output":"world"');
-    return '{"text":"world","calls":[]}';
-  });
-  const sse = await second.text();
-  expect(sse).toContain("response.output_text.delta");
-  expect(sse).toContain("response.completed");
-  expect(sse).toContain("world");
-  const streamed = await externalResponseRequest(request("lookup", true), config, state,
-    async () => '{"text":"","calls":[{"name":"lookup","arguments":{"key":"x"}}]}');
-  const events = await streamed.text();
-  for (const name of ["response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"]) expect(events).toContain(name);
-});
-
-test("continuations isolate native and authenticated external histories, persistence and eviction", () => {
-  const home = mkdtempSync(join(tmpdir(), "cgw-state-scope-"));
-  const previous = process.env.CODEX_CHATGPT_WEB_HOME;
-  process.env.CODEX_CHATGPT_WEB_HOME = home;
-  try {
-    const native = createResponseStateStore({ snapshotPath: () => join(home, "responses-state.json") });
-    const external = createExternalContinuationStore(token);
-    const other = createExternalContinuationStore(`cwext_${"b".repeat(64)}`);
-    const remember = (store: typeof native, id: string, text: string) =>
-      store.rememberResponseState({ input: text }, { id, output: [], status: "completed" });
-    remember(native, "native-id", "PRIVATE NATIVE");
-    remember(external, "external-id", "external");
-    native.flushResponseState(); external.flushResponseState();
-    const probe = (id: string) => ({ previous_response_id: id, input: "next" });
-    const nativeProbe = probe("native-id"), externalProbe = probe("external-id");
-    expect(external.expandPreviousResponseInput(nativeProbe)).toBe(nativeProbe);
-    expect(native.expandPreviousResponseInput(externalProbe)).toBe(externalProbe);
-    expect(other.expandPreviousResponseInput(externalProbe)).toBe(externalProbe);
-    const reloaded = createExternalContinuationStore(token);
-    expect(reloaded.expandPreviousResponseInput(nativeProbe)).toBe(nativeProbe);
-    expect((reloaded.expandPreviousResponseInput(externalProbe) as any).input).toEqual([{ role: "user", content: "external" }, { role: "user", content: "next" }]);
-    for (let i = 0; i < 129; i++) remember(external, `ext-${i}`, "bounded");
-    expect(external.expandPreviousResponseInput(externalProbe)).toBe(externalProbe);
-    expect(native.expandPreviousResponseInput(nativeProbe)).not.toBe(nativeProbe);
-    external.flushResponseState();
-  } finally {
-    if (previous === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
-    else process.env.CODEX_CHATGPT_WEB_HOME = previous;
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("HTTP admission preserves native traffic, rejects bad external tokens and persists a private token", async () => {
+test("HTTP admission routes authenticated external requests through the native adapter and persists a private token", async () => {
   const previous = process.env.CODEX_CHATGPT_WEB_HOME;
   const home = mkdtempSync(join(tmpdir(), "cgw-external-"));
   process.env.CODEX_CHATGPT_WEB_HOME = home;
-  let native = 0, external = 0;
+  const seen: any[] = [];
   const server = startServer({ ...defaultConfig("browser-only"), port: 0 }, {
-    adapterFactory: () => ({ name: "native-fixture", async runTurn(_parsed, _incoming, emit) {
-      native++;
+    adapterFactory: () => ({ name: "native-fixture", async runTurn(parsed, _incoming, emit) {
+      seen.push(parsed._rawBody);
       emit({ type: "text_delta", text: "native" });
       emit({ type: "done" });
     } }),
-    externalBrowserRun: async () => { external++; return '{"text":"external","calls":[]}'; },
   });
   try {
     const secret = readFileSync(externalTokenPath(), "utf8").trim();
@@ -189,15 +79,16 @@ test("HTTP admission preserves native traffic, rejects bad external tokens and p
       expect(proof.length).toBe(0);
     } else expect(statSync(externalTokenPath()).mode & 0o777).toBe(0o600);
     const base = `http://127.0.0.1:${server.port}`;
-    const send = (authorization?: string) => fetch(`${base}/v1/responses`, { method: "POST",
-      headers: authorization ? { authorization } : {}, body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input: "OK" }) });
+    const send = (authorization?: string, input: unknown = "OK") => fetch(`${base}/v1/responses`, { method: "POST",
+      headers: authorization ? { authorization } : {}, body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input }) });
     expect((await send()).status).toBe(200);
     expect((await send("Bearer codex-placeholder")).status).toBe(200);
-    expect(native).toBe(2);
-    expect(external).toBe(0);
+    expect(seen.length).toBe(2);
     expect((await send(`Bearer ${secret}wrong`)).status).toBe(401);
-    expect((await send(`Bearer ${secret}`)).status).toBe(200);
-    expect(external).toBe(1);
+    expect((await send(`Bearer ${secret}`, [user("no cwd")])).status).toBe(400);
+    expect((await send(`Bearer ${secret}`, [system, user("hi")])).status).toBe(200);
+    expect(seen.length).toBe(3);
+    expect(JSON.parse(seen[2].client_metadata["x-codex-turn-metadata"]).turn_id).toBeString();
     const catalog = await fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${secret}` } });
     expect((await catalog.json() as any).data[0].id).toBe("chatgpt-web/gpt-5.6-sol");
   } finally {

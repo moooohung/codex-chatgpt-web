@@ -57,7 +57,7 @@ import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 import { isLocalBridgeHost } from "./local-host";
-import { createExternalContinuationStore, externalAuthorization, externalResponseRequest, loadExternalToken, type ExternalBrowserRun } from "./external-client";
+import { externalAuthorization, externalNativeRequest, loadExternalToken } from "./external-client";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
 
@@ -1033,7 +1033,6 @@ export function startServer(
     fetchUpstream?: NativeFetch;
     adapterFactory?: ChatGptWebAdapterFactory;
     modelCatalogFetches?: ModelCatalogFetches;
-    externalBrowserRun?: ExternalBrowserRun;
   } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
@@ -1043,7 +1042,6 @@ export function startServer(
   let externalToken: string | undefined;
   try { externalToken = loadExternalToken(); }
   catch { console.warn("[codex-chatgpt-web] external admission disabled: credential initialization refused"); }
-  const externalState = externalToken ? createExternalContinuationStore(externalToken) : undefined;
   const settingsConfigPath = getConfigPath();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
@@ -1358,7 +1356,8 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return rejectDuringMaintenance("responses");
         if (external === "external") return httpTurns.track(
-          signal => externalResponseRequest(new Request(req, { signal }), config, externalState!, dependencies.externalBrowserRun),
+          (signal, bindIdentity) => externalNativeRequest(new Request(req, { signal }), native => responseRequest(
+            native, config, dependencies.adapterFactory, { onTurnIdentity: bindIdentity })),
           req.signal, process.platform, "responses",
         );
         return httpTurns.track(
@@ -1418,7 +1417,6 @@ export function startServer(
     chatGptTurnSessions.clear();
     modelCatalogFetches.close();
     flushResponseState();
-    externalState?.flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([
         closeChatGptBrowserWorkers(),
