@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createExternalContinuationStore, EXTERNAL_INLINE_REQUEST_CHARS, EXTERNAL_REQUEST_FILE, externalAuthorization,
   externalResponseRequest, parseExternalEnvelope } from "../src/external-client";
 import { createResponseStateStore } from "../src/responses/state";
+import { validateSkillFiles } from "../src/adapters/chatgpt-web/skill-attachments";
 import { defaultConfig } from "../src/config";
 import { externalTokenPath } from "../src/external-client";
 import { startServer } from "../src/server";
@@ -45,7 +46,9 @@ test("large external requests travel as an attached file and keep the inline pro
       expect(prepared.text.length).toBeLessThan(EXTERNAL_INLINE_REQUEST_CHARS);
       expect(prepared.text).toContain(EXTERNAL_REQUEST_FILE);
       expect(prepared.skillFiles).toHaveLength(1);
-      expect(prepared.skillFiles![0]!.name).toBe(EXTERNAL_REQUEST_FILE);
+      expect(() => validateSkillFiles(prepared.skillFiles)).not.toThrow();
+      expect(prepared.skillFiles![0]!.name.startsWith(`${EXTERNAL_REQUEST_FILE}--`)).toBeTrue();
+      expect(prepared.text).toContain(prepared.skillFiles![0]!.name);
       expect(JSON.parse(prepared.skillFiles![0]!.text).input).toBe(big);
     } else {
       expect(prepared.skillFiles).toBeUndefined();

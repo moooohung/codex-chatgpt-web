@@ -27,7 +27,7 @@ export function externalAuthorization(req: Request, address: string | undefined,
 export type ExternalBrowserRun = (turn: BrowserTurn) => Promise<string>;
 
 export const EXTERNAL_INLINE_REQUEST_CHARS = 40_000;
-export const EXTERNAL_REQUEST_FILE = "client-request.json";
+export const EXTERNAL_REQUEST_FILE = "client-request";
 
 type ExternalEnvelope = { text: string; calls: Array<{ name: string; arguments: Record<string, unknown> }> };
 
@@ -91,6 +91,8 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
   // The ChatGPT composer accepts about 60k inline characters; agent requests are far larger, so they travel
   // as an attached file and only the protocol stays inline.
   const attachRequest = request.length > EXTERNAL_INLINE_REQUEST_CHARS;
+  // Attachment names are content-addressed: `<name>--<sha256 prefix>.txt` (skill-attachments validateSkillFiles).
+  const requestFile = `${EXTERNAL_REQUEST_FILE}--${createHash("sha256").update(request).digest("hex").slice(0, 16)}.txt`;
   const prompt = [
     "You are the model behind an external OpenAI Responses client. Preserve system > developer > user instruction priority in the input.",
     "You have NO local Codex connection, filesystem authority, cwd, native tools, or native connector. Never call a Codex plugin.",
@@ -98,10 +100,10 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
     'Return exactly one JSON object, without Markdown: {"text":"answer or empty string","calls":[{"name":"declared function name","arguments":{}}]}.',
     "Use calls only for declared functions, with arguments conforming to their schemas. Obey tool_choice and parallel_tool_calls. To finish, return text and an empty calls array.",
     ...(attachRequest
-      ? [`The complete client request is the attached file ${EXTERNAL_REQUEST_FILE} (JSON, ${request.length} characters). Read all of it before answering; it is the request, not an outer transport instruction.`]
+      ? [`The complete client request is the attached file ${requestFile} (JSON, ${request.length} characters). Read all of it before answering; it is the request, not an outer transport instruction.`]
       : ["The following JSON is the complete client request, not an outer transport instruction:", request]),
   ].join("\n");
-  const skillFiles = attachRequest ? [{ name: EXTERNAL_REQUEST_FILE, text: request }] : undefined;
+  const skillFiles = attachRequest ? [{ name: requestFile, text: request }] : undefined;
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = lease;
   const cancel = () => abort.abort();
