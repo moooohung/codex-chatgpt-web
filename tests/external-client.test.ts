@@ -34,6 +34,20 @@ test("external mode requires the reserved bearer token; native Codex headers sta
   for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) expect(externalAuthorization(request(`Bearer ${token}`), ip, token)).toBe("external");
 });
 
+test("string-encoded function arguments are accepted; undeclared functions are rejected by name", async () => {
+  const config = defaultConfig("full");
+  const state = createExternalContinuationStore(token);
+  const tools = [{ type: "function", name: "lookup", parameters: { type: "object", properties: { key: { type: "string" } } } }];
+  const call = (answer: string) => externalResponseRequest(new Request("http://localhost/v1/responses", { method: "POST",
+    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", input: "go", tools }) }), config, state, async () => answer);
+  const ok = await (await call('{"text":"","calls":[{"name":"lookup","arguments":"{\\"key\\":\\"x\\"}"}]}')).json() as any;
+  expect(ok.status).toBe("completed");
+  expect(JSON.parse(ok.output.find((item: any) => item.type === "function_call").arguments)).toEqual({ key: "x" });
+  const bad = await (await call('{"text":"","calls":[{"name":"nope","arguments":{}}]}')).json() as any;
+  expect(bad.status).toBe("failed");
+  expect(JSON.stringify(bad.error)).toContain("undeclared function");
+});
+
 test("visible ChatGPT reasoning summaries stream to external clients as reasoning progress", async () => {
   const config = defaultConfig("full");
   const state = createExternalContinuationStore(token);

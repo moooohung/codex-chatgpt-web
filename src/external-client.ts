@@ -80,7 +80,9 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
     if (body.tools?.some((tool: any) => tool.type !== "function")) throw new Error("External clients support function tools only");
   } catch (error) {
     lease.release();
-    return formatErrorResponse(bodySignal.aborted ? 408 : 400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[codex-chatgpt-web] external request rejected: ${message.slice(0, 300)}`);
+    return formatErrorResponse(bodySignal.aborted ? 408 : 400, "invalid_request_error", message);
   }
   const tools = parsed.context.tools ?? [];
   const choice = parsed.options.toolChoice;
@@ -141,7 +143,16 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
       const output = parseExternalEnvelope(answer);
       // Validate the entire batch before publishing any calls to the client.
       for (const call of output.calls) {
-        if (!call || !tools.some(tool => tool.name === call.name) || !call.arguments || typeof call.arguments !== "object" || Array.isArray(call.arguments)) throw new Error("Invalid external function call");
+        // Models often encode arguments as a JSON string, as in the Responses wire format itself.
+        if (call && typeof call.arguments === "string") {
+          try { call.arguments = JSON.parse(call.arguments); } catch { /* rejected below */ }
+        }
+        if (!call || typeof call.name !== "string" || !tools.some(tool => tool.name === call.name)) {
+          throw new Error(`Invalid external function call: undeclared function ${JSON.stringify(call?.name ?? null)}`);
+        }
+        if (!call.arguments || typeof call.arguments !== "object" || Array.isArray(call.arguments)) {
+          throw new Error(`Invalid external function call: ${call.name} arguments are not a JSON object`);
+        }
         if (choice === "none" || (typeof choice === "object" && "name" in choice && choice.name !== call.name)
           || (typeof choice === "object" && "allowedTools" in choice && !choice.allowedTools.includes(call.name))) throw new Error("External function call violates tool_choice");
       }
@@ -155,7 +166,9 @@ export async function externalResponseRequest(req: Request, config: AppConfig,
       }
       queue.push({ type: "done", stopReason: output.calls.length ? "tool_use" : "stop", endTurn: !output.calls.length });
     } catch (error) {
-      queue.push({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[codex-chatgpt-web] external turn rejected: ${message.slice(0, 300)}`);
+      queue.push({ type: "error", message });
     } finally {
       req.signal.removeEventListener("abort", cancel);
       // A cancelled observer cannot open another physical slot until the worker actually settles.
