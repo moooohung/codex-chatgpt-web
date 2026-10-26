@@ -150,13 +150,13 @@ test("acknowledged daemon shutdown cannot be undone by a late resume before clea
   const f = await fixture();
   const server = startServer(f.config);
   const request = (action: string) => new Request(`http://127.0.0.1:${server.port}/admin/${action}`, {
-    method: "POST", headers: { authorization: `Bearer ${f.config.controlToken}` },
+    method: "POST", headers: { authorization: `Bearer ${f.config.controlToken}`, host: `127.0.0.1:${server.port}` },
   });
   try {
     expect((await server.fetch(request("drain"))).status).toBe(200);
     expect((await server.fetch(request("shutdown"))).status).toBe(200);
     expect((await server.fetch(request("resume"))).status).toBe(409);
-    expect((await server.fetch(new Request(`http://127.0.0.1:${server.port}/healthz`))).status).toBe(200);
+    expect((await server.fetch(new Request(`http://127.0.0.1:${server.port}/healthz`, { headers: { host: `127.0.0.1:${server.port}` } }))).status).toBe(200);
     // Let the scheduled cleanup settle inside this fixture, before restoring its home.
     await Bun.sleep(10);
   } finally { await server.stop(true); f.cleanup(); }

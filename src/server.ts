@@ -1082,12 +1082,12 @@ export function startServer(
     hostname: config.host,
     port: config.port,
     idleTimeout: 0,
-    async fetch(req, listener) {
-      if (!isLocalBridgeHost(req.headers.get("host"), listener.port!)) {
+    async fetch(req) {
+      if (!isLocalBridgeHost(req.headers.get("host"), server.port!)) {
         return formatErrorResponse(403, "invalid_request_error", "Non-local Host authority refused");
       }
       const url = new URL(req.url);
-      const external = externalAuthorization(req, listener.requestIP(req)?.address, externalToken);
+      const external = externalAuthorization(req, server.requestIP(req)?.address, externalToken);
       if (typeof external === "number") return formatErrorResponse(external, "authentication_error", "External client authorization refused");
       if (external === "external" && !(
         (req.method === "POST" && url.pathname === "/v1/responses")
