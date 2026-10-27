@@ -1355,11 +1355,13 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return rejectDuringMaintenance("responses");
-        if (external === "external") return httpTurns.track(
-          (signal, bindIdentity) => externalNativeRequest(new Request(req, { signal }), native => responseRequest(
-            native, config, dependencies.adapterFactory, { onTurnIdentity: bindIdentity })),
+        // Each native request is its own tracked HTTP turn: continuing a retired turn sends a second
+        // native request under a new turn identity, which one tracked request may never change.
+        if (external === "external") return externalNativeRequest(req, native => httpTurns.track(
+          (signal, bindIdentity) => responseRequest(
+            new Request(native, { signal }), config, dependencies.adapterFactory, { onTurnIdentity: bindIdentity }),
           req.signal, process.platform, "responses",
-        );
+        ));
         return httpTurns.track(
           (signal, bindIdentity) => responseRequest(
             new Request(req, { signal }),

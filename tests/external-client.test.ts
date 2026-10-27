@@ -11,6 +11,7 @@ test("external blocking waits return before the MCP deadline", () => {
   expect(boundedNativePollArguments("shell", { command: "x" })).toEqual({ command: "x" });
 });
 import { defaultConfig } from "../src/config";
+import { chatGptToolTimeoutError } from "../src/adapters/chatgpt-web/adapter-error";
 import { startServer } from "../src/server";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -133,9 +134,14 @@ test("HTTP admission routes authenticated external requests through the native a
   const home = mkdtempSync(join(tmpdir(), "cgw-external-"));
   process.env.CODEX_CHATGPT_WEB_HOME = home;
   const seen: any[] = [];
+  let retiredOnce = false;
   const server = startServer({ ...defaultConfig("browser-only"), port: 0 }, {
     adapterFactory: () => ({ name: "native-fixture", async runTurn(parsed, _incoming, emit) {
       seen.push(parsed._rawBody);
+      if ((parsed._rawBody as any).prompt_cache_key?.startsWith("sess-retired:") && !retiredOnce) {
+        retiredOnce = true;
+        throw chatGptToolTimeoutError("grep", 90_000);
+      }
       emit({ type: "text_delta", text: "native" });
       emit({ type: "done" });
     } }),
@@ -161,6 +167,18 @@ test("HTTP admission routes authenticated external requests through the native a
     expect((await send(`Bearer ${secret}`, [system, user("hi")])).status).toBe(200);
     expect(seen.length).toBe(3);
     expect(JSON.parse(seen[2].client_metadata["x-codex-turn-metadata"]).turn_id).toBeString();
+    // A late tool result for a retired turn continues over HTTP as a new native turn, not a refusal.
+    const call = { type: "function_call", call_id: "c7", name: "grep", arguments: "{}" };
+    const late = await fetch(`${base}/v1/responses`, { method: "POST", headers: { authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", prompt_cache_key: "sess-retired", stream: true,
+        input: [system, user("go"), call, { type: "function_call_output", call_id: "c7", output: "late" }] }) });
+    const lateText = await late.text();
+    expect(late.status).toBe(200);
+    expect(lateText).not.toContain("codex_tool_timeout");
+    expect(lateText).toContain("native");
+    expect(seen.length).toBe(5);
+    const turnIds = seen.slice(3).map(body => JSON.parse(body.client_metadata["x-codex-turn-metadata"]).turn_id);
+    expect(turnIds[1]).not.toBe(turnIds[0]);
     const catalog = await fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${secret}` } });
     expect((await catalog.json() as any).data[0].id).toBe("chatgpt-web/gpt-5.6-sol");
   } finally {
