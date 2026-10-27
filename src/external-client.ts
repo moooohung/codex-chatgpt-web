@@ -110,25 +110,28 @@ function shapeExternal(raw: unknown, generations: ReadonlyMap<string, number>): 
     client_metadata: { ...metadata, "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: turnId }) } } };
 }
 
-// A turn the bridge already ended: its tool result came after the tool deadline, or its client
-// disconnected (an app restart) and the browser turn was cancelled. The client's next request for that
-// history is a continuation, so it opens a new turn generation instead of replaying the tombstone.
-const TOOL_TIMEOUT = /"codex_tool_timeout"|did not return a result within|"client_cancelled"/;
+// A turn the bridge already ended (its tool result came after the tool deadline, its client disconnected,
+// or its browser turn failed) answers every later request carrying the same turn identity with that stored
+// failure at once, before any browser work. The client's next request for that history is a continuation
+// (an external client has no failed-turn concept: it resends the history, often with an added message),
+// so it opens a new turn generation instead of replaying the tombstone. Account limits and sign-in or
+// security checks are not turn state: a new turn would hit them again, so they pass through.
+const ACCOUNT_STATE = /rate_limit|usage_limit|quota|cooldown|sign_in|security_check|unusual|authentication|insufficient/i;
 const FIRST_OUTPUT = /"type":"response\.(output_item\.added|output_text\.delta|completed|incomplete)"/;
-/** A retired turn answers a late tool result immediately; a live turn takes far longer to produce output. */
+/** A stored failure arrives immediately; a live browser turn takes far longer to fail or produce output. */
 export const EXTERNAL_RETIRED_TURN_PROBE_MS = 3_000;
 const turnGenerations = new Map<string, number>();
+const retiredFailure = (text: string) => !ACCOUNT_STATE.test(text);
 
 /**
- * Hold the start of the native response briefly. When it is a retired turn's tool-timeout failure
- * (the client's tool result arrived after the bridge's tool deadline), report it so the caller can
- * continue the same history as a new turn; otherwise replay the held bytes and stream the rest.
+ * Hold the start of the native response briefly. When it is an ended turn's stored failure, report it so
+ * the caller can continue the same history as a new turn; otherwise replay the held bytes and stream the rest.
  */
 async function retiredTurnFailure(response: Response, probeMs: number): Promise<{ retired: boolean; response: Response }> {
   if (!response.body) return { retired: false, response };
   if (!(response.headers.get("content-type") ?? "").includes("text/event-stream")) {
     const text = await response.text();
-    return { retired: !response.ok && TOOL_TIMEOUT.test(text),
+    return { retired: !response.ok && response.status < 500 && ![401, 403, 404, 429].includes(response.status) && retiredFailure(text),
       response: new Response(text, { status: response.status, headers: response.headers }) };
   }
   const reader = response.body.getReader();
@@ -146,8 +149,9 @@ async function retiredTurnFailure(response: Response, probeMs: number): Promise<
     if (next.done) { done = true; break; }
     held.push(next.value);
     text += decoder.decode(next.value, { stream: true });
-    if (/"type":"response\.failed"/.test(text) && TOOL_TIMEOUT.test(text)) {
+    if (/"type":"response\.failed"/.test(text) && retiredFailure(text)) {
       await reader.cancel().catch(() => {});
+      console.info(`[codex-chatgpt-web] external stored failure: ${(/"code":"([^"]+)"/.exec(text)?.[1] ?? "unknown")}`);
       return { retired: true, response };
     }
   }

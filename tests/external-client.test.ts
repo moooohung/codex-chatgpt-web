@@ -119,6 +119,19 @@ test("a late tool result for a retired turn continues as a new turn; live stream
   let later = "";
   await externalNativeRequest(request(), async native => { later = turnOf(await native.json()).turn_id; return sse({ type: "response.completed" }); }, 1_000);
   expect(later).toBe(turns[1]);
+  // Any stored browser-turn failure continues as a new turn; an account limit passes through unchanged.
+  for (const [code, retried] of [["helper_heartbeat_expired", true], ["chatgpt_model_controls_unavailable", true], ["usage_limit_reached", false]] as const) {
+    const seenTurns: string[] = [];
+    const reply = await externalNativeRequest(new Request("http://localhost/v1/responses", { method: "POST",
+      body: JSON.stringify({ model: "m", prompt_cache_key: `sess-${code}`, input: [system, user("go"), call, output, user("continue")] }) }), async native => {
+      seenTurns.push(turnOf(await native.json()).turn_id);
+      return seenTurns.length === 1
+        ? sse({ type: "response.created" }, { type: "response.failed", response: { error: { code, message: code } } })
+        : sse({ type: "response.created" }, { type: "response.completed" });
+    }, 1_000);
+    expect(seenTurns.length).toBe(retried ? 2 : 1);
+    expect((await reply.text()).includes(code)).toBe(!retried);
+  }
   // A turn cancelled because the client disconnected (app restart) continues the same way.
   const cancelledTurns: string[] = [];
   const resumed = await externalNativeRequest(new Request("http://localhost/v1/responses", { method: "POST",
