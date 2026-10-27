@@ -14,7 +14,7 @@ import { defaultConfig } from "../src/config";
 import { chatGptToolTimeoutError } from "../src/adapters/chatgpt-web/adapter-error";
 import { startServer } from "../src/server";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -148,7 +148,11 @@ test("codex_exec maps onto an external client's shell tool, keeping the working 
 });
 
 test("external requests without a working directory or with server-side continuation are refused", () => {
-  expect(() => shape([user("hi")])).toThrow("Cwd:");
+  const tools = [{ type: "function", name: "shell", parameters: { type: "object", properties: {} } }];
+  expect(() => nativeShapedExternalBody({ prompt_cache_key: "s", tools, input: [user("hi")] })).toThrow("Cwd:");
+  // A tool-less request (a provider connection test) needs no project root and runs in the home folder.
+  const probe = shape([user("hi")]);
+  expect(probe.input[0].content[0].text).toContain(`<cwd>${homedir()}</cwd>`);
   expect(() => nativeShapedExternalBody({ previous_response_id: "r", input: [system, user("hi")] })).toThrow("previous_response_id");
 });
 
@@ -186,7 +190,9 @@ test("HTTP admission routes authenticated external requests through the native a
     expect((await send("Bearer codex-placeholder")).status).toBe(200);
     expect(seen.length).toBe(2);
     expect((await send(`Bearer ${secret}wrong`)).status).toBe(401);
-    expect((await send(`Bearer ${secret}`, [user("no cwd")])).status).toBe(400);
+    const toolsWithoutCwd = await fetch(`${base}/v1/responses`, { method: "POST", headers: { authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", tools: [{ type: "function", name: "shell", parameters: { type: "object", properties: {} } }], input: [user("no cwd")] }) });
+    expect(toolsWithoutCwd.status).toBe(400);
     expect((await send(`Bearer ${secret}`, [system, user("hi")])).status).toBe(200);
     expect(seen.length).toBe(3);
     expect(JSON.parse(seen[2].client_metadata["x-codex-turn-metadata"]).turn_id).toBeString();

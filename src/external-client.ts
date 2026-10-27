@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
 export { externalTokenPath, loadExternalToken } from "./external-token";
 import { readJsonRequestBody } from "./http-body";
@@ -40,6 +41,10 @@ function clientCwd(body: Item, input: unknown[]): string {
     const cwd = /^[\s>*#-]*Cwd:\s*`?(.+?)`?(?:\s+[—–]\s.*)?\s*$/m.exec(text)?.[1];
     if (cwd && isAbsolute(cwd)) return cwd;
   }
+  // A request without tools (a provider connection test, a plain chat) runs no command, so it needs no
+  // project root; tool-carrying requests still must name theirs.
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  if (!tools.length) return homedir();
   throw new Error(`External request has no absolute \`Cwd:\` line (message roles: ${messages.map(item => item.role).join(",") || "none"})`);
 }
 
