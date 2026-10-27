@@ -3157,6 +3157,7 @@ test("a later provider round reuses only its exact connector-bound conversation"
         session: {},
         isDestroyed: () => false,
         setBackgroundThrottling: (enabled) => throttling.push(enabled),
+        executeJavaScript: async () => "loaded",
       },
     },
   };
@@ -3559,6 +3560,7 @@ test("a lightweight retained tab reloads its exact conversation before reuse", a
   contents.isDestroyed = () => false;
   contents.getURL = () => url;
   contents.loadURL = async next => { url = next; };
+  contents.executeJavaScript = async () => "loaded";
   const tab = {
     id: "tab-restore",
     traceId: "trace-restore",

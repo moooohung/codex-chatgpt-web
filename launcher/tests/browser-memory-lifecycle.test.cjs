@@ -29,6 +29,7 @@ function fixture(url = "https://chatgpt.com/c/saved") {
     userCancelledTurnOwners: new Map(), closedTurnOwners: new Map(), selectedTabId: "another",
     memoryPolicy: { releaseIdleTabMemory: true, recycleAfterTurns: 8, recycleRendererMb: 512, maxTabs: 4 },
     resolveAccountForConversation: () => null, markTurnTabSurface: async () => {},
+    conversationLoadState: async () => "loaded",
     readAccountContext: readFakeAccountContext,
     syncPowerSaveBlocker() {}, writeDescriptor() {}, presentTurnView() {}, syncViewVisibility() {},
     publishState() {}, snapshot: () => ({}),
@@ -303,6 +304,78 @@ test("recycling a retained renderer keeps the replacement when the old page repo
     assert.ok(!f.events.some(([event]) => ["browser.tab_closed_externally", "browser.tab_renderer_gone",
       "browser.tab_navigation_failed"].includes(event)), signal);
   }
+});
+
+// Live 2026-10-28: a memory-recycled tab reopened /c/<id> to "Could not load this ChatGPT
+// conversation"; the committed document passed restore and the next turn found no composer.
+function loadFailureFixture({ suspended }) {
+  const f = fixture(suspended ? IDLE_BROWSER_URL : "https://chatgpt.com/c/saved");
+  Object.assign(f.tab, { status: "ready" },
+    suspended ? { memorySuspended: true, retainedUrl: "https://chatgpt.com/c/saved" } : {});
+  f.contents.close = () => {};
+  f.host.syncPowerSaveBlocker = () => {};
+  f.host.window = { contentView: { removeChildView() {} } };
+  f.host.conversationLoadState = async tab => tab === f.tab ? "failed" : "loaded";
+  const fresh = Object.assign(new EventEmitter(), {
+    session: {}, isDestroyed: () => false, getURL: () => "https://chatgpt.com/",
+    setBackgroundThrottling() {},
+  });
+  const created = [];
+  f.host.createTurnTab = async (traceId, helperPid, conversationKey, connectorIdentity) => {
+    const tab = { id: "fresh", surfaceId: "fresh_surface", traceId, helperPid, conversationKey, connectorIdentity,
+      interactionMode: "automatic", status: "running", view: { webContents: fresh } };
+    f.host.turnTabs.set(tab.id, tab);
+    created.push(tab);
+    return tab;
+  };
+  return { ...f, created };
+}
+
+test("an ordinary turn replaces a retained tab that shows ChatGPT's load-failure card with a new tab", async () => {
+  for (const suspended of [true, false]) {
+    const f = loadFailureFixture({ suspended });
+    const lease = await f.host.beginTurn("next_trace", false, process.pid, f.tab.conversationKey, undefined, false);
+    assert.equal(lease.reused, false, `suspended=${suspended}`);
+    assert.equal(lease.tabId, "fresh");
+    assert.equal(f.created.length, 1);
+    assert.equal(f.host.turnTabs.has("tab"), false, "the broken document is never reused");
+    const replaced = f.events.find(([event]) => event === "browser.retained_conversation_replaced");
+    assert.ok(replaced, `suspended=${suspended}`);
+    assert.equal(replaced[1].traceId, "next_trace");
+  }
+});
+
+test("a turn that requires the retained conversation still fails closed on the load-failure card", async () => {
+  for (const suspended of [true, false]) {
+    const f = loadFailureFixture({ suspended });
+    await assert.rejects(
+      f.host.beginTurn("compaction_trace", false, process.pid, f.tab.conversationKey, undefined, true),
+      error => error.code === "retained_conversation_unavailable"
+        && /Could not load this ChatGPT conversation/.test(error.message));
+    assert.equal(f.created.length, 0);
+    assert.equal(f.host.turnTabs.has("tab"), false);
+  }
+});
+
+test("a restored conversation that is still rendering is reused once it loads", async () => {
+  const f = loadFailureFixture({ suspended: true });
+  const states = ["pending", "pending", "loaded"];
+  f.host.conversationLoadState = async () => states.shift();
+  const lease = await f.host.beginTurn("next_trace", false, process.pid, f.tab.conversationKey, undefined, false);
+  assert.equal(lease.reused, true);
+  assert.equal(lease.tabId, "tab");
+  assert.equal(states.length, 0);
+  assert.equal(f.tab.memorySuspended, false);
+});
+
+test("showing a parked tab that ChatGPT cannot load keeps it parked for the next turn", async () => {
+  const f = presentationFixture();
+  f.host.conversationLoadState = async () => "failed";
+  f.host.selectTab(f.tab.id);
+  await f.tab.memoryTransition;
+  assert.equal(f.tab.presentationRestoreFailed, true);
+  assert.equal(f.tab.memorySuspended, true, "the next turn restores or replaces it");
+  assert.equal(f.tab.retainedUrl, "https://chatgpt.com/c/saved");
 });
 
 test("cancelling while memory is being released cannot claim or evict the old owner's tab", async () => {

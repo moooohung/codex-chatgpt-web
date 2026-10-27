@@ -64,6 +64,12 @@ const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
 const TURN_HEARTBEAT_SWEEP_MS = 5_000;
 const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
+// ChatGPT's in-page card when a saved conversation does not load (live 2026-10-28: a
+// memory-recycled tab reopened /c/<id> to this card and its next turn found no composer).
+const CONVERSATION_LOAD_FAILED_TEXT = "Could not load this ChatGPT conversation";
+const CONVERSATION_LOAD_WAIT_MS = 20_000;
+const CONVERSATION_LOAD_POLL_MS = 250;
+const CONVERSATION_LOAD_PROBE_TIMEOUT_MS = 5_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
 const HIDDEN_FAILED_TURN_TAB_TTL_MS = 60_000;
 const TURN_MEMORY_PROBE_TIMEOUT_MS = 1_000;
@@ -299,6 +305,12 @@ class BrowserTurnCancelledError extends Error {
     this.name = "BrowserTurnCancelledError";
     this.code = "turn_cancelled";
   }
+}
+
+/** Runs inside the ChatGPT page: "loaded", "failed" (the load-failure card), or "pending". */
+function chatGptConversationLoadState(failedText) {
+  if (document.querySelector('[data-testid^="conversation-turn-"], [data-turn-key]')) return "loaded";
+  return document.body?.innerText.includes(failedText) ? "failed" : "pending";
 }
 
 /** A page this tab replaced (renderer recycle); its late events no longer describe the tab. */
@@ -1326,6 +1338,8 @@ class BrowserHost {
       await loadCommittedBrowserSurface(contents, retainedUrl, TURN_TAB_BOOTSTRAP_TIMEOUT_MS, signal);
       signal?.throwIfAborted();
       await this.markTurnTabSurface(tab);
+      // A committed document is not a loaded conversation: ChatGPT may render its load-failure card.
+      await BrowserHost.prototype.assertConversationLoaded.call(this, tab, signal, CONVERSATION_LOAD_WAIT_MS);
       tab.memorySuspended = false;
       tab.recycleOnResume = false;
       tab.retainedUrl = null;
@@ -1340,6 +1354,40 @@ class BrowserHost {
       return true;
     } finally {
       tab.initializingSurface = false;
+    }
+  }
+
+  /** One bounded probe; an unresponsive renderer reads as "pending" and keeps the prior behavior. */
+  async conversationLoadState(tab) {
+    // Zero Risk mode never inspects pages automatically; keep its tab as before.
+    if (browserInteractionModeFor(this) === "manual") return "pending";
+    const contents = tab.view.webContents;
+    if (contents.isDestroyed()) throw new Error("ChatGPT turn browser closed during the conversation load check");
+    let timer;
+    try {
+      return await Promise.race([
+        contents.executeJavaScript(
+          `(${chatGptConversationLoadState.toString()})(${JSON.stringify(CONVERSATION_LOAD_FAILED_TEXT)})`, true),
+        new Promise(resolve => { timer = setTimeout(() => resolve("pending"), CONVERSATION_LOAD_PROBE_TIMEOUT_MS); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Throws when the tab shows ChatGPT's load-failure card; waits up to waitMs for the outcome. */
+  async assertConversationLoaded(tab, signal, waitMs) {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const state = await this.conversationLoadState(tab);
+      if (state === "failed") {
+        const error = new Error(CONVERSATION_LOAD_FAILED_TEXT);
+        error.code = "retained_conversation_load_failed";
+        throw error;
+      }
+      if (state === "loaded" || Date.now() >= deadline) return;
+      await new Promise(resolve => setTimeout(resolve, CONVERSATION_LOAD_POLL_MS));
+      signal?.throwIfAborted();
     }
   }
 
@@ -3532,9 +3580,10 @@ class BrowserHost {
     if (sameTrace?.status === "ready" && this.turnTabs.has(sameTrace.id) && sameTrace !== exactRetained) {
       throw new Error(`ChatGPT browser turn ${traceId} is retained under different conversation metadata`);
     }
-    const existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
+    let existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
+    let reused = false;
     if (existing) {
-      const reused = existing.status === "ready";
+      reused = existing.status === "ready";
       if (existing.status === "running" && existing.helperPid !== helperPid) {
         if (processRunning(existing.helperPid)) {
           throw new Error(`ChatGPT browser turn ${traceId} is owned by another helper process`);
@@ -3552,18 +3601,29 @@ class BrowserHost {
       existing.traceId = traceId;
       existing.status = "running";
       existing.presentationRestoreFailed = false;
-      if (reused && existing.memorySuspended) {
+      if (reused) {
         try {
-          await BrowserHost.prototype.restoreRetainedTurnTab.call(this, existing, signal);
+          if (existing.memorySuspended) await BrowserHost.prototype.restoreRetainedTurnTab.call(this, existing, signal);
+          else await BrowserHost.prototype.assertConversationLoaded.call(this, existing, signal, 0);
         } catch (error) {
           if (this.turnTabs.get(existing.id) === existing) this.removeTurnTab(existing, false);
-          const unavailable = new Error(
-            `The retained ChatGPT conversation could not be restored: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          unavailable.code = "retained_conversation_unavailable";
-          throw unavailable;
+          signal?.throwIfAborted();
+          if (requireRetainedConversation) {
+            const unavailable = new Error(
+              `The retained ChatGPT conversation could not be restored: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            unavailable.code = "retained_conversation_unavailable";
+            throw unavailable;
+          }
+          // An ordinary turn does not need this document: it sends its full context in a new tab.
+          this.logger.warn("browser.retained_conversation_replaced", {
+            tabId: existing.id, traceId, ...navigationErrorForLog(error),
+          });
+          existing = undefined;
         }
       }
+    }
+    if (existing) {
       const accountContext = await readLeasedAccountContext(this, existing, {
         traceId, helperPid, conversationKey, connectorIdentity,
       }, signal);

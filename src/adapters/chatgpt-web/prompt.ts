@@ -631,6 +631,7 @@ export function compileChatGptWebPrompt(
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
       "When completing a delegated task from a parent thread, use collaboration__send_message or send_message_to_thread to deliver the final status back to the source thread, or summarize your findings directly.",
       "Continue using the available tools until the requested work is complete and verified.",
+      "Never use ChatGPT's built-in Python or analysis tool to sleep, wait, or poll while local work runs; those repeated idle runs trip ChatGPT's safety review. Wait for local work only through the selected plugin's own tools, such as a wait-capable task or command call.",
       "Write the user-facing final answer only after the last required tool result has settled. Do not call another tool after beginning that final answer.",
     ]
     : [

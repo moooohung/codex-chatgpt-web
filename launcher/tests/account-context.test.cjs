@@ -72,6 +72,8 @@ function leaseFixture({ reused = false, running = false, read = () => response()
       getURL: () => IDLE_BROWSER_URL } },
     window: { contentView: { removeChildView() { events.push("removed"); } } },
     resolveAccountForConversation: () => "selected",
+    // Account proof must not read the DOM; the separate reuse load check is covered elsewhere.
+    conversationLoadState: async () => "loaded",
     createTurnTab: async () => { host.turnTabs.set(tab.id, tab); events.push("created"); return tab; },
     syncPowerSaveBlocker() {}, syncViewVisibility() { events.push("visible"); },
     presentTurnView() {}, show() {}, hide() {}, snapshot: () => ({ tabs: [] }),
@@ -230,7 +232,7 @@ for (const reused of [false, true]) {
     let finish;
     const f = leaseFixture({ reused, read: () => new Promise(resolve => { finish = resolve; }) });
     const pending = f.begin();
-    await Promise.resolve();
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(f.selected.calls.length, 1);
     assert.equal(f.events.includes("published"), false, "lease cannot be acknowledged before proof");
     finish(response());
