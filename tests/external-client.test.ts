@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 import { externalAuthorization, externalNativeRequest, externalTokenPath, nativeShapedExternalBody } from "../src/external-client";
-import { externalShellArguments } from "../src/adapters/chatgpt-web/mcp-server";
+import { boundedNativePollArguments, externalShellArguments } from "../src/adapters/chatgpt-web/mcp-server";
+
+test("external blocking waits return before the MCP deadline", () => {
+  expect(boundedNativePollArguments("task", { action: "wait", task_id: "t" })).toEqual({ action: "wait", task_id: "t", timeout_ms: 60_000 });
+  expect(boundedNativePollArguments("task", { action: "wait", timeout_ms: 1_200_000 }).timeout_ms).toBe(60_000);
+  expect(boundedNativePollArguments("task", { action: "wait", timeout_ms: 20_000 }).timeout_ms).toBe(20_000);
+  expect(boundedNativePollArguments("task", { action: "read" })).toEqual({ action: "read" });
+  expect(boundedNativePollArguments("shell", { command: "x", wait_ms: 600_000 }).wait_ms).toBe(60_000);
+  expect(boundedNativePollArguments("shell", { command: "x" })).toEqual({ command: "x" });
+});
 import { defaultConfig } from "../src/config";
 import { startServer } from "../src/server";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -28,8 +37,8 @@ test("external mode requires the reserved bearer token; native Codex headers sta
 test("a new external turn gets native identity, a full-access environment before its user message, and reminders as context", () => {
   const body = shape([system, user("do it"), user("<system-reminder>note</system-reminder>")]);
   const { thread_id, turn_id } = turnOf(body);
-  expect(thread_id).toBe("sess-1");
-  expect(body.prompt_cache_key).toBe("sess-1");
+  expect(thread_id).toStartWith("sess-1:");
+  expect(body.prompt_cache_key).toBe(thread_id);
   const [, environment, instruction, reminder] = body.input;
   expect(environment.role).toBe("user");
   expect(environment.content[0].text).toContain(`<cwd>${cwd}</cwd>`);
@@ -50,6 +59,14 @@ test("tool continuations stay in the same turn; a user message after a final ans
   expect(turnOf(next).turn_id).not.toBe(first);
   expect(next.input.at(-2).content[0].text).toContain("<environment_context>");
   expect(next.input.at(-1).content[0].text).toBe("next");
+});
+
+test("a client compaction opens a new ChatGPT conversation; later turns of one history keep theirs", () => {
+  const answer = { role: "assistant", content: [{ type: "output_text", text: "done" }] };
+  const thread = (input: unknown[]) => turnOf(shape(input)).thread_id;
+  const original = thread([system, user("brief"), answer, user("next")]);
+  expect(thread([system, user("brief"), answer, user("next"), answer, user("more")])).toBe(original);
+  expect(thread([system, user("<compact-state>summary</compact-state>"), user("next")])).not.toBe(original);
 });
 
 test("Mixdog's environment-tier Cwd bullet supplies the working directory without its trailing note", () => {

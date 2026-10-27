@@ -78,8 +78,12 @@ function shapeExternal(raw: unknown, generations: ReadonlyMap<string, number>): 
   }
   if (userIndex < 0) throw new Error("External request has no user message");
   const cwd = clientCwd(raw, input);
+  // The ChatGPT conversation lives as long as the client's history keeps its opening message. A client
+  // compaction replaces that message with its summary, so the summarized history opens a new, small
+  // ChatGPT conversation instead of resuming one that still holds every turn the summary replaced.
+  const opening = digest(JSON.stringify((input.find(isUserMessage) as Item | undefined)?.content ?? null)).slice(0, 16);
   const threadId = typeof raw.prompt_cache_key === "string" && raw.prompt_cache_key
-    ? raw.prompt_cache_key : digest(JSON.stringify([raw.instructions ?? null, input.find(isUserMessage) ?? null]));
+    ? `${raw.prompt_cache_key}:${opening}` : digest(JSON.stringify([raw.instructions ?? null, input.find(isUserMessage) ?? null]));
   const turnKey = digest(JSON.stringify([threadId, userIndex, (input[userIndex] as Item).content]));
   // A turn whose browser session was retired (a tool result came back too late) continues as a new
   // native turn generation over the same history instead of replaying the retired turn's failure.
@@ -172,8 +176,16 @@ export async function externalNativeRequest(req: Request, runNative: (native: Re
   const send = (body: Item) => runNative(new Request(req.url, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify(body), signal: req.signal }));
   const first = await retiredTurnFailure(await send(shaped.body), probeMs);
-  if (!first.retired) return first.response;
+  if (!first.retired) return logRejection(first.response, shaped.turnKey);
   turnGenerations.set(shaped.turnKey, (turnGenerations.get(shaped.turnKey) ?? 0) + 1);
   console.info(`[codex-chatgpt-web] external turn ${shaped.turnKey.slice(0, 8)} retired by a late tool result; continuing as a new turn`);
-  return send(shapeExternal(raw, turnGenerations).body);
+  return logRejection(await send(shapeExternal(raw, turnGenerations).body), shaped.turnKey);
+}
+
+/** Admission refusals return plain JSON without a browser trace; record which rule refused the turn. */
+async function logRejection(response: Response, turnKey: string): Promise<Response> {
+  if (response.ok) return response;
+  const text = await response.text();
+  console.warn(`[codex-chatgpt-web] external turn ${turnKey.slice(0, 8)} refused status=${response.status} body=${text.slice(0, 400)}`);
+  return new Response(text, { status: response.status, headers: response.headers });
 }

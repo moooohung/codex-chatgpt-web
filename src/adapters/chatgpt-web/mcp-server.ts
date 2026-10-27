@@ -67,7 +67,16 @@ export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 90_000;
 const NATIVE_POLL_MAX_MS = 30_000;
 const NATIVE_POLL_TRANSPORT_RULE = `ChatGPT Web transport rule: write_stdin and wait return after at most ${NATIVE_POLL_MAX_MS}ms per call. Longer yield_time_ms values are shortened before native dispatch; a returned session_id or running cell is still active. Poll the same session or cell again instead of restarting the command. Input characters, output limits and cancellation arguments are preserved.`;
 
-function boundedNativePollArguments(name: string, args: Record<string, unknown>): Record<string, unknown> {
+export function boundedNativePollArguments(name: string, args: Record<string, unknown>): Record<string, unknown> {
+  // External clients' (Mixdog) blocking waits: `task` wait defaults to minutes and `shell` may hold
+  // up to ten. Return them before the MCP deadline; the task or command keeps running for the next poll.
+  if (name === "task" && args.action === "wait"
+    && !(typeof args.timeout_ms === "number" && args.timeout_ms <= CHATGPT_WEB_COMMAND_POLL_MAX_MS)) {
+    return { ...args, timeout_ms: CHATGPT_WEB_COMMAND_POLL_MAX_MS };
+  }
+  if (name === "shell" && typeof args.wait_ms === "number" && args.wait_ms > CHATGPT_WEB_COMMAND_POLL_MAX_MS) {
+    return { ...args, wait_ms: CHATGPT_WEB_COMMAND_POLL_MAX_MS };
+  }
   if (name === "wait"
     && typeof args.yield_time_ms === "number" && Number.isFinite(args.yield_time_ms)
     && args.yield_time_ms > NATIVE_POLL_MAX_MS) {
