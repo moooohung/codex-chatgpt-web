@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { externalAuthorization, externalTokenPath, nativeShapedExternalBody } from "../src/external-client";
+import { externalAuthorization, externalNativeRequest, externalTokenPath, nativeShapedExternalBody } from "../src/external-client";
 import { defaultConfig } from "../src/config";
 import { startServer } from "../src/server";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -55,6 +55,45 @@ test("Mixdog's environment-tier Cwd bullet supplies the working directory withou
   const environment = { role: "system", content: `- Cwd: ${cwd} — the active Project root; relative paths resolve here.\n- Shell: PowerShell.` };
   const body = nativeShapedExternalBody({ prompt_cache_key: "s", input: [{ role: "system", content: "rules" }, environment, user("hi")] }) as any;
   expect(body.input.find((item: any) => item.content?.[0]?.text?.startsWith("<environment_context>")).content[0].text).toContain(`<cwd>${cwd}</cwd>`);
+});
+
+test("a turn opened by a context message, the request and a reminder keeps its identity in the tool-result request", () => {
+  const opened = shape([system, user("<context>agents</context>"), user("do it"), user("reminder")]);
+  const call = { type: "function_call", call_id: "c1", name: "read", arguments: "{}" };
+  const output = { type: "function_call_output", call_id: "c1", output: "x" };
+  const continued = shape([system, user("<context>agents</context>"), user("do it"), call, output]);
+  expect(turnOf(continued).turn_id).toBe(turnOf(opened).turn_id);
+  expect(continued.input.filter((item: any) => item.role === "user").length).toBe(2);
+});
+
+test("a late tool result for a retired turn continues as a new turn; live streams pass through byte for byte", async () => {
+  const sse = (...events: object[]) => new Response(events.map(event => `event: ${(event as any).type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+    { headers: { "content-type": "text/event-stream" } });
+  const call = { type: "function_call", call_id: "c9", name: "grep", arguments: "{}" };
+  const output = { type: "function_call_output", call_id: "c9", output: "late" };
+  const request = () => new Request("http://localhost/v1/responses", { method: "POST",
+    body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", prompt_cache_key: "sess-retire", stream: true, input: [system, user("go"), call, output] }) });
+  const turns: string[] = [];
+  const retired = await externalNativeRequest(request(), async native => {
+    turns.push(turnOf(await native.json()).turn_id);
+    return turns.length === 1
+      ? sse({ type: "response.created" }, { type: "response.failed", response: { error: { code: "codex_tool_timeout", message: "Codex tool grep did not return a result within 90 seconds." } } })
+      : sse({ type: "response.created" }, { type: "response.output_item.added", item: { type: "message" } }, { type: "response.completed" });
+  }, 1_000);
+  expect(turns.length).toBe(2);
+  expect(turns[1]).not.toBe(turns[0]);
+  const text = await retired.text();
+  expect(text).toContain("response.completed");
+  expect(text).not.toContain("codex_tool_timeout");
+  // The retired turn's generation sticks for later requests of the same turn.
+  let later = "";
+  await externalNativeRequest(request(), async native => { later = turnOf(await native.json()).turn_id; return sse({ type: "response.completed" }); }, 1_000);
+  expect(later).toBe(turns[1]);
+  const live = sse({ type: "response.created" }, { type: "response.output_text.delta", delta: "hi" }, { type: "response.completed" });
+  const expected = await live.clone().text();
+  const passed = await externalNativeRequest(new Request("http://localhost/v1/responses", { method: "POST",
+    body: JSON.stringify({ model: "m", prompt_cache_key: "sess-live", input: [system, user("go")] }) }), async () => live, 1_000);
+  expect(await passed.text()).toBe(expected);
 });
 
 test("external requests without a working directory or with server-side continuation are refused", () => {
