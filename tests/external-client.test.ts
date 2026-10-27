@@ -119,6 +119,18 @@ test("a late tool result for a retired turn continues as a new turn; live stream
   let later = "";
   await externalNativeRequest(request(), async native => { later = turnOf(await native.json()).turn_id; return sse({ type: "response.completed" }); }, 1_000);
   expect(later).toBe(turns[1]);
+  // A turn cancelled because the client disconnected (app restart) continues the same way.
+  const cancelledTurns: string[] = [];
+  const resumed = await externalNativeRequest(new Request("http://localhost/v1/responses", { method: "POST",
+    body: JSON.stringify({ model: "m", prompt_cache_key: "sess-cancelled", input: [system, user("go"), call, output, user("continue")] }) }), async native => {
+    cancelledTurns.push(turnOf(await native.json()).turn_id);
+    return cancelledTurns.length === 1
+      ? Response.json({ error: { type: "client_closed_request", code: "client_cancelled", message: "observer disconnected" } }, { status: 400 })
+      : sse({ type: "response.created" }, { type: "response.completed" });
+  }, 1_000);
+  expect(resumed.status).toBe(200);
+  expect(cancelledTurns.length).toBe(2);
+  expect(cancelledTurns[1]).not.toBe(cancelledTurns[0]);
   const live = sse({ type: "response.created" }, { type: "response.output_text.delta", delta: "hi" }, { type: "response.completed" });
   const expected = await live.clone().text();
   const passed = await externalNativeRequest(new Request("http://localhost/v1/responses", { method: "POST",

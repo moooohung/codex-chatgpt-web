@@ -105,7 +105,10 @@ function shapeExternal(raw: unknown, generations: ReadonlyMap<string, number>): 
     client_metadata: { ...metadata, "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: turnId }) } } };
 }
 
-const TOOL_TIMEOUT = /"codex_tool_timeout"|did not return a result within/;
+// A turn the bridge already ended: its tool result came after the tool deadline, or its client
+// disconnected (an app restart) and the browser turn was cancelled. The client's next request for that
+// history is a continuation, so it opens a new turn generation instead of replaying the tombstone.
+const TOOL_TIMEOUT = /"codex_tool_timeout"|did not return a result within|"client_cancelled"/;
 const FIRST_OUTPUT = /"type":"response\.(output_item\.added|output_text\.delta|completed|incomplete)"/;
 /** A retired turn answers a late tool result immediately; a live turn takes far longer to produce output. */
 export const EXTERNAL_RETIRED_TURN_PROBE_MS = 3_000;
