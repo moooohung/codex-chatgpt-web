@@ -65,16 +65,14 @@ function shapeExternal(raw: unknown, generations: ReadonlyMap<string, number>): 
   // The turn anchor is the first user message of the run that opened the turn. A new turn's trailing run
   // may end with an ephemeral client reminder that is gone from the next request, so anchoring on a later
   // message would give the tool-result request a different turn and strand the pending ChatGPT response.
-  let tail = input.length;
-  while (tail > 0 && isUserMessage(input[tail - 1])) tail -= 1;
-  const before = input[tail - 1];
-  const pendingTools = isRecord(before) && before.type !== "message";
-  let userIndex = tail < input.length && !pendingTools ? tail : -1;
-  if (userIndex < 0) {
-    let index = tail - 1;
-    while (index >= 0 && !isUserMessage(input[index])) index -= 1;
-    while (index > 0 && isUserMessage(input[index - 1])) index -= 1;
-    userIndex = index;
+  // A user run opens a turn only when it follows a message (a final answer or the system prompt), never a
+  // tool output: the client appends reminders after tool results, and those stay inside the open turn even
+  // after later tool rounds move them into the middle of the history.
+  let userIndex = -1;
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    if (!isUserMessage(input[index]) || isUserMessage(input[index - 1])) continue;
+    const before = input[index - 1];
+    if (index === 0 || (isRecord(before) && before.type === "message")) { userIndex = index; break; }
   }
   if (userIndex < 0) throw new Error("External request has no user message");
   const cwd = clientCwd(raw, input);

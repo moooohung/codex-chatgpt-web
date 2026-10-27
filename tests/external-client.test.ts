@@ -62,6 +62,17 @@ test("tool continuations stay in the same turn; a user message after a final ans
   expect(next.input.at(-1).content[0].text).toBe("next");
 });
 
+test("reminders after tool results stay in the open turn after later tool rounds move them mid-history", () => {
+  const call = (id: string) => ({ type: "function_call", call_id: id, name: "shell", arguments: "{}" });
+  const output = (id: string) => ({ type: "function_call_output", call_id: id, output: "x" });
+  const opened = turnOf(shape([system, user("go"), user("note")])).turn_id;
+  const first = shape([system, user("go"), user("note"), call("a"), output("a"), user("reminder A")]);
+  const second = shape([system, user("go"), user("note"), call("a"), output("a"), user("reminder A"), call("b"), output("b"), user("reminder B")]);
+  expect(turnOf(first).turn_id).toBe(opened);
+  expect(turnOf(second).turn_id).toBe(opened);
+  expect(second.input.filter((item: any) => item.role === "developer").map((item: any) => item.content[0].text)).toEqual(["note", "reminder A", "reminder B"]);
+});
+
 test("a client compaction opens a new ChatGPT conversation; later turns of one history keep theirs", () => {
   const answer = { role: "assistant", content: [{ type: "output_text", text: "done" }] };
   const thread = (input: unknown[]) => turnOf(shape(input)).thread_id;
