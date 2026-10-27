@@ -171,6 +171,24 @@ function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool
   return environment.tools.find(tool => !tool.namespace && tool.name === name);
 }
 
+/**
+ * External clients (Mixdog) advertise their own command tool, `shell`, taking `command` instead of
+ * Codex's exec_command. codex_exec maps onto it so a command never fails for want of a Codex tool.
+ */
+export function externalShellArguments(tool: CodexTool, cmd: string, workdir?: string, yieldMs?: number,
+  platform: NodeJS.Platform = process.platform): Record<string, unknown> | undefined {
+  const properties = tool.parameters?.properties;
+  if (!properties || typeof properties !== "object" || !Object.hasOwn(properties, "command")) return undefined;
+  const quoted = workdir === undefined ? undefined
+    : platform === "win32" ? `'${workdir.replaceAll("'", "''")}'` : `'${workdir.replaceAll("'", "'\\''")}'`;
+  const command = quoted === undefined ? cmd
+    : platform === "win32" ? `Set-Location -LiteralPath ${quoted}; ${cmd}` : `cd ${quoted} && ${cmd}`;
+  return {
+    command,
+    ...(yieldMs !== undefined && Object.hasOwn(properties, "wait_ms") ? { wait_ms: Math.max(1_000, yieldMs) } : {}),
+  };
+}
+
 function gatewayToolNameIsValid(name: string): boolean {
   return /^[A-Za-z0-9_$]+$/.test(name) && !BRIDGE_TOOL_WIRE_PATTERN.test(name);
 }
@@ -797,6 +815,10 @@ export async function runChatGptMcpServer(options: {
           const args = tool.name === "exec_command" ? execCommandArguments : shellCommandArguments;
           return invoke(claimed.bindingId, bound, tool, { arguments: args }, extra.signal);
         }
+        const external = exactTool(bound, "shell");
+        const externalArgs = external && !Object.keys(permissions).length
+          ? externalShellArguments(external, cmd, workdir || undefined, yield_time_ms) : undefined;
+        if (external && externalArgs) return invoke(claimed.bindingId, bound, external, { arguments: externalArgs }, extra.signal);
         const gateway = execGateway(bound);
         if (!gateway) {
           throw new Error("This Codex turn did not advertise a native command tool or the native exec gateway");

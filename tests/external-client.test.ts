@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { externalAuthorization, externalNativeRequest, externalTokenPath, nativeShapedExternalBody } from "../src/external-client";
+import { externalShellArguments } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultConfig } from "../src/config";
 import { startServer } from "../src/server";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -94,6 +95,15 @@ test("a late tool result for a retired turn continues as a new turn; live stream
   const passed = await externalNativeRequest(new Request("http://localhost/v1/responses", { method: "POST",
     body: JSON.stringify({ model: "m", prompt_cache_key: "sess-live", input: [system, user("go")] }) }), async () => live, 1_000);
   expect(await passed.text()).toBe(expected);
+});
+
+test("codex_exec maps onto an external client's shell tool, keeping the working directory", () => {
+  const shell = { name: "shell", parameters: { type: "object", properties: { command: { type: "string" }, wait_ms: { type: "integer" } } } } as any;
+  expect(externalShellArguments(shell, "git status", undefined, undefined, "win32")).toEqual({ command: "git status" });
+  expect(externalShellArguments(shell, "git status", "D:\\it's", 500, "win32"))
+    .toEqual({ command: "Set-Location -LiteralPath 'D:\\it''s'; git status", wait_ms: 1_000 });
+  expect(externalShellArguments(shell, "ls", "/tmp/a'b", 5_000, "linux")).toEqual({ command: "cd '/tmp/a'\\''b' && ls", wait_ms: 5_000 });
+  expect(externalShellArguments({ name: "shell", parameters: { type: "object", properties: { cmd: {} } } } as any, "ls")).toBeUndefined();
 });
 
 test("external requests without a working directory or with server-side continuation are refused", () => {
