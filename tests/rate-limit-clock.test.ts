@@ -11,6 +11,24 @@ const savedNotice = "We're doing a quick check to keep ChatGPT reliable. Try aga
 const local = (hour: number, minute = 0, second = 0, day = 10, millisecond = 0) =>
   new Date(2026, 9, day, hour, minute, second, millisecond).getTime();
 
+test.each([
+  ["before the reset date", new Date(2026, 10, 2, 23, 30), true],
+  ["on the reset date after midnight", new Date(2026, 10, 3, 12, 30), true],
+  ["at the next day's start", new Date(2026, 10, 4), false],
+  ["after the reset date", new Date(2026, 10, 5, 9), false],
+] as const)("date-only Pro reset stays future or uses fallback: %s", (_label, clock, future) => {
+  const message = "ChatGPT model 6 Pro usage limit reached. Limit reached. Try again after Nov 3, 2026.";
+  const now = clock.getTime();
+  const expected = future ? new Date(2026, 10, 4).getTime() : now + 20 * 60_000;
+  expect(parseRetryAtFromMessage(message, now)).toBe(expected);
+  expect(parseRetryAtFromMessage(message, now)).toBeGreaterThan(now);
+  expect(parseRetryAfterFromMessage(message, now)).toBe(future ? (expected - now) / 1_000 : undefined);
+  expect(adapterFailureFromMessage(message, now)).toMatchObject({
+    httpStatus: 429, error: { code: "rate_limit_exceeded", retryAt: expected,
+      retryAfterSeconds: (expected - now) / 1_000 },
+  });
+});
+
 test("the exact saved after 8:27 PM notice uses host-local time, not the fallback", () => {
   const now = local(20, 0);
   expect(parseRetryAtFromMessage(savedNotice, now)).toBe(local(20, 27));

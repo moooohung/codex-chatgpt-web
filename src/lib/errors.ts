@@ -242,23 +242,25 @@ function retryClockAt(message: string, now: number): number | undefined {
   return undefined;
 }
 
-/** Date-only picker notices use local midnight, just like clock-only notices use local time. */
-function retryDateAt(message: string): number | undefined {
+/** A date-only reset may occur anytime that day; wait until the next local day starts. */
+function retryDateAt(message: string, now: number): number | undefined {
   const date = /(?:try\s+again|retry)\s+after\s+((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4})\b/i.exec(message)?.[1];
   if (!date) return undefined;
-  const at = Date.parse(date);
-  return Number.isFinite(at) ? at : undefined;
+  const end = new Date(date);
+  end.setDate(end.getDate() + 1);
+  const at = end.getTime();
+  return Number.isFinite(at) && at > now ? at : undefined;
 }
 
 /** Best-effort explicit delay; unrelated text and notices without a valid time remain undefined. */
 export function parseRetryAfterFromMessage(message: string, now: number = Date.now()): number | undefined {
-  const retryAt = retryDateAt(message) ?? retryClockAt(message, now);
+  const retryAt = retryDateAt(message, now) ?? retryClockAt(message, now);
   return retryAt === undefined ? retryDurationSeconds(message) : Math.max(0, Math.ceil((retryAt - now) / 1_000));
 }
 
 /** Absolute local reset time. Call after classification; only missing/invalid times use 20 minutes. */
 export function parseRetryAtFromMessage(message: string, now: number = Date.now()): number {
-  return retryDateAt(message) ?? retryClockAt(message, now) ?? now + (retryDurationSeconds(message) ?? 20 * 60) * 1_000;
+  return retryDateAt(message, now) ?? retryClockAt(message, now) ?? now + (retryDurationSeconds(message) ?? 20 * 60) * 1_000;
 }
 
 /** Infer HTTP status from adapter terminal error text (provider-agnostic keyword matching). */

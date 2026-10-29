@@ -5226,13 +5226,18 @@ export class ChatGptBrowserWorker {
       if (!cooldownRecorded && error instanceof ChatGptWebAdapterError && error.status === 429
         && (error.code === "rate_limit_exceeded" || error.code === "chatgpt_unusual_activity")
         && error.retryAt !== undefined) {
+        // Recording is best effort, and failure cleanup can run again in the outer catch.
+        // Never let a control-channel/store failure replace the provider's usage-limit error.
+        cooldownRecorded = true;
         const acknowledged = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
           phase: "cooldown", traceId: turn.traceId, helperPid: process.pid,
           retryAt: error.retryAt, message: error.message, code: error.code,
           ...(error.localCooldown === true ? { localCooldown: true } : {}),
-        }, 15_000);
-        cooldownRecorded = true;
-        if (acknowledged.retryAt !== undefined && acknowledged.retryAt !== error.retryAt) {
+        }, 15_000).catch(cause => {
+          console.warn(`[chatgpt-web] launcher cooldown notification failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+          return undefined;
+        });
+        if (acknowledged?.retryAt !== undefined && acknowledged.retryAt !== error.retryAt) {
           // Account-wide backoff may be longer than this tab's first local estimate.
           // Preserve it in the error seen by compaction and the Responses client.
           Object.assign(error, { retryAt: acknowledged.retryAt,
@@ -5241,7 +5246,7 @@ export class ChatGptBrowserWorker {
               `Local retry check after ${Math.max(1, Math.ceil((acknowledged.retryAt - Date.now()) / 60_000))} minutes.`) });
         }
         if (error.code === "rate_limit_exceeded" && !sendActivated && !turn.requireRetainedConversation
-          && acknowledged.alternateAvailable === true) markUnsentCooldown();
+          && acknowledged?.alternateAvailable === true) markUnsentCooldown();
       }
       if (!failedTabRelease) {
         ({ status: terminal, message: terminalMessage } = describeTerminal(error));

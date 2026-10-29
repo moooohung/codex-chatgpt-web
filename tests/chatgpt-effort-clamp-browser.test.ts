@@ -103,7 +103,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("disabled Pro tooltip reports
     } catch (error) { failure = error; }
     expect(failure).toMatchObject({
       status: 429, code: "rate_limit_exceeded", retryable: false,
-      retryAt: new Date(2026, 10, 3).getTime(),
+      retryAt: new Date(2026, 10, 4).getTime(),
       message: expect.stringContaining("Try again after Nov 3, 2026."),
     });
     expect(await page.locator("#prompt-textarea").innerText()).toBe("Draft");

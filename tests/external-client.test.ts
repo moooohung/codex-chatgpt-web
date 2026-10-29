@@ -182,7 +182,7 @@ test("HTTP admission routes authenticated external requests through the native a
         throw new ChatGptWebAdapterError(
           "ChatGPT model 6 Pro usage limit reached. Limit reached. Try again after Nov 3, 2026. This part was not sent.",
           { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false,
-            retryAt: new Date(2026, 10, 3).getTime() },
+            retryAt: new Date(2026, 10, 4).getTime() },
         );
       }
       if ((parsed._rawBody as any).prompt_cache_key?.startsWith("sess-retired:") && !retiredOnce) {

@@ -67,6 +67,44 @@ test.each([false, true])("account fallback only replays a prompt that never acti
   } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
 });
 
+test.each(["store-rejected", "invalid-ack"])("cooldown-record failure preserves the original Pro usage limit (%s)", async failure => {
+  const root = mkdtempSync(join(tmpdir(), "cooldown-record-failure-"));
+  const phases: string[] = [];
+  const retryAt = Date.now() + 60_000;
+  const error = new ChatGptWebAdapterError("ChatGPT model 6 Pro usage limit reached. Try again after Nov 3, 2026.", {
+    status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false, retryAt,
+  });
+  let calls = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const body = await request.json() as { phase: string };
+    phases.push(body.phase);
+    if (body.phase === "cooldown") return failure === "store-rejected"
+      ? Response.json({ error: "expected a future absolute retryAt" }, { status: 400 })
+      : Response.json({ ok: true, retryAt: 0, alternateAvailable: true });
+    return Response.json(body.phase === "start"
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false,
+        accountContext: { accountKey: "a".repeat(64), planType: "pro" } }
+      : { cancelledByUser: false });
+  } });
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { browserHost: "launcher", browserHostDescriptorPath: descriptor(root, `http://127.0.0.1:${server.port}`) },
+    async runBrowserTurn(_turn: unknown, _surface: unknown, _page: unknown, _reuse: unknown, _usage: unknown,
+      onFailure: (error: unknown) => Promise<void>) {
+      calls++;
+      await onFailure(error);
+      throw error;
+    },
+  });
+  try {
+    await expect(worker.runExclusive({ traceId: "cooldown-record-failure", capabilities: { localToolsEnabled: false } }))
+      .rejects.toBe(error);
+    expect(error).toMatchObject({ status: 429, code: "rate_limit_exceeded", retryable: false, retryAt });
+    expect(calls).toBe(1);
+    expect(phases.filter(phase => phase === "cooldown")).toHaveLength(1);
+    expect(phases.filter(phase => phase === "end")).toHaveLength(1);
+  } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("unusual activity never resubmits the blocked turn on another account", async () => {
   const root = mkdtempSync(join(tmpdir(), "unusual-activity-no-replay-"));
   const phases: string[] = [];

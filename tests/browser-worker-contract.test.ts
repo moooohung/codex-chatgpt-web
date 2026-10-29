@@ -63,7 +63,7 @@ test("unavailable Pro detail reads only its linked tooltip in any language", asy
   expect(await observe("x".repeat(513))).toBeUndefined();
   await expect(observe("Limit reached. Try again after Nov 3, 2026.", "owned", true)).rejects.toMatchObject({
     status: 429, code: "rate_limit_exceeded", errorType: "rate_limit_error", retryable: false,
-    retryAt: new Date(2026, 10, 3).getTime(),
+    retryAt: new Date(2026, 10, 4).getTime(),
     message: "ChatGPT model 6 Pro usage limit reached. Limit reached. Try again after Nov 3, 2026. This part was not sent.",
   });
   for (const kind of ["hidden", "enabled", "ambiguous", "unlinked"]) {
