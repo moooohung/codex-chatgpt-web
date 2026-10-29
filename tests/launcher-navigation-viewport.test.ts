@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { _electron } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
-import { activateChatGptEffortMenu } from "../src/chatgpt-session";
+import { activateChatGptEffortMenu } from "../src/chatgpt-ui/model-picker";
 
 async function removeOwnedProfile(directory: string) {
   if (dirname(resolve(directory)) !== resolve(tmpdir()) || !basename(directory).startsWith("launcher-navigation-")) {

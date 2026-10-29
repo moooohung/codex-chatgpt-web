@@ -28,8 +28,9 @@ test("Bigger Context waits for startup and route recovery without invalidating h
     const context = vm.createContext({
       runtimeStartup, finishRuntimeStartup: () => { startupSettled = true; finishRuntimeStartup(); },
       startupAuthenticationRefresh, logger, stateStore, IS_DEV_PROFILE: false,
-      LAUNCHER_PROFILE: {}, browserHost: null,
+      LAUNCHER_PROFILE: {},
       createAccountApi: () => ({ resume() {} }),
+      SessionReminderView: class {}, mainWindow: {}, loadRenderer() {},
       ipcMain: { on() {} }, registerLoggedIpc: (_ipc, _logger, channel, handler) => handlers.set(channel, handler),
       send() {}, publishOperation() {}, startCatalogVerificationMonitor() {},
       browserHost: { turnTabs: new Map() },
@@ -73,6 +74,46 @@ test("Bigger Context waits for startup and route recovery without invalidating h
     assert.equal(state.experimentalBiggerContext, true);
     assert.equal(state.coreSetupComplete, !fails, "only a real startup failure may invalidate setup");
   }
+});
+
+test("native reminder logout waits for runtime readiness and publishes the completed logout", async () => {
+  const vm = require("node:vm");
+  let finishStartup, reminder, logouts = 0;
+  const runtimeStartup = new Promise(resolve => { finishStartup = resolve; });
+  const handlers = new Map(), events = [];
+  const state = { sessionRefreshReminderAt: "old", language: "ko" };
+  const browser = { authenticated: false };
+  const context = {
+    runtimeStartup, mainWindow: {}, loadRenderer() {}, LAUNCHER_PROFILE: {},
+    logger: { warn() {} }, ipcMain: { on() {} }, runtimeSupervisor: {},
+    stateStore: { read: () => state, update: patch => Object.assign(state, patch) },
+    nextSessionRefreshReminderAt: () => "next",
+    SessionReminderView: class { constructor(options) { reminder = options; } },
+    createAccountApi: () => ({ resume() {} }),
+    browserHost: { logout: async () => { logouts++; return browser; } },
+    send: (channel, value) => events.push([channel, value]),
+    registerLoggedIpc: (_ipc, _logger, channel, handler) => handlers.set(channel, handler),
+  };
+  vm.runInNewContext(electronMain.slice(electronMain.indexOf("function registerIpc("),
+    electronMain.indexOf("async function requestQuit(")) + "\nregisterIpc({ logger, stateStore });", context);
+  assert.equal(reminder.parent, context.mainWindow);
+  assert.equal(reminder.getLanguage(), "ko");
+  await reminder.onAction("dismiss");
+  assert.equal(state.sessionRefreshReminderAt, "next");
+  assert.equal(logouts, 0, "dismissing the notice stays available during startup");
+  events.length = 0;
+  const loggingOut = reminder.onAction("logout");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(logouts, 0);
+  assert.deepEqual(events, []);
+  finishStartup();
+  const result = await loggingOut;
+  assert.equal(result.browser, browser);
+  assert.equal(result.state, state);
+  assert.equal(logouts, 1);
+  assert.deepEqual(events.map(([channel]) => channel), ["launcher:state-changed", "launcher:session-reminder-logged-out"]);
+  assert.equal((await handlers.get("launcher:browser-logout")()).browser, browser);
+  assert.equal(logouts, 2, "the normal logout button shares the same transaction");
 });
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
@@ -571,15 +612,16 @@ test("browser preference IPC commits after success; live approvals allow active 
   const vm = require("node:vm");
   for (const [property, method, channel, nextChannel] of [
     ["composerPredictionsEnabled", "setComposerPredictions", "launcher:composer-predictions", "launcher:skill-attachments"],
-    ["experimentalFreshConversationPerTurn", "setFreshConversationPerTurn", "launcher:fresh-conversation-per-turn", "launcher:auto-approve-tool-calls"],
+    ["experimentalFreshConversationPerTurn", "setFreshConversationPerTurn", "launcher:fresh-conversation-per-turn", "launcher:temporary-chats"],
+    ["useTemporaryChats", "setTemporaryChats", "launcher:temporary-chats", "launcher:auto-approve-tool-calls"],
     ["autoApproveToolCalls", "setAutoApproveToolCalls", "launcher:auto-approve-tool-calls", "launcher:zero-risk-pro"],
   ]) {
     const source = electronMain.slice(
       electronMain.indexOf(`handle("${channel}",`),
       electronMain.indexOf(`handle("${nextChannel}",`),
     );
-    const state = { composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: false, autoApproveToolCalls: false };
-    const config = { composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: false, autoApproveToolCalls: false };
+    const state = { composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: false, useTemporaryChats: false, autoApproveToolCalls: false };
+    const config = { composerPredictionsEnabled: false, experimentalFreshConversationPerTurn: false, useTemporaryChats: false, autoApproveToolCalls: false };
     const events = [];
     let handler, finishSetup, setupFailure, calls = 0;
     const browserHost = { activeTraceId: "running-turn", currentOperation: () => null, turnTabs: new Map() };
@@ -677,7 +719,7 @@ test("fresh-conversation snapshot uses runtime configuration and mode switching 
 
 test("changing Bigger Context retires ready automatic chats before a previous mode can reuse them", () => {
   const vm = require("node:vm");
-  const state = { experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false,
+  const state = { experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useTemporaryChats: false,
     autoApproveToolCalls: false, biggerContextAvailable: true };
   const tabs = new Map([
     ["old", { status: "ready", conversationKey: "old-luna", interactionMode: "automatic" }],
@@ -691,13 +733,36 @@ test("changing Bigger Context retires ready automatic chats before a previous mo
   });
   vm.runInContext(electronMain.slice(electronMain.indexOf("function syncBrowserPreferences("), electronMain.indexOf("function registerIpc(")), context);
   const store = { read: () => state, update: patch => Object.assign(state, patch) };
-  context.syncBrowserPreferences(store, { solAvailable: false, experimentalBiggerContext: true });
+  context.syncBrowserPreferences(store, { solAvailable: false, experimentalBiggerContext: true, useTemporaryChats: false });
   assert.deepEqual(released, ["old-luna"]);
   assert.equal(state.experimentalBiggerContext, true);
   assert.equal(tabs.has("active"), true);
   assert.equal(tabs.has("manual"), true);
-  context.syncBrowserPreferences(store, { solAvailable: false, experimentalBiggerContext: true });
+  context.syncBrowserPreferences(store, { solAvailable: false, experimentalBiggerContext: true, useTemporaryChats: false });
   assert.deepEqual(released, ["old-luna"]);
+});
+
+test("changing chat mode retires idle automatic and manual conversations while preserving active tasks", () => {
+  const vm = require("node:vm");
+  const state = { useTemporaryChats: false };
+  const tabs = new Map([
+    ["automatic", { status: "ready", conversationKey: "automatic", interactionMode: "automatic" }],
+    ["manual", { status: "ready", conversationKey: "manual", interactionMode: "manual" }],
+    ["active", { status: "running", conversationKey: "active", interactionMode: "automatic" }],
+  ]);
+  const released = [];
+  const context = vm.createContext({
+    runtimeHost: { currentOperation: () => null }, browserHost: { turnTabs: tabs },
+    releaseRetainedConversation: (_host, key) => { released.push(key); tabs.delete(key); }, send() {},
+  });
+  vm.runInContext(electronMain.slice(electronMain.indexOf("function syncBrowserPreferences("), electronMain.indexOf("function registerIpc(")), context);
+  const store = { read: () => state, update: patch => Object.assign(state, patch) };
+  context.syncBrowserPreferences(store, { useTemporaryChats: true });
+  assert.deepEqual(released, ["automatic", "manual"]);
+  assert.equal(state.useTemporaryChats, true);
+  assert.equal(tabs.has("active"), true);
+  context.syncBrowserPreferences(store, { useTemporaryChats: true });
+  assert.deepEqual(released, ["automatic", "manual"]);
 });
 
 test("browser preference controls are translated, disabled in Zero Risk, and invoke their settings", async () => {

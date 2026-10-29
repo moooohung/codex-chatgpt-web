@@ -18,7 +18,7 @@ test("family readback survives a replaced menu and a commit delayed beyond the o
     locator: () => ({ count: async () => 1, getAttribute: async () => "advanced" }),
   } });
   const initial = makeMenu(false), stale = makeMenu(true), fresh = makeMenu(false);
-  const result = await selectChatGptModelFamily(initial, "5.6", async () => ++activations === 1 ? stale : fresh, 2_000);
+  const result = await selectChatGptModelFamily(initial, "5.6", async () => ++activations === 1 ? stale : fresh, undefined, 2_000);
   expect(result).toBe(fresh);
   expect(clicks).toBe(1);
   expect(activations).toBeGreaterThan(1);
@@ -28,7 +28,7 @@ test("a blocked model DOM read is transient and cannot click after its budget ex
   const count = deferred<number>();
   let clicks = 0;
   const menu: any = { menu: { getByRole: () => ({ count: () => count.promise, click: async () => { clicks++; } }) } };
-  await expect(selectChatGptModelFamily(menu, "5.6", async () => menu, 15))
+  await expect(selectChatGptModelFamily(menu, "5.6", async () => menu, undefined, 15))
     .rejects.toMatchObject({ code: "chatgpt_model_selection_timeout", retryable: true });
   count.resolve(1); await Bun.sleep(1);
   expect(clicks).toBe(0);
@@ -37,7 +37,7 @@ test("a blocked model DOM read is transient and cannot click after its budget ex
 test("ambiguous family controls remain a terminal rejection", async () => {
   let clicks = 0;
   const menu: any = { menu: { getByRole: () => ({ count: async () => 2, click: async () => { clicks++; } }) } };
-  await expect(selectChatGptModelFamily(menu, "5.6", async () => menu, 100))
+  await expect(selectChatGptModelFamily(menu, "5.6", async () => menu, undefined, 100))
     .rejects.toMatchObject({ code: "chatgpt_model_family_selection_failed", retryable: false });
   expect(clicks).toBe(0);
 });

@@ -125,6 +125,7 @@ export interface AppConfig {
   experimentalMinimalContextTransport?: boolean;
   experimentalStagedCompaction?: boolean;
   experimentalReuseVerifiedEffort?: boolean;
+  useTemporaryChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
   /** Transport silence and automatic browser response/tool-progress budget, in seconds. */
@@ -261,6 +262,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     experimentalMinimalContextTransport: true,
     experimentalStagedCompaction: false,
     experimentalReuseVerifiedEffort: true,
+    useTemporaryChats: true,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
     controlToken: randomBytes(32).toString("base64url"),
@@ -556,6 +558,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.experimentalSkillAttachments !== undefined && typeof parsed.experimentalSkillAttachments !== "boolean") {
     throw new Error(`Invalid experimentalSkillAttachments in ${path}`);
   }
+  if (parsed.useTemporaryChats !== undefined && typeof parsed.useTemporaryChats !== "boolean") {
+    throw new Error(`Invalid useTemporaryChats in ${path}`);
+  }
   const experimentalSkillAttachments = parsed.experimentalSkillAttachments === true;
   if (parsed.composerPredictionsEnabled !== undefined && typeof parsed.composerPredictionsEnabled !== "boolean") {
     throw new Error(`Invalid composerPredictionsEnabled in ${path}`);
@@ -609,6 +614,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalMinimalContextTransport,
     experimentalStagedCompaction,
     experimentalReuseVerifiedEffort,
+    useTemporaryChats: parsed.useTemporaryChats !== false,
     zeroRiskProEnabled,
   } as AppConfig;
 }
@@ -689,6 +695,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalMinimalContextTransport: config.experimentalMinimalContextTransport !== false,
       experimentalStagedCompaction: !manual && config.experimentalStagedCompaction === true,
       experimentalReuseVerifiedEffort: config.experimentalReuseVerifiedEffort !== false,
+      useTemporaryChats: config.useTemporaryChats,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,
     },

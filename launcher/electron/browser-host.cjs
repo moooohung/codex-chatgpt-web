@@ -252,6 +252,16 @@ function isNewChatUrl(value) {
     && parsed.searchParams.get("temporary-chat") !== "true";
 }
 
+function savedConversationUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.origin === CHATGPT_ORIGIN && /^\/c\/[^/]+\/?$/.test(parsed.pathname)
+      && parsed.searchParams.get("temporary-chat") !== "true" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function isChatGptBackendUrl(value) {
   let parsed;
   try {
@@ -432,6 +442,7 @@ class BrowserHost {
     stateStore,
     memoryPolicy = resolveBrowserMemoryPolicy(),
     getAppMetrics = () => app?.getAppMetrics?.() ?? [],
+    getUseTemporaryChats = () => true,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -470,6 +481,7 @@ class BrowserHost {
     this.stateStore = stateStore;
     this.memoryPolicy = memoryPolicy;
     this.getAppMetrics = getAppMetrics;
+    this.getUseTemporaryChats = getUseTemporaryChats;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -545,7 +557,8 @@ class BrowserHost {
         backgroundThrottling: true,
       },
     });
-    window.contentView.addChildView(this.view);
+    // Browser surfaces stay below native launcher notices, including new tabs.
+    window.contentView.addChildView(this.view, 0);
     this.windowVisibilityListener = () => this.syncViewVisibility();
     for (const event of WINDOW_VISIBILITY_EVENTS) {
       this.window.on(event, this.windowVisibilityListener);
@@ -1134,13 +1147,16 @@ class BrowserHost {
       memorySuspended: false,
       recycleOnResume: false,
       retainedUrl: null,
+      // Keep the creation mode even if ChatGPT later drops the temporary-chat query
+      // or the launcher setting changes. A /c/ URL alone does not prove durability.
+      useTemporaryChats: this.getUseTemporaryChats?.() !== false,
     };
     // Reserve the ordinal synchronously, before locale setup can yield. Otherwise a
     // burst of starts can all pass the capacity check and create the same ordinal.
     this.turnTabs.set(id, tab);
     try {
       this.syncPowerSaveBlocker();
-      this.window.contentView.addChildView(view);
+      this.window.contentView.addChildView(view, 0);
       this.presentTurnView(tab, false);
       view.webContents.setZoomFactor(this.state.zoomFactor);
       this.bindShellZoomShortcuts(view.webContents);
@@ -1227,21 +1243,14 @@ class BrowserHost {
   }
 
   retainedConversationUrl(tab) {
+    if (tab?.useTemporaryChats !== false) return null;
     const contents = tab?.view?.webContents;
     const candidate = contents
       && !contents.isDestroyed()
       && typeof contents.getURL === "function"
       ? contents.getURL()
       : tab?.url;
-    try {
-      const parsed = new URL(candidate || "");
-      // A temporary conversation is only proven in its current document. Parking it would
-      // trade away continuation state without evidence that the server can reload it.
-      return parsed.origin === CHATGPT_ORIGIN && parsed.pathname.startsWith("/c/")
-        && parsed.searchParams.get("temporary-chat") !== "true" ? parsed.toString() : null;
-    } catch {
-      return null;
-    }
+    return savedConversationUrl(candidate);
   }
 
   async suspendRetainedTurnTab(tab) {
@@ -1264,7 +1273,9 @@ class BrowserHost {
     const recycleOnResume = recycleForTurns || recycleForMemory;
     if (!policy.releaseIdleTabMemory && !recycleOnResume) return false;
     const contents = tab.view.webContents;
-    if (contents.isDestroyed()) return false;
+    // Navigation can change the conversation while the optional memory probe yields.
+    if (contents.isDestroyed()
+      || BrowserHost.prototype.retainedConversationUrl.call(this, tab) !== retainedUrl) return false;
     tab.retainedUrl = retainedUrl;
     tab.recycleOnResume = recycleOnResume;
     // Even an interrupted navigation needs the saved URL restored before the next turn.
@@ -1307,7 +1318,13 @@ class BrowserHost {
   async restoreRetainedTurnTab(tab, signal) {
     if (!tab.memorySuspended) return false;
     const retainedUrl = tab.retainedUrl;
-    if (!retainedUrl) throw new Error("Retained ChatGPT tab has no conversation URL to restore");
+    // A parked temporary (or unknown-mode) document has already lost its context.
+    // Reject before allocating a renderer or navigating, even if it has a /c/ URL.
+    if (tab.useTemporaryChats !== false || !savedConversationUrl(retainedUrl)) {
+      const error = new Error("Retained ChatGPT tab has no saved conversation URL to restore");
+      error.code = "retained_conversation_unavailable";
+      throw error;
+    }
     signal?.throwIfAborted();
     let recycled = false;
     if (tab.recycleOnResume) {
@@ -1317,7 +1334,7 @@ class BrowserHost {
       tab.rendererReady = false;
       tab.deviceEmulationViewport = null;
       tab.deviceEmulationDirty = true;
-      this.window.contentView.addChildView(replacement);
+      this.window.contentView.addChildView(replacement, 0);
       this.presentTurnView(tab, false);
       replacement.webContents.setZoomFactor(this.state.zoomFactor);
       this.bindShellZoomShortcuts(replacement.webContents);
@@ -1428,7 +1445,7 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: NEW_CHAT_URL,
+      url: this.getUseTemporaryChats() ? `${NEW_CHAT_URL}?temporary-chat=true` : NEW_CHAT_URL,
       loading: true,
       message: "Paste the copied prompt, add any images yourself because Zero Risk cannot transfer them, choose a model and effort, then press Sent",
       interactionMode: "manual",
@@ -1448,7 +1465,7 @@ class BrowserHost {
       lastHeartbeatAt: Date.now(),
     };
     this.turnTabs.set(id, tab);
-    this.window.contentView.addChildView(view);
+    this.window.contentView.addChildView(view, 0);
     this.presentTurnView(tab, true);
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
@@ -1556,6 +1573,14 @@ class BrowserHost {
 
   bindTurnContents(tab) {
     const contents = tab.view.webContents;
+    const rememberTemporaryChat = url => {
+      try {
+        const parsed = new URL(url);
+        if (parsed.origin === CHATGPT_ORIGIN && parsed.searchParams.get("temporary-chat") === "true") {
+          tab.useTemporaryChats = true;
+        }
+      } catch {}
+    };
     if (tab.accountName) bindAccountBackendRecovery(this, contents.session);
     this.bindTurnContentsDestruction(tab, contents);
     contents.setWindowOpenHandler(({ url }) => {
@@ -1581,7 +1606,8 @@ class BrowserHost {
     contents.on("will-navigate", blockAuthenticationNavigation);
     contents.on("will-redirect", blockAuthenticationNavigation);
     contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
-      if (!mainFrame) return;
+      if (!mainFrame || retiredTurnContents(tab, contents) || this.destroyed || contents.isDestroyed()) return;
+      rememberTemporaryChat(url);
       tab.url = url;
       tab.loading = true;
       if (!inPlace) {
@@ -1595,9 +1621,10 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-stop-loading", () => {
-      if (this.destroyed || contents.isDestroyed()) return;
+      if (this.destroyed || contents.isDestroyed() || retiredTurnContents(tab, contents)) return;
       tab.loading = false;
       tab.url = contents.getURL();
+      rememberTemporaryChat(tab.url);
       this.publishState?.(this.snapshot());
     });
     contents.on("dom-ready", () => {
@@ -1609,9 +1636,10 @@ class BrowserHost {
       this.syncViewVisibility();
     });
     contents.on("did-finish-load", () => {
-      if (this.destroyed || contents.isDestroyed()) return;
+      if (this.destroyed || contents.isDestroyed() || retiredTurnContents(tab, contents)) return;
       injectDomStealth(contents);
       tab.url = contents.getURL();
+      rememberTemporaryChat(tab.url);
       tab.loading = false;
       tab.rendererReady = true;
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
@@ -1640,7 +1668,11 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
-      if (mainFrame) tab.url = url;
+      if (retiredTurnContents(tab, contents) || this.destroyed || contents.isDestroyed()) return;
+      if (mainFrame) {
+        tab.url = url;
+        rememberTemporaryChat(url);
+      }
       this.publishState?.(this.snapshot());
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
@@ -2188,10 +2220,10 @@ class BrowserHost {
     });
   }
 
-  async refreshChatGptHomeDocument() {
+  async refreshChatGptHomeDocument(useTemporaryChats = false) {
     // A navigation from the idle host already creates a fresh ChatGPT document. Reload only an
-    // existing ordinary new-chat document so the helper sees one fresh catalog.
-    const targetUrl = NEW_CHAT_URL;
+    // existing new-chat document in the selected mode so the helper sees one fresh catalog.
+    const targetUrl = useTemporaryChats ? `${NEW_CHAT_URL}?temporary-chat=true` : NEW_CHAT_URL;
     if (this.view.webContents.getURL() === targetUrl) {
       await this.hardRefreshHome();
     } else {
@@ -2890,7 +2922,7 @@ class BrowserHost {
     const authView = new WebContentsView({ webContents: options.webContents });
     this.authView = authView;
     this.authNavigationError = null;
-    this.window.contentView.addChildView(authView);
+    this.window.contentView.addChildView(authView, 0);
     authView.setBounds(this.bounds);
     authView.setVisible(false);
     authView.webContents.setZoomFactor(this.state.zoomFactor);
@@ -3855,7 +3887,7 @@ class BrowserHost {
     };
 
     this.turnTabs.set(id, tab);
-    this.window.contentView.addChildView(view);
+    this.window.contentView.addChildView(view, 0);
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
@@ -4238,8 +4270,7 @@ class BrowserHost {
             url: actualUrl.href,
             composer: Boolean(composer),
             newChat: actualUrl.origin === expectedUrl.origin
-              && actualUrl.pathname === expectedUrl.pathname
-              && actualUrl.searchParams.get("temporary-chat") !== "true",
+              && actualUrl.pathname === expectedUrl.pathname,
             readyState: document.readyState,
           };
         };
@@ -4355,6 +4386,7 @@ class BrowserHost {
       descriptorPath: this.descriptorPath,
       appName: connectorName,
       operation: "smoke",
+      useTemporaryChats: this.getUseTemporaryChats(),
       logger: this.logger,
     });
     const evidence = result?.value;
@@ -4378,12 +4410,13 @@ class BrowserHost {
     requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
     const connectorName = validateConnectorName(appName);
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
-    await this.refreshChatGptHomeDocument();
+    await this.refreshChatGptHomeDocument(this.getUseTemporaryChats());
     try {
       const result = await this.verifyConnectorWithBrowserHelper({
         helper: this.helper,
         descriptorPath: this.descriptorPath,
         appName: connectorName,
+        useTemporaryChats: this.getUseTemporaryChats(),
         logger: this.logger,
       });
       this.logger.info("connector.verified", { appName: connectorName });
@@ -4419,6 +4452,7 @@ class BrowserHost {
       descriptorPath: this.descriptorPath,
       appName: connectorName,
       operation: "inspect",
+      useTemporaryChats: false,
       payload: { detectCapabilities },
       logger: this.logger,
     });
@@ -4445,6 +4479,7 @@ class BrowserHost {
         descriptorPath: this.descriptorPath,
         appName: this.connectorName(),
         operation: "limits",
+        useTemporaryChats: false,
         logger: this.logger,
       });
       const plan = result?.value;

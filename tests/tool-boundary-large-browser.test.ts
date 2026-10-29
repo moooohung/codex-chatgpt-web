@@ -3,7 +3,8 @@ import { chromium } from "playwright-core";
 import { ChatGptBrowserWorker, ChatGptCompletionTracker } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 import { chatGptSubmissionDomProjection } from "../src/adapters/chatgpt-web/submission-ui";
-import { CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_USER_TURN_SELECTOR, CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-session";
+import { CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_USER_TURN_SELECTOR } from "../src/chatgpt-ui/turns";
+import { CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-ui/composer";
 
 for (const chars of [320_000, 1_000_000]) test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(
   `${chars} chars: boundary capture does not wait for input layout and still observes before ACK`, async () => {

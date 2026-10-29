@@ -15,7 +15,7 @@ test("disabled model usage limit is checked after opening the family view, befor
       locator: () => ({ filter() { return this; }, count: async () => 1,
         click: async () => { calls.push("advanced"); } }) }),
   } } as unknown as Parameters<typeof selectChatGptModelFamily>[0];
-  await expect(selectChatGptModelFamily(menu, "6", async () => menu, 1_000, async () => {
+  await expect(selectChatGptModelFamily(menu, "6", async () => menu, undefined, 1_000, async () => {
     calls.push("limit"); throw limit;
   })).rejects.toBe(limit);
   expect(calls).toEqual(["advanced", "limit"]);
@@ -23,8 +23,8 @@ test("disabled model usage limit is checked after opening the family view, befor
 
 test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
   for (const [label, accepted] of [
-    ["Latest", true], ["最新", true], ["최신", true], ["GPT-6 Pro", true], ["6", true],
-    ["GPT-5.6 Sol", false], ["GPT-7 Pro", false], ["Latest preview", false],
+    ["Latest", true], ["最新", true], ["최신", true], ["GPT-6 Pro", true], ["6", true], ["GPT-6 Sol", true],
+    ["GPT-5.6 Sol", false], ["GPT-6.1 Sol", false], ["GPT-7 Pro", false], ["Latest preview", false],
   ] as const) {
     const menu = { menu: {
       getByRole: (_role: string, options: { name: RegExp }) => ({
@@ -101,6 +101,15 @@ test.each(["5.6 Sol Instant", "6 Pro", ""])("generic effort announcements requir
   if (header === "5.6 Sol Instant") await confirmation;
   else await expect(confirmation).rejects.toThrow("could not be selected and verified");
 });
+test("explicit Astra Max verifies the requested Pro route without accepting Ultra or another model", () => {
+  expect(chatGptModelFamilyMatches(["6 Astra Max"], "6", "max")).toBeTrue();
+  expect(chatGptUsageModelFromAnnouncements(["6 Astra Max"])).toBe("gpt-6-pro");
+  for (const description of ["6 Astra Ultra", "6 Astra High", "6 Sol Max", "6.1 Astra Max", "6 Max"]) {
+    expect(chatGptModelFamilyMatches([description], "6", "max")).toBeFalse();
+    expect(chatGptUsageModelFromAnnouncements([description])).toBe("pro-unknown");
+  }
+});
+
 test("Simplified Chinese effort announcements preserve exact model and effort verification (#911)", () => {
   for (const [label, effort] of [["即时", "low"], ["中", "medium"], ["高", "high"]] as const) {
     expect(chatGptModelFamilyMatches([`GPT-6 Sol ${label}，第 3 项，共 3 项`, `6 ${label}`], "6", effort)).toBeTrue();

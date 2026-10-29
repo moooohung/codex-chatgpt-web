@@ -137,3 +137,21 @@ test("automated initial and recycled views disable spell checking of machine-gen
     assert.equal(view.options.webPreferences.contextIsolation, true);
   }
 });
+
+test("automatic tabs capture their chat mode before initialization and stay below launcher notices", async () => {
+  for (const initialMode of [undefined, true, false]) {
+    const host = fixture(), locale = deferred(), attachments = [];
+    let currentMode = initialMode;
+    if (initialMode !== undefined) host.getUseTemporaryChats = () => currentMode;
+    host.configureLocalePreferences = () => locale.promise;
+    host.window.contentView.addChildView = (view, index) => attachments.push([view, index]);
+    const starting = host.createTurnTab("initial", process.pid);
+    currentMode = !initialMode;
+    locale.resolve();
+    const tab = await starting;
+    assert.equal(tab.useTemporaryChats, initialMode !== false);
+    assert.deepEqual(attachments, [[tab.view, 0]]);
+    tab.view.webContents.getURL = () => "https://chatgpt.com/c/no-query";
+    assert.equal(host.retainedConversationUrl(tab), initialMode === false ? "https://chatgpt.com/c/no-query" : null);
+  }
+});

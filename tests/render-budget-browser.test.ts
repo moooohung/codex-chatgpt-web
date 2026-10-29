@@ -9,7 +9,8 @@ import { ChatGptBrowserWorker, ChatGptCompletionTracker, isChatGptMultipartAckno
 import { captureChatGptToolBoundary } from "../src/adapters/chatgpt-web/tool-boundary";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
-import { CHATGPT_USER_TURN_SELECTOR, CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-session";
+import { CHATGPT_USER_TURN_SELECTOR, CHATGPT_ASSISTANT_TURN_SELECTOR } from "../src/chatgpt-ui/turns";
+import { CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-ui/composer";
 const options={userTurnSelector:CHATGPT_USER_TURN_SELECTOR,assistantTurnSelector:CHATGPT_ASSISTANT_TURN_SELECTOR,stopButtonSelector:CHATGPT_STOP_BUTTON_SELECTOR,attributeFilter:[]};
 const picker=readFileSync(new URL("./fixtures/chatgpt-model-picker-oct7.html",import.meta.url),"utf8");
 const ack="CODEX_MULTIPART_ACK ctx_offline 1/2 a1b2c3d4";

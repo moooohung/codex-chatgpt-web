@@ -16,7 +16,7 @@ const traceId = "account-context-helper";
 const config: ResolvedBrowserConfig = {
   appName: "offline", browserHost: "launcher", browserHostDescriptorPath: "/offline/launcher.json",
   storageStatePath: "/offline/unused.json", chromeExecutablePath: "/offline/unused-chrome",
-  headed: true, autoApproveToolCalls: false
+  headed: true, autoApproveToolCalls: false, useTemporaryChats: true
 };
 
 function preparation(planType: ChatGptAccountPreparation["planType"]): ChatGptAccountPreparation {

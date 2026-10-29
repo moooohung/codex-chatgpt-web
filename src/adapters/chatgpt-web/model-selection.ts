@@ -1,8 +1,15 @@
-import { activateChatGptEffortMenu, parseChatGptEffortSliderState, parseChatGptModelAnnouncement, readChatGptModelAnnouncements } from "../../chatgpt-session";
+import {
+  type ChatGptEffortActivation,
+  chatGptModelOption,
+  openChatGptModelRows,
+  parseChatGptEffortSliderState,
+  parseChatGptModelAnnouncement,
+  readChatGptModelAnnouncements,
+} from "../../chatgpt-ui/model-picker";
 import type { ChatGptWebAdapterEffort, ChatGptWebModelFamily } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
-type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
+type EffortMenu = ChatGptEffortActivation;
 
 /** User-authorized downgrade applies only after positive Plus account evidence. */
 export function resolveChatGptPlusFallback(family: ChatGptWebModelFamily | undefined, effort: ChatGptWebAdapterEffort, planType: string) {
@@ -65,13 +72,9 @@ export function chatGptModelSelectionStageError(error: unknown, stage: string): 
   );
 }
 
-function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
-  return menu.menu.getByRole("menuitemradio", {
-    name: family === "5.6" ? /^GPT[-\s]?5\.6(?:\s+Sol)?(?:\s*(?:\(Web\)|\(웹\)))?(?:\s+Pro)?$/i
-      // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
-      : /^(?:Latest|最新|최신|(?:GPT[-\s]?)?6(?:\s+Astra)?)(?:\s*(?:\(Web\)|\(웹\)))?(?:\s+Pro)?$/i,
-    exact: true,
-    includeHidden: true,
+function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily, effort?: ChatGptWebAdapterEffort) {
+  return chatGptModelOption(menu.menu, {
+    version: family, name: family === "6" && effort === "max" ? "astra" : "sol",
   });
 }
 
@@ -80,6 +83,7 @@ export async function selectChatGptModelFamily(
   menu: EffortMenu,
   family: ChatGptWebModelFamily,
   activate: () => Promise<EffortMenu>,
+  effort?: ChatGptWebAdapterEffort,
   settleMs = CHATGPT_MODEL_SELECTION_SETTLE_MS,
   checkUnavailable?: (menu: EffortMenu) => Promise<void>,
 ): Promise<EffortMenu> {
@@ -88,29 +92,11 @@ export async function selectChatGptModelFamily(
   const remaining = () => Math.max(0, deadline - Date.now());
   const probe = <T>(operation: () => Promise<T>) => modelProbe(operation, family, phase, remaining());
   try {
-    const option = familyOption(menu, family);
+    const option = await probe(() => familyOption(menu, family, effort));
     const count = await probe(() => option.count());
     if (count > 1) throw familyError(family, "ambiguous-family-rows");
     if (count === 1 && await probe(() => option.getAttribute("aria-checked")) === "true") return menu;
-    // The attached radio rows are inert while this composer-owned advanced view is collapsed.
-    const powerView = menu.menu.locator('[data-model-picker-view]');
-    const viewCount = await probe(() => powerView.count());
-    if (viewCount === 1) {
-      const view = await probe(() => powerView.getAttribute("data-model-picker-view"));
-      if (view === "simple") {
-        // The current picker hides its enclosing view, not this action. An absent
-        // aria-hidden attribute means visible; explicit false is not required.
-        const trigger = powerView.locator('[data-model-picker-view-toggle="true"]:not([aria-hidden="true"]):not([hidden] *):not([inert] *):not([aria-hidden="true"] *)').filter({ visible: true });
-        if (await probe(() => trigger.count()) !== 1) throw familyError(family, "family-view-toggle-missing-or-ambiguous");
-        await probe(() => trigger.click({ timeout: Math.max(1, remaining()) }));
-      } else if (view !== "advanced") throw familyError(family, "unknown-family-view");
-    } else {
-      const trigger = menu.menu.locator('[role="menuitem"][aria-expanded]:not([aria-hidden="true"]):not([hidden] *):not([inert] *):not([aria-hidden="true"] *)');
-      if (viewCount !== 0 || await probe(() => trigger.count()) !== 1) throw familyError(family, "family-view-toggle-missing-or-ambiguous");
-      if (await probe(() => trigger.getAttribute("aria-expanded")) === "false") {
-        await probe(() => trigger.click({ timeout: Math.max(1, remaining()) }));
-      }
-    }
+    await probe(() => openChatGptModelRows(menu.menu));
     phase = "family-click";
     await checkUnavailable?.(menu);
     await probe(() => option.waitFor({ state: "visible", timeout: Math.max(1, remaining()) }));
@@ -121,7 +107,7 @@ export async function selectChatGptModelFamily(
     phase = "family-readback";
     let selected = await probe(activate);
     do {
-      const current = familyOption(selected, family);
+      const current = await probe(() => familyOption(selected, family, effort));
       const count = await probe(() => current.count());
       if (count > 1) throw familyError(family, "ambiguous-family-rows");
       if (count === 1 && await probe(() => current.getAttribute("aria-checked")) === "true") return selected;
@@ -153,7 +139,8 @@ export function chatGptModelFamilyMatches(
   });
   return states.length > 0 && states.every(state => state.version === family
     && (!state.name || state.name === expectedName)
-    && state.mode.toLowerCase() === expectedMode);
+    && (state.mode.toLowerCase() === expectedMode
+      || family === "6" && effort === "max" && state.name === "astra" && /^max$/i.test(state.mode)));
 }
 
 /**
@@ -190,7 +177,7 @@ export async function assertChatGptModelFamily(
     settleMs > 0 ? Math.max(0, deadline - Date.now()) : CHATGPT_MODEL_SELECTION_SETTLE_MS);
   do {
     if (settleMs > 0 && Date.now() >= deadline) break;
-    const option = familyOption(menu, selectionFamily);
+    const option = await probe(() => familyOption(menu, selectionFamily, effort));
     const count = await probe(() => option.count());
     if (count > 1) throw verificationError(family, effort, "ambiguous-family-rows");
     const checked = count === 1 && await probe(() => option.getAttribute("aria-checked")) === "true";

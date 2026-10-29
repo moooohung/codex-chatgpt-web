@@ -22,6 +22,7 @@ const DEFAULT_STATE = Object.freeze({
   composerPredictionsEnabled: true,
   experimentalSkillAttachments: false,
   experimentalFreshConversationPerTurn: false,
+  useTemporaryChats: true,
   zeroRiskProEnabled: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
@@ -52,7 +53,7 @@ function nextSessionRefreshReminderAt(now = Date.now()) {
 
 function readState(filePath) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
     if (!parsed || parsed.version !== 1) return { ...DEFAULT_STATE };
     const state = { ...DEFAULT_STATE, ...parsed };
     if (state.effortCeilings !== undefined) state.effortCeilings = sanitizeEffortCeilings(state.effortCeilings);
@@ -79,6 +80,7 @@ function readState(filePath) {
       "composerPredictionsEnabled",
       "experimentalSkillAttachments",
       "experimentalFreshConversationPerTurn",
+      "useTemporaryChats",
       "zeroRiskProEnabled",
       "browserSmokePassed",
       "sidebarOpen",

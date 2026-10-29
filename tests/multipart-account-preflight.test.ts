@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
+import { CHATGPT_UI_VARIANT_SELECTORS, chatGptUiVariantCounts } from "../src/chatgpt-ui/observations";
 
 for (const family of ["5.6", "6"] as const)
 test(`multipart preflight checks requested ${family} Extra High before any staging upload and captures before lease release`, async () => {
@@ -14,7 +15,12 @@ test(`multipart preflight checks requested ${family} Extra High before any stagi
   const page = Object.assign(new EventEmitter(), {
     isClosed: () => closed,
     locator: () => ({ evaluateAll: async () => [] }),
-    evaluate: async () => { if (closed) throw new Error("page was closed"); return {}; },
+    evaluate: async (callback: unknown) => {
+      if (closed) throw new Error("page was closed");
+      return callback === chatGptUiVariantCounts
+        ? Object.fromEntries(Object.keys(CHATGPT_UI_VARIANT_SELECTORS).map(key => [key, { attached: 0, rendered: 0 }]))
+        : {};
+    },
   });
   const unavailable = new ChatGptWebAdapterError("Extra High is unavailable in the current browser account", {
     status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable", retryable: false,

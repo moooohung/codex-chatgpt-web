@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import vm from "node:vm";
 import { chromium } from "playwright-core";
-import { CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_USER_TURN_SELECTOR, CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-session";
+import { CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_USER_TURN_SELECTOR } from "../src/chatgpt-ui/turns";
+import { CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-ui/composer";
 const ts = require("typescript");
 const runtime = process.env.CHATGPT_STAGE_CALL_RUNTIME_ROOT;
 

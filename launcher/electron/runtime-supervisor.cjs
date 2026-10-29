@@ -364,6 +364,8 @@ class RuntimeSupervisor {
     this.stopping = false;
     this.startPromise = null;
     this.stopPromise = null;
+    this.stateWriteFailure = null;
+    this.stateWriteCleanup = null;
     this.restartHistory = { daemon: [], tunnel: [] };
     this.consecutiveRecoveryFailures = { daemon: 0, tunnel: 0 };
     this.recoveryDisabled = { daemon: false, tunnel: false };
@@ -475,6 +477,7 @@ class RuntimeSupervisor {
     } catch (error) {
       const message = `Could not persist launcher runtime ownership: ${errorMessage(error)}`;
       this.stopping = true;
+      this.stopTunnelMonitor();
       for (const name of ["daemon", "tunnel"]) {
         if (this.restartTimers[name]) {
           clearTimeout(this.restartTimers[name]);
@@ -483,6 +486,28 @@ class RuntimeSupervisor {
       }
       this.logger.error("runtime.state_write_failed", { status, message });
       this.publishOperation?.({ name: "runtime-supervisor", status: "failed", message });
+      if (!this.stateWriteFailure) {
+        this.stateWriteFailure = message;
+        // Wait for any lifecycle operation already in progress, then stop only
+        // the children we still own. Do not adopt processes from a stale file.
+        this.stateWriteCleanup = Promise.resolve().then(async () => {
+          if (this.startPromise) await this.startPromise.catch(() => {});
+          if (this.stopPromise) await this.stopPromise.catch(() => {});
+          await Promise.allSettled([...this.recoveryTasks]);
+          if (!this.daemon && !this.tunnel) return;
+          const config = this.readConfig();
+          if (!config) throw new Error("owned runtime cannot be stopped without its configuration");
+          await this.cleanupFailedStart(config);
+        }).catch((cleanupError) => {
+          this.stateWriteFailure = appendFailure(message, "owned runtime cleanup failed", cleanupError);
+          this.logger.error("runtime.state_write_cleanup_failed", { message: this.stateWriteFailure });
+          this.publishOperation?.({ name: "runtime-supervisor", status: "failed", message: this.stateWriteFailure });
+        }).finally(() => {
+          this.stopTunnelMonitor();
+          this.stopping = true;
+          this.stateWriteCleanup = null;
+        });
+      }
       return false;
     }
   }
@@ -517,6 +542,7 @@ class RuntimeSupervisor {
   }
 
   spawnChild(name, invocation, { compensating = false } = {}) {
+    if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
     if (this.stopping && !compensating) throw new Error("Runtime startup was stopped before verification completed");
     const child = spawn(invocation.executable, invocation.args, {
       cwd: invocation.cwd,
@@ -1012,6 +1038,7 @@ class RuntimeSupervisor {
   }
 
   async startTunnel(config, operationName = "runtime-start", { forceRestart = false, compensating = false } = {}) {
+    if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
     if (config.mode !== "full") return;
     this.assertTunnelClientReady(config);
     // Every acquisition binds diagnostics to this runtime, including adoption of an existing alias.
@@ -1137,6 +1164,7 @@ class RuntimeSupervisor {
 
   async startAccountTunnel(accountName, acc, { compensating = false } = {}) {
     try {
+      if (this.stateWriteFailure) return false;
       const config = this.readConfig();
       if (!config?.tunnel || config.mode !== "full" || !config.brokerSocketPath) return false;
       if (!acc.tunnelId || !acc.keyFile || !fs.existsSync(acc.keyFile)) return false;
@@ -1149,7 +1177,7 @@ class RuntimeSupervisor {
         config.brokerSocketPath,
       ]);
       const mcpCommand = managedTunnelMcpCommand(invocation);
-      if (this.stopping && !compensating) return false;
+      if (this.stateWriteFailure || (this.stopping && !compensating)) return false;
       const alias = this.accountPaths().tunnelAlias(accountName);
       const profileName = alias;
       const args = [
@@ -1196,6 +1224,7 @@ class RuntimeSupervisor {
       "--broker-socket",
       config.brokerSocketPath,
     ]);
+    if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
     if (this.stopping && !compensating) throw new Error("Tunnel startup was stopped before verification completed");
     return await this.runTunnelCommand(
       config,
@@ -1209,6 +1238,7 @@ class RuntimeSupervisor {
 
   startTunnelMonitor(config) {
     this.stopTunnelMonitor();
+    if (this.stateWriteFailure) return;
     this.accountTunnelMonitor.start();
     this.tunnelMonitorFailures = 0;
     this.tunnelMonitorObservationUnavailable = false;
@@ -1223,9 +1253,13 @@ class RuntimeSupervisor {
       });
       if (this.tunnelMonitorFailures < TUNNEL_MONITOR_FAILURE_THRESHOLD) return;
       this.lastChildFailure.tunnel = message;
+      const failedTunnel = this.tunnel;
       this.tunnel = null;
       this.stopTunnelMonitor();
-      if (!this.tryWriteState("degraded", message)) return;
+      if (!this.tryWriteState("degraded", message)) {
+        this.tunnel = failedTunnel;
+        return;
+      }
       this.publishOperation?.({ name: "runtime-recovery", status: "running", message });
       this.scheduleRecovery("tunnel");
     };
@@ -1286,6 +1320,7 @@ class RuntimeSupervisor {
   }
 
   async startDaemon(config, { compensating = false } = {}) {
+    if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
     if (this.daemon) {
       const child = this.daemon;
       if (this.shutdownIntents.has(child)) throw new Error("Responses proxy shutdown is still pending");
@@ -1324,7 +1359,14 @@ class RuntimeSupervisor {
 
   async startIfConfigured() {
     if (this.stopPromise) await this.stopPromise;
+    if (this.stateWriteCleanup) await this.stateWriteCleanup;
     if (this.startPromise) return this.startPromise;
+    if (this.stateWriteFailure) {
+      if (this.daemon || this.tunnel) throw new Error(this.stateWriteFailure);
+      // An explicit start can recover only after both cleanup and a fresh write succeed.
+      this.writeState("stopped");
+      this.stateWriteFailure = null;
+    }
     // Explicit startup/Repair grants a fresh recovery budget; background retries do not.
     this.consecutiveRecoveryFailures = { daemon: 0, tunnel: 0 };
     this.recoveryDisabled = { daemon: false, tunnel: false };
@@ -1424,7 +1466,9 @@ class RuntimeSupervisor {
     });
     try {
       await this.startTunnel(config, "runtime-start");
+      if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
       if (!tunnelOnly) await this.startDaemon(config);
+      if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
       this.restartHistory.daemon = [];
       this.restartHistory.tunnel = [];
       this.consecutiveRecoveryFailures = { daemon: 0, tunnel: 0 };
@@ -1444,7 +1488,7 @@ class RuntimeSupervisor {
       } catch (caught) {
         cleanupError = caught;
       } finally {
-        this.stopping = false;
+        this.stopping = Boolean(this.stateWriteFailure);
       }
       const primary = errorMessage(error);
       const message = cleanupError
@@ -1515,21 +1559,9 @@ class RuntimeSupervisor {
     if (config.mode === "full") {
       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, "runtime-recovery");
     }
+    if (this.stateWriteFailure) throw new Error(this.stateWriteFailure);
     if (!this.tryWriteState("ready")) {
-      let cleanupError;
-      try {
-        await this.cleanupFailedStart(config);
-      } catch (caught) {
-        cleanupError = caught;
-      }
-      const message = cleanupError
-        ? appendFailure(
-            "Recovered runtime could not persist launcher ownership",
-            "runtime recovery cleanup failed",
-            cleanupError,
-          )
-        : "Recovered runtime could not persist launcher ownership";
-      throw new Error(message);
+      throw new Error("Recovered runtime could not persist launcher ownership");
     }
     this.publishOperation?.({ name: "runtime-recovery", status: "completed", message: `${name} recovered` });
   }
@@ -1546,7 +1578,14 @@ class RuntimeSupervisor {
         } catch (error) {
           if (drained) {
             try {
-              await this.restoreDrainedDaemon(config);
+              if (this.stateWriteFailure) {
+                // Ownership cannot be persisted, so compensation may resume a
+                // drained child but must never launch a replacement. A pending
+                // shutdown cannot be revoked by /resume.
+                if (!this.shutdownIntents.has(child)) await this.control(config, "resume");
+              } else {
+                await this.restoreDrainedDaemon(config);
+              }
             } catch (resumeError) {
               throw new Error(appendFailure(errorMessage(error), "daemon resume compensation failed", resumeError));
             }
@@ -1554,6 +1593,9 @@ class RuntimeSupervisor {
           throw error;
         }
       } else {
+        if (this.stateWriteFailure) {
+          throw new Error("owned daemon did not provide matching health evidence; refusing an unsafe stop");
+        }
         await this.stopChild("daemon");
       }
     }
@@ -2126,6 +2168,8 @@ class RuntimeSupervisor {
 
   async stopForSetup() {
     if (this.stopPromise) return this.stopPromise;
+    if (this.stateWriteCleanup) await this.stateWriteCleanup;
+    if (this.stopPromise) return this.stopPromise;
     this.stopPromise = this.performStopForSetup();
     try {
       return await this.stopPromise;
@@ -2236,7 +2280,7 @@ class RuntimeSupervisor {
       this.tryWriteState(restoredReady ? "ready" : "failed", message);
       throw new Error(message);
     } finally {
-      this.stopping = false;
+      this.stopping = Boolean(this.stateWriteFailure);
     }
   }
 
@@ -2246,6 +2290,7 @@ class RuntimeSupervisor {
   }
 
   async forceStopOwnedRuntime(reason) {
+    if (this.stateWriteCleanup) await this.stateWriteCleanup;
     this.logger.warn("runtime.forced_shutdown_started", { message: errorMessage(reason) });
     this.stopping = true;
     this.stopTunnelMonitor();
@@ -2287,7 +2332,7 @@ class RuntimeSupervisor {
         failures,
       };
     } finally {
-      this.stopping = false;
+      this.stopping = Boolean(this.stateWriteFailure);
     }
   }
 

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { chromium } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
-import { activateChatGptEffortMenu } from "../src/chatgpt-session";
+import { activateChatGptEffortMenu } from "../src/chatgpt-ui/model-picker";
 import { selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
 
 const fixture=readFileSync(new URL("./fixtures/chatgpt-model-picker-oct7.html",import.meta.url),"utf8");

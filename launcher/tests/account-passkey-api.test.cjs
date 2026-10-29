@@ -38,6 +38,7 @@ test("preload routes account login through startup-gated IPC and Continue throug
   const result = { passkeyAccount: "beta", passkeyPhase: "waiting" };
   const accountApi = { resume() {}, passkeyLogin: name => { calls.push(["account", name]); return result; } };
   const context = vm.createContext({ runtimeStartup: startup, LAUNCHER_PROFILE: profile,
+    SessionReminderView: class {}, mainWindow: {}, loadRenderer() {},
     browserHost: {}, runtimeSupervisor: {}, logger: { warn() {} }, stateStore: {},
     runtimeHost: { continuePasskeyLogin: () => { calls.push(["continue"]); return true; } },
     createAccountApi: () => accountApi, ipcMain: { on() {} },

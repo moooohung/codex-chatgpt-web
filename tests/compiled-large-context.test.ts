@@ -9,7 +9,8 @@ import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-erro
 import { canonicalizeCompactionHandoff } from "../src/adapters/chatgpt-web/compaction-handoff";
 import { planLargeContextCompaction } from "../src/adapters/chatgpt-web/large-context-compaction";
 import { COMPACT_PROMPT } from "../src/responses/compaction";
-import { CHATGPT_USER_TURN_SELECTOR, CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-session";
+import { CHATGPT_USER_TURN_SELECTOR, CHATGPT_ASSISTANT_TURN_SELECTOR } from "../src/chatgpt-ui/turns";
+import { CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-ui/composer";
 import type { CodexParsedRequest } from "../src/types";
 const ts = require("typescript");
 const nodes = (node: any, predicate: (n: any) => boolean): any[] => {

@@ -22,6 +22,7 @@ function fixture(url = "https://chatgpt.com/c/saved") {
   });
   const tab = { id: "tab", surfaceId: "surface", traceId: "old_trace", helperPid: process.pid,
     conversationKey: "a".repeat(64), interactionMode: "automatic", status: "running",
+    useTemporaryChats: false,
     view: { webContents: contents } };
   const events = [];
   const host = Object.assign(Object.create(BrowserHost.prototype), {
@@ -208,6 +209,59 @@ test("idle release preserves temporary and unknown conversations in their existi
   }
 });
 
+test("temporary and unknown-mode /c/ documents stay in memory for retained continuation", async () => {
+  for (const mode of [true, undefined]) {
+    const f = fixture("https://chatgpt.com/c/temporary-without-query");
+    f.tab.useTemporaryChats = mode;
+    f.host.getUseTemporaryChats = () => false; // A later setting cannot make this document durable.
+    f.host.memoryPolicy.recycleAfterTurns = 1;
+    f.host.memoryPolicy.recycleRendererMb = 1;
+    const loads = [];
+    f.contents.loadURL = async next => { loads.push(next); };
+    assert.deepEqual(await f.host.endTurn("old_trace", process.pid, "completed", false, undefined, true),
+      { cancelledByUser: false });
+    assert.equal(f.tab.status, "ready");
+    assert.equal(f.tab.memorySuspended, undefined);
+    const lease = await f.host.beginTurn("continuation", false, process.pid, f.tab.conversationKey, undefined, true);
+    assert.equal(lease.reused, true);
+    assert.equal(lease.tabId, f.tab.id);
+    assert.deepEqual(lease.accountContext, FAKE_ACCOUNT_CONTEXT);
+    assert.equal(f.tab.view.webContents, f.contents);
+    assert.deepEqual(loads, [], "retained continuation must not reload a temporary conversation");
+  }
+});
+
+test("observed temporary navigation stays non-restorable after ChatGPT removes the query", async () => {
+  for (const event of ["did-start-navigation", "did-navigate-in-page"]) {
+    const f = fixture();
+    f.contents.setWindowOpenHandler = () => {};
+    f.host.bindTurnContents(f.tab);
+    const navigate = url => event === "did-start-navigation"
+      ? f.contents.emit(event, {}, url, false, true) : f.contents.emit(event, {}, url, true);
+    navigate("https://chatgpt.com/?temporary-chat=true");
+    await f.contents.loadURL("https://chatgpt.com/c/temporary-without-query");
+    navigate(f.url());
+    assert.equal(f.tab.useTemporaryChats, true, event);
+    assert.equal(await f.host.suspendRetainedTurnTab(f.tab), false, event);
+    assert.equal(f.url(), "https://chatgpt.com/c/temporary-without-query", event);
+  }
+});
+
+test("idle release rechecks chat durability after the asynchronous memory probe", async () => {
+  for (const change of ["temporary", "another conversation", "destroyed"]) {
+    const f = fixture();
+    f.contents.getProcessMemoryInfo = async () => {
+      if (change === "temporary") f.tab.useTemporaryChats = true;
+      if (change === "another conversation") await f.contents.loadURL("https://chatgpt.com/c/another");
+      if (change === "destroyed") f.contents.isDestroyed = () => true;
+      return { private: 600 * 1024 };
+    };
+    assert.equal(await f.host.suspendRetainedTurnTab(f.tab), false, change);
+    assert.notEqual(f.url(), IDLE_BROWSER_URL, change);
+    assert.equal(f.tab.memorySuspended, undefined, change);
+  }
+});
+
 test("a new turn waits for idle release and then restores the same conversation exactly once", async () => {
   const f = fixture();
   let release;
@@ -263,7 +317,14 @@ test("recycling a retained renderer keeps the replacement when the old page repo
   for (const signal of ["destroyed", "render-process-gone", "did-fail-load"]) {
     const f = fixture(IDLE_BROWSER_URL);
     Object.assign(f.tab, { status: "ready", memorySuspended: true, recycleOnResume: true,
-      retainedUrl: "https://chatgpt.com/c/saved" });
+      retainedUrl: "https://chatgpt.com/c/saved", accountName: "alpha", partition: "persist:test-alpha",
+      connectorIdentity: "Codex Native2", connectorBound: true });
+    f.host.resolveAccountForConversation = () => "alpha";
+    f.host.getUseTemporaryChats = () => true; // Existing saved documents keep their creation mode.
+    f.host.accountCapabilities = new Map([
+      ["alpha", { ...FAKE_ACCOUNT_CONTEXT, checkedAt: Date.now(), extraHighAvailable: false }],
+      ["beta", { accountKey: "b".repeat(64), planType: "pro", checkedAt: Date.now(), extraHighAvailable: true }],
+    ]);
     let oldDestroyed = false;
     f.contents.isDestroyed = () => oldDestroyed;
     f.contents.setWindowOpenHandler = () => {};
@@ -282,24 +343,40 @@ test("recycling a retained renderer keeps the replacement when the old page repo
       close() { throw new Error("the replacement renderer must stay open"); },
     });
     Object.assign(f.host, {
-      window: { contentView: { addChildView() {}, removeChildView() {} } },
+      window: { contentView: {
+        addChildView(view, index) {
+          assert.equal(view.webContents, replacement);
+          assert.equal(index, 0, "recycled browser stays below launcher notices");
+        },
+        removeChildView() {},
+      } },
       state: { zoomFactor: 1 }, bindShellZoomShortcuts() {},
     });
     f.host.logger.error = (...args) => f.events.push(args);
     // restoreRetainedTurnTab calls the prototype method directly (Electron's View is absent here).
     const createView = BrowserHost.prototype.createAutomaticTurnView;
-    BrowserHost.prototype.createAutomaticTurnView = () => ({ webContents: replacement });
+    BrowserHost.prototype.createAutomaticTurnView = partition => {
+      assert.equal(partition, "persist:test-alpha", "renderer recycling keeps its leased account partition");
+      return { webContents: replacement };
+    };
     let lease;
     try {
-      lease = await f.host.beginTurn("next_trace", false, process.pid, f.tab.conversationKey, undefined, true);
+      lease = await f.host.beginTurn("next_trace", false, process.pid, f.tab.conversationKey, "Codex Native2", true);
     } finally {
       BrowserHost.prototype.createAutomaticTurnView = createView;
     }
     assert.equal(lease.reused, true, signal);
+    assert.equal(lease.connectorBound, true, signal);
+    assert.deepEqual(lease.accountContext, { ...FAKE_ACCOUNT_CONTEXT, extraHighAvailable: false }, signal);
+    assert.equal(f.tab.accountName, "alpha", signal);
+    assert.equal(f.tab.connectorIdentity, "Codex Native2", signal);
     assert.equal(f.tab.view.webContents, replacement, signal);
     assert.equal(url, "https://chatgpt.com/c/saved", signal);
     assert.equal(f.host.turnTabs.get("tab"), f.tab, signal);
     assert.equal(f.tab.status, "running", signal);
+    f.contents.emit("did-start-navigation", {}, "https://chatgpt.com/?temporary-chat=true", false, true);
+    f.contents.emit("did-navigate-in-page", {}, "https://chatgpt.com/?temporary-chat=true", true);
+    assert.equal(f.tab.useTemporaryChats, false, "retired page events cannot change replacement durability");
     assert.ok(f.events.some(([event]) => event === "browser.tab_renderer_recycled"), signal);
     assert.ok(!f.events.some(([event]) => ["browser.tab_closed_externally", "browser.tab_renderer_gone",
       "browser.tab_navigation_failed"].includes(event)), signal);
@@ -330,6 +407,56 @@ function loadFailureFixture({ suspended }) {
   };
   return { ...f, created };
 }
+
+test("a lost temporary renderer never restores its /c/ URL and only an ordinary new turn gets a fresh tab", async () => {
+  for (const mode of [true, undefined]) {
+    for (const recycleOnResume of [false, true]) {
+      for (const required of [false, true]) {
+        const f = loadFailureFixture({ suspended: true });
+        Object.assign(f.tab, { useTemporaryChats: mode, recycleOnResume });
+        let loads = 0;
+        f.contents.loadURL = async () => { loads++; throw new Error("must never restore temporary /c/"); };
+        f.host.conversationLoadState = async () => { throw new Error("must not inspect the lost document"); };
+        const starting = f.host.beginTurn("next_trace", false, process.pid, f.tab.conversationKey, undefined, required);
+        if (required) {
+          await assert.rejects(starting, { code: "retained_conversation_unavailable" });
+          assert.equal(f.created.length, 0, "incremental continuation must fail without a fresh submission");
+        } else {
+          const lease = await starting;
+          assert.equal(lease.reused, false);
+          assert.equal(lease.tabId, "fresh");
+          assert.equal(f.created.length, 1, "full-context turn can use one fresh document");
+        }
+        assert.equal(loads, 0);
+        assert.equal(f.host.turnTabs.has("tab"), false);
+      }
+    }
+  }
+});
+
+test("saved-mode restore rejects foreign, temporary and malformed conversation URLs before navigation", async () => {
+  for (const url of ["https://example.com/c/saved", "https://chatgpt.com/c/saved?temporary-chat=true",
+    "https://chatgpt.com/", "https://chatgpt.com/c/", "https://chatgpt.com/c/id/extra", undefined]) {
+    const f = fixture(IDLE_BROWSER_URL);
+    Object.assign(f.tab, { memorySuspended: true, recycleOnResume: true, retainedUrl: url });
+    f.contents.loadURL = () => { throw new Error("must not navigate"); };
+    await assert.rejects(f.host.restoreRetainedTurnTab(f.tab), { code: "retained_conversation_unavailable" });
+    assert.equal(f.tab.view.webContents, f.contents, "invalid restore cannot allocate a replacement");
+    assert.equal(f.tab.memorySuspended, true);
+  }
+});
+
+test("losing a running temporary document never invokes the fresh-tab recovery path", async () => {
+  for (const required of [false, true]) {
+    const f = loadFailureFixture({ suspended: false });
+    Object.assign(f.tab, { status: "running", useTemporaryChats: true });
+    f.contents.isDestroyed = () => true;
+    await assert.rejects(f.host.beginTurn(f.tab.traceId, false, process.pid, f.tab.conversationKey, undefined, required),
+      { code: "account_context_lease_lost" });
+    assert.equal(f.created.length, 0, "an in-flight message may already have been accepted");
+    assert.ok(!f.events.some(([event]) => event === "browser.retained_conversation_replaced"));
+  }
+});
 
 test("an ordinary turn replaces a retained tab that shows ChatGPT's load-failure card with a new tab", async () => {
   for (const suspended of [true, false]) {

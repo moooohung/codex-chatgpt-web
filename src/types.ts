@@ -320,6 +320,7 @@ export interface CodexProviderConfig {
     experimentalStagedCompaction?: boolean;
     /** Re-read a previously verified selection on the same page; every Send still checks the picker. */
     experimentalReuseVerifiedEffort?: boolean;
-    /** Use ordinary ChatGPT history for task conversations. Default: Temporary Chat. */
+    /** Temporary Chat defaults on; an explicit false keeps saved conversations. */
+    useTemporaryChats?: boolean;
   };
 }

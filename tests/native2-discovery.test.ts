@@ -121,9 +121,10 @@ test("a PTY registry miss exposes the exact loader and cannot dispatch guessed J
       expect(JSON.stringify(response.content)).toContain("not available in this turn");
     }
     const inventory = await f.call("codex_tool_inventory", { turn_token: token, query: "exec", include_schema: true });
-    expect(inventory.structuredContent.tools.find((tool: { wire_name: string }) => tool.wire_name === "exec_command"))
+    const inventoryData = inventory.structuredContent as { tools: Array<{ wire_name: string; kind: string; parameters?: unknown }>; total: number };
+    expect(inventoryData.tools.find((tool: { wire_name: string }) => tool.wire_name === "exec_command"))
       .toMatchObject({ wire_name: "exec_command", kind: "function", parameters: commandTools[0]!.parameters });
-    expect(inventory.structuredContent.total).toBe(inventory.structuredContent.tools.length);
+    expect(inventoryData.total).toBe(inventoryData.tools.length);
     const pending = f.call("codex_tool_call", { turn_token: token, wire_name: "exec_command", arguments: { cmd: "fixture-only" } });
     const batch = await f.broker.nextToolBatch(token);
     expect(batch).toHaveLength(1);

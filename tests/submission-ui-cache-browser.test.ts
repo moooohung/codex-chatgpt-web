@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { chromium } from "playwright-core";
 import { chatGptSubmissionDomProjection } from "../src/adapters/chatgpt-web/submission-ui";
-import { CHATGPT_USER_TURN_SELECTOR, CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-session";
+import { CHATGPT_USER_TURN_SELECTOR, CHATGPT_ASSISTANT_TURN_SELECTOR } from "../src/chatgpt-ui/turns";
+import { CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-ui/composer";
 
 const options = { userTurnSelector: CHATGPT_USER_TURN_SELECTOR, assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
   stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR, attributeFilter: ["data-turn-key", "class", "aria-hidden"] };

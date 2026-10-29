@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { chromium } from "playwright-core";
 import { chatGptSubmissionDomProjection } from "../src/adapters/chatgpt-web/submission-ui";
-import { CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_USER_TURN_SELECTOR, CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-session";
+import { CHATGPT_ASSISTANT_TURN_SELECTOR, CHATGPT_USER_TURN_SELECTOR } from "../src/chatgpt-ui/turns";
+import { CHATGPT_STOP_BUTTON_SELECTOR } from "../src/chatgpt-ui/composer";
 import { writeFileSync } from "node:fs";
 
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("1.2M-character synthetic transcript retains all DOM text/identities and fully renders the current boundary", async () => {
