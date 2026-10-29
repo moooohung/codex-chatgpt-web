@@ -9,8 +9,9 @@ import { canonicalizeCompactionHandoff } from "../src/adapters/chatgpt-web/compa
 import type { CodexParsedRequest } from "../src/types";
 
 // These offline invariants compile and tokenize the full 870k-character fixture
-// repeatedly. Allow CPU contention from packaging; production budgets stay exact.
-const LARGE_FIXTURE_TEST_TIMEOUT_MS = 120_000;
+// repeatedly. Intel macOS release runners need more than two minutes under CPU
+// contention. This fixture-only deadline leaves production budgets unchanged.
+const LARGE_FIXTURE_TEST_TIMEOUT_MS = 300_000;
 
 function request(chars: number): CodexParsedRequest {
   const pattern = 'Evidence file:123 original error {"status":"failed"} preserve cause\n';

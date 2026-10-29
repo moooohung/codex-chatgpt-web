@@ -9,9 +9,9 @@ import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-erro
 import type { CodexParsedRequest } from "../src/types";
 import { compactionStageData } from "./fixtures/compaction-stage";
 
-// Full-size encoded histories require repeated synchronous tokenization. This
-// fixture deadline allows CPU contention and does not change provider deadlines.
-const LARGE_FIXTURE_TEST_TIMEOUT_MS = 120_000;
+// Full-history tokenization exceeds two minutes on Intel macOS release runners.
+// This fixture-only deadline leaves journal/transport limits unchanged.
+const LARGE_FIXTURE_TEST_TIMEOUT_MS = 300_000;
 
 function fixture(now = 1_800_000_000_000): CodexParsedRequest {
   return { modelId: "gpt-5.6-sol", stream: true, _compactionRequest: true, options: { reasoning: "xhigh" },
