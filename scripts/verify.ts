@@ -24,7 +24,8 @@ try {
   // Electron now downloads its executable on first use. Do this before timed tests.
   await run(["run", "launcher/node_modules/electron/install.js"]);
   await run(["run", "typecheck"]);
-  await run(["run", "test"]);
+  // Keep fixture globals and large prompt buffers isolated in release builds too.
+  await run(["test", "--isolate", "--parallel=2", "./tests"]);
   await run(["run", "launcher:typecheck"]);
   await run(["run", "launcher:test"]);
   await run(["run", "--cwd", "launcher", "build:renderer"]);
