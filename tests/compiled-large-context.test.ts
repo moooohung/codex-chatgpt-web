@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import vm from "node:vm";
+import { compiledSubmissionProjection } from "./compiled-projection";
 import { chromium } from "playwright-core";
 import { compileChatGptWebPrompt, createChatGptWebPromptPreparation } from "../src/adapters/chatgpt-web/prompt";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
@@ -105,9 +106,7 @@ test.skipIf(!candidate || !process.env.CHATGPT_DOM_TEST_BROWSER)("actual CLI/hel
   try {
     const page = await browser.newPage(); await page.route("**/*", route => { networkRequests++; return route.abort(); });
     for (const relative of ["app/cli.js", "app/browser-helper.cjs"]) {
-      const f = ts.createSourceFile(relative, readFileSync(join(candidate!, relative), "utf8"), ts.ScriptTarget.Latest, true);
-      const node = one(nodes(f, n => ts.isFunctionDeclaration(n) && n.name?.text === "__codexSubmissionUi20261007"), "projection");
-      const projection = vm.runInNewContext(node.getText(f) + ";__codexSubmissionUi20261007");
+      const projection = vm.runInNewContext(`(${compiledSubmissionProjection(candidate!, relative)})`);
       await page.setContent("<main></main>");
       await page.evaluate(() => { for (let i = 0; i < 12; i++) {
         const article = document.createElement("article"); article.setAttribute("data-turn-key", "offline_" + i);
