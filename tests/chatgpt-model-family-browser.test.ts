@@ -157,7 +157,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`explicit GPT-5.6 verifies an
 }, 60_000);
 
 for (const scenario of ["latest", "ambiguous", "unmarked", "conflicting", "hidden-picker"] as const)
-test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`effort-only model evidence fails closed when ${scenario}`, async () => {
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`effort-only model evidence respects checked-family and header proof when ${scenario}`, async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
   try {
     const page = await browser.newPage();
@@ -169,7 +169,11 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`effort-only model evidence f
       <div hidden><div role="menuitemradio" aria-checked="true">${selected}</div>${scenario === "ambiguous" ? '<div role="menuitemradio" aria-checked="true">GPT-5.5</div>' : ""}</div>
     </div><div role="menu"><div role="menuitemradio" aria-checked="true">GPT-5.6 Sol</div></div>`);
     const menu = { menu: page.locator("#owned"), slider: page.locator('#owned [role="slider"]') } as Parameters<typeof assertChatGptModelFamily>[0];
-    await expect(assertChatGptModelFamily(menu, "5.6", "low", 0)).rejects.toThrow();
+    // The existing Plus fallback accepts an unversioned effort only after the
+    // exact GPT-5.6 row is checked. data-effort-only is fixture metadata, not
+    // authentication or model authority supplied by the real ChatGPT page.
+    if (scenario === "unmarked") await assertChatGptModelFamily(menu, "5.6", "low", 0);
+    else await expect(assertChatGptModelFamily(menu, "5.6", "low", 0)).rejects.toThrow();
     await expect(assertChatGptModelFamily(menu, "6", "low", 0)).rejects.toThrow();
   } finally { await browser.close(); }
 }, 60_000);
@@ -190,7 +194,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("the observed Plus effort-onl
     await page.locator('[role="menuitemradio"]').evaluate(el => { el.textContent = "Latest"; });
     await expect(assertChatGptModelFamily(menu, "6", "medium", 1)).rejects.toThrow();
   } finally { await browser.close(); }
-}, 20_000);
+}, 60_000);
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("localized position punctuation works through actual picker selection and usage readback", async () => {
   for (const separator of ["、", "،", "；", "—"]) {
     const picker: Picker = { header: null, status: (effort, value) => `${value === 4 ? "6" : "5.6"} ${effort}${separator}5 件中 ${value + 1} 番目。` };

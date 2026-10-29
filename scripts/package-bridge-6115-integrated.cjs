@@ -22,6 +22,10 @@ if (['package','seal'].includes(process.argv[2])) {
   if(fs.existsSync(planPath)) throw Error('Preserve existing sealed package');
   const staging = path.join(workspace, 'output/6115-integrated-mixdog-package');
   if(!fs.existsSync(path.join(staging, 'win-unpacked/resources/runtime/manifest.json'))) throw Error('Complete package is required');
+  const electronVersion = cp.execFileSync(path.join(staging, 'win-unpacked/Codex Web GPT.exe'),
+    ['-p', 'process.versions.electron'], { encoding:'utf8', timeout:10000,
+      env:{...process.env,ELECTRON_RUN_AS_NODE:'1'} }).trim();
+  if(electronVersion !== '42.11.16') throw Error('Candidate does not use the official Electron compatibility pin');
   fs.mkdirSync(output, {recursive:true});
   if(process.argv[2] === 'package') fs.cpSync(staging, path.join(output, 'package'), {recursive:true, errorOnExist:true, force:false});
   const unpacked = path.join(output, 'package/win-unpacked');
