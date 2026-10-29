@@ -1,6 +1,25 @@
 import { expect, test } from "bun:test";
 import { assertChatGptModelFamily, chatGptEffortOnlyEvidenceMatches, chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
 import { chatGptUsageModelFromAnnouncements } from "../src/adapters/chatgpt-web/limits";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
+
+test("disabled model usage limit is checked after opening the family view, before a family click", async () => {
+  const calls: string[] = [];
+  const limit = new ChatGptWebAdapterError("Pro usage limit reached", {
+    status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false,
+  });
+  const menu = { menu: {
+    getByRole: () => ({ count: async () => 1, getAttribute: async () => "false",
+      click: async () => { throw new Error("must not click"); } }),
+    locator: () => ({ count: async () => 1, getAttribute: async () => "simple",
+      locator: () => ({ filter() { return this; }, count: async () => 1,
+        click: async () => { calls.push("advanced"); } }) }),
+  } } as unknown as Parameters<typeof selectChatGptModelFamily>[0];
+  await expect(selectChatGptModelFamily(menu, "6", async () => menu, 1_000, async () => {
+    calls.push("limit"); throw limit;
+  })).rejects.toBe(limit);
+  expect(calls).toEqual(["advanced", "limit"]);
+});
 
 test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
   for (const [label, accepted] of [

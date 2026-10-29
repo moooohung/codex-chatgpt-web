@@ -120,6 +120,7 @@ export function classifyError(status: number, type: string, message: string): Co
     status === 429 ||
     isChatGptRateLimitNoticeMessage(message) ||
     text.includes("rate limit") ||
+    text.includes("usage limit reached") ||
     text.includes("rate limited") ||
     text.includes("too many requests") ||
     text.includes("resource_exhausted") ||
@@ -241,15 +242,23 @@ function retryClockAt(message: string, now: number): number | undefined {
   return undefined;
 }
 
+/** Date-only picker notices use local midnight, just like clock-only notices use local time. */
+function retryDateAt(message: string): number | undefined {
+  const date = /(?:try\s+again|retry)\s+after\s+((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4})\b/i.exec(message)?.[1];
+  if (!date) return undefined;
+  const at = Date.parse(date);
+  return Number.isFinite(at) ? at : undefined;
+}
+
 /** Best-effort explicit delay; unrelated text and notices without a valid time remain undefined. */
 export function parseRetryAfterFromMessage(message: string, now: number = Date.now()): number | undefined {
-  const retryAt = retryClockAt(message, now);
+  const retryAt = retryDateAt(message) ?? retryClockAt(message, now);
   return retryAt === undefined ? retryDurationSeconds(message) : Math.max(0, Math.ceil((retryAt - now) / 1_000));
 }
 
 /** Absolute local reset time. Call after classification; only missing/invalid times use 20 minutes. */
 export function parseRetryAtFromMessage(message: string, now: number = Date.now()): number {
-  return retryClockAt(message, now) ?? now + (retryDurationSeconds(message) ?? 20 * 60) * 1_000;
+  return retryDateAt(message) ?? retryClockAt(message, now) ?? now + (retryDurationSeconds(message) ?? 20 * 60) * 1_000;
 }
 
 /** Infer HTTP status from adapter terminal error text (provider-agnostic keyword matching). */
@@ -262,6 +271,7 @@ export function inferHttpStatusFromAdapterMessage(message: string): number {
     lower.includes("resource exhausted") ||
     isChatGptRateLimitNoticeMessage(message) ||
     lower.includes("rate limit") ||
+    lower.includes("usage limit reached") ||
     lower.includes("too many requests") ||
     lower.includes("throttling")
   ) return 429;

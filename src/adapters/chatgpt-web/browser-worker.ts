@@ -322,6 +322,18 @@ export async function chatGptUnavailableProDetail(menu: Locator): Promise<string
 
 const CHATGPT_CONNECTOR_CLEANUP_TIMEOUT_MS = 5_000;
 
+export async function throwIfChatGptProUsageLimit(menu: Locator, family?: string): Promise<void> {
+  const detail = await chatGptUnavailableProDetail(menu);
+  // A disabled option alone can mean an upgrade requirement, not an exhausted quota.
+  if (!detail || !/\blimit reached\b/i.test(detail)) return;
+  const retryAt = parseRetryAtFromMessage(detail);
+  throw new ChatGptWebAdapterError(
+    `ChatGPT ${family ? `model ${family} ` : ""}Pro usage limit reached. ${detail} This part was not sent.`,
+    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false,
+      retryAt, retryAfterSeconds: Math.max(1, Math.ceil((retryAt - Date.now()) / 1_000)) },
+  );
+}
+
 class ChatGptConnectorDeadlineError extends Error {
   constructor() {
     super("ChatGPT connector cleanup exceeded its readiness deadline");
@@ -2470,10 +2482,15 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.("effort-control-ready");
     await throwIfChatGptRateLimitDialog(page);
     let activation = await activateChatGptEffortMenu(page, currentEffort);
+    const checkUsageLimit = async (menu: typeof activation) => {
+      if (requestedMode.uiEffortIndex === 4) await throwIfChatGptProUsageLimit(menu.menu, modelFamily);
+    };
+    await checkUsageLimit(activation);
     if (modelFamily) {
       try {
         activation = await selectChatGptModelFamily(
           activation, chatGptSelectionFamily(modelFamily, mode.effort), () => activateChatGptEffortMenu(page, currentEffort),
+          CHATGPT_MODEL_SELECTION_SETTLE_MS, checkUsageLimit,
         );
       } catch (error) {
         // Capture the owned picker before outer cleanup closes it; preserve the requested family.
@@ -2485,6 +2502,7 @@ export class ChatGptBrowserWorker {
       await captureDiagnostic?.("effort-menu-pointerdown-fallback");
     }
     await captureDiagnostic?.("effort-menu-open-requested");
+    await checkUsageLimit(activation);
     const effortSlider = activation.slider;
     const sliderContainer = activation.sliderContainer;
     const waitAbort = new AbortController();
@@ -2515,6 +2533,9 @@ export class ChatGptBrowserWorker {
     const readAvailableEffort = async (container: Locator, menu: Locator, choose = false) => {
       const state = await readChatGptEffortSnapshot(container)
         .catch(error => { throw chatGptModelControlUnavailableAdapterError(String(error), undefined, true); });
+      if (requestedMode.uiEffortIndex === 4 && !state.available[4]) {
+        await throwIfChatGptProUsageLimit(menu, modelFamily);
+      }
       if (choose) {
         mode = clampChatGptEffort(requestedMode, state.available);
         uiEffortIndex = mode.uiEffortIndex!;
@@ -2696,6 +2717,9 @@ export class ChatGptBrowserWorker {
       try {
         state = await readChatGptEffortSnapshot(menu.sliderContainer);
         const requested = mode.requestedMode ?? mode;
+        if (requested.uiEffortIndex === 4 && !state.available[4]) {
+          await throwIfChatGptProUsageLimit(menu.menu, mode.modelFamily);
+        }
         const actual = clampChatGptEffort(requested, state.available);
         if (actual.uiEffortIndex !== mode.uiEffortIndex) {
           // Close the owned menu before reselecting. Mutate the caller's mode so

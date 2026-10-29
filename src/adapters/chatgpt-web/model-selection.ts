@@ -81,6 +81,7 @@ export async function selectChatGptModelFamily(
   family: ChatGptWebModelFamily,
   activate: () => Promise<EffortMenu>,
   settleMs = CHATGPT_MODEL_SELECTION_SETTLE_MS,
+  checkUnavailable?: (menu: EffortMenu) => Promise<void>,
 ): Promise<EffortMenu> {
   let phase = "family-view";
   const deadline = Date.now() + settleMs;
@@ -111,6 +112,7 @@ export async function selectChatGptModelFamily(
       }
     }
     phase = "family-click";
+    await checkUnavailable?.(menu);
     await probe(() => option.waitFor({ state: "visible", timeout: Math.max(1, remaining()) }));
     await probe(() => option.click({ timeout: Math.max(1, remaining()) }));
     // Choosing a family returns the open picker to its slider. Keep that surface:

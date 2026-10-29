@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptUnavailableProDetail, throwIfChatGptProUsageLimit } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -28,7 +28,7 @@ test("unavailable Pro detail reads only its linked tooltip in any language", asy
     "한도에 도달했습니다. 내일 다시 시도하세요.",
     "Лимит достигнут. Повторите завтра.",
   ];
-  const observe = async (detail: string, kind = "owned") => {
+  const observe = async (detail: string, kind = "owned", classify = false) => {
     const window = createWindow('<div id="other" role="tooltip">Unrelated old limit</div><div id="menu"><div role="menuitemradio" aria-disabled="true">Pro</div></div>');
     const menu = window.document.getElementById("menu");
     const row = menu.firstElementChild;
@@ -53,13 +53,23 @@ test("unavailable Pro detail reads only its linked tooltip in any language", asy
       hover: async () => { if (kind !== "unlinked") row.setAttribute("aria-describedby", "owned"); },
       evaluate: async (callback: Function) => runInContext(`(${callback.toString()})`, context)(row),
     };
-    return chatGptUnavailableProDetail({ getByRole: () => locator } as never);
+    const picker = { getByRole: () => locator } as never;
+    return classify ? throwIfChatGptProUsageLimit(picker, "6") : chatGptUnavailableProDetail(picker);
   };
   for (const detail of details) expect(await observe(detail)).toBe(detail);
   for (const kind of ["quote", "hidden", "enabled", "ambiguous", "unlinked"]) {
     expect(await observe(details[0]!, kind)).toBeUndefined();
   }
   expect(await observe("x".repeat(513))).toBeUndefined();
+  await expect(observe("Limit reached. Try again after Nov 3, 2026.", "owned", true)).rejects.toMatchObject({
+    status: 429, code: "rate_limit_exceeded", errorType: "rate_limit_error", retryable: false,
+    retryAt: new Date(2026, 10, 3).getTime(),
+    message: "ChatGPT model 6 Pro usage limit reached. Limit reached. Try again after Nov 3, 2026. This part was not sent.",
+  });
+  for (const kind of ["hidden", "enabled", "ambiguous", "unlinked"]) {
+    expect(await observe("Limit reached. Try again after Nov 3, 2026.", kind, true)).toBeUndefined();
+  }
+  expect(await observe("Upgrade to Pro", "owned", true)).toBeUndefined();
 });
 
 test("conversation turn identity survives ChatGPT DOM virtualization", () => {

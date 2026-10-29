@@ -11,7 +11,7 @@ test("external blocking waits return before the MCP deadline", () => {
   expect(boundedNativePollArguments("shell", { command: "x" })).toEqual({ command: "x" });
 });
 import { defaultConfig } from "../src/config";
-import { chatGptToolTimeoutError } from "../src/adapters/chatgpt-web/adapter-error";
+import { chatGptToolTimeoutError, ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { startServer } from "../src/server";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -178,6 +178,13 @@ test("HTTP admission routes authenticated external requests through the native a
   const server = startServer({ ...defaultConfig("browser-only"), port: 0 }, {
     adapterFactory: () => ({ name: "native-fixture", async runTurn(parsed, _incoming, emit) {
       seen.push(parsed._rawBody);
+      if ((parsed._rawBody as any).prompt_cache_key?.startsWith("sess-pro-limit:")) {
+        throw new ChatGptWebAdapterError(
+          "ChatGPT model 6 Pro usage limit reached. Limit reached. Try again after Nov 3, 2026. This part was not sent.",
+          { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false,
+            retryAt: new Date(2026, 10, 3).getTime() },
+        );
+      }
       if ((parsed._rawBody as any).prompt_cache_key?.startsWith("sess-retired:") && !retiredOnce) {
         retiredOnce = true;
         throw chatGptToolTimeoutError("grep", 90_000);
@@ -221,6 +228,17 @@ test("HTTP admission routes authenticated external requests through the native a
     expect(seen.length).toBe(5);
     const turnIds = seen.slice(3).map(body => JSON.parse(body.client_metadata["x-codex-turn-metadata"]).turn_id);
     expect(turnIds[1]).not.toBe(turnIds[0]);
+    for (const stream of [true, false]) {
+      const before = seen.length;
+      const limited = await fetch(`${base}/v1/responses`, { method: "POST", headers: { authorization: `Bearer ${secret}` },
+        body: JSON.stringify({ model: "chatgpt-web/gpt-5.6-sol", prompt_cache_key: "sess-pro-limit", stream,
+          input: [system, user("go")] }) });
+      const text = await limited.text();
+      expect(text).toContain("ChatGPT model 6 Pro usage limit reached. Limit reached. Try again after Nov 3, 2026.");
+      expect(text).toContain("rate_limit_exceeded");
+      expect(text).not.toContain("The provider rejected this request.");
+      expect(seen.length).toBe(before + 1);
+    }
     const catalog = await fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${secret}` } });
     expect((await catalog.json() as any).data[0].id).toBe("chatgpt-web/gpt-5.6-sol");
   } finally {

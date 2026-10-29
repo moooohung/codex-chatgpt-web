@@ -73,3 +73,40 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("real picker clamps, restores
     expect(await page.locator('[contenteditable]').innerText()).toBe("Draft");
   } finally { await browser.close(); }
 }, 60_000);
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("disabled Pro tooltip reports quota before family selection or any submission", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<form><div id="prompt-textarea" contenteditable="true">Draft</div>
+      <button type="button" data-tone="neutral" aria-haspopup="menu" aria-controls="picker" aria-expanded="true">6 Medium</button></form>
+      <div id="picker" role="menu">
+      <div role="menuitemradio" aria-disabled="true" id="pro">Pro</div>
+      <span id="status">6 Medium, 2 of 4.</span><div role="menuitem" aria-describedby="status">
+      <div data-model-picker-power-slider style="height:30px;width:250px"><span data-orientation="horizontal" aria-disabled="false">
+      <span data-selected="true"></span><span data-selected="true"></span><span data-selected="false"></span><span data-selected="false"></span>
+      <span role="slider" aria-hidden="true" aria-valuemin="0" aria-valuemax="3" aria-valuenow="1"></span>
+      </span></div></div></div><div role="tooltip" id="limit" hidden>Limit reached. Try again after Nov 3, 2026.</div>
+      <script>
+      window.sends=0;document.querySelector('form').onsubmit=e=>{e.preventDefault();window.sends++};
+      document.querySelector('button').onclick=()=>{document.querySelector('#picker').hidden=false;
+        document.querySelector('button').setAttribute('aria-expanded','true')};
+      document.querySelector('#pro').onmouseenter=()=>{document.querySelector('#limit').hidden=false;
+        document.querySelector('#pro').setAttribute('aria-describedby','limit')};
+      </script>`);
+    let failure: unknown;
+    const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+    try {
+      await worker.selectModelAndEffortWithRecovery(page, "gpt-5.6-sol", "max",
+        { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+        undefined, false, "6");
+    } catch (error) { failure = error; }
+    expect(failure).toMatchObject({
+      status: 429, code: "rate_limit_exceeded", retryable: false,
+      retryAt: new Date(2026, 10, 3).getTime(),
+      message: expect.stringContaining("Try again after Nov 3, 2026."),
+    });
+    expect(await page.locator("#prompt-textarea").innerText()).toBe("Draft");
+    expect(await page.evaluate(() => (window as any).sends)).toBe(0);
+  } finally { await browser.close(); }
+}, 30_000);
