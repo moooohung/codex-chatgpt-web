@@ -173,8 +173,17 @@ export async function assertChatGptModelFamily(
   const deadline = Date.now() + settleMs;
   const selectionFamily = chatGptSelectionFamily(family, effort);
   let reason = "family-not-checked";
+  let observed = false;
   const probe = <T>(operation: () => Promise<T>) => modelProbe(operation, family, "model-effort-readback",
-    settleMs > 0 ? Math.max(0, deadline - Date.now()) : CHATGPT_MODEL_SELECTION_SETTLE_MS);
+    settleMs > 0 ? Math.max(0, deadline - Date.now()) : CHATGPT_MODEL_SELECTION_SETTLE_MS)
+    .catch((error: unknown) => {
+      // The settle deadline can expire inside a later readback. A completed readback already
+      // proved the mismatch, so report it instead of a retryable slow-control timeout.
+      if (observed && error instanceof ChatGptWebAdapterError && error.code === "chatgpt_model_selection_timeout") {
+        throw verificationError(family, effort, reason);
+      }
+      throw error;
+    });
   do {
     if (settleMs > 0 && Date.now() >= deadline) break;
     const option = await probe(() => familyOption(menu, selectionFamily, effort));
@@ -190,6 +199,7 @@ export async function assertChatGptModelFamily(
       || chatGptEffortOnlyEvidenceMatches(descriptions, family, effort))) return;
     reason = !checked ? "family-not-checked" : !state || state.value !== state.min + effortIndex
       ? "effort-position-mismatch" : "model-evidence-mismatch";
+    observed = true;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   } while (true);

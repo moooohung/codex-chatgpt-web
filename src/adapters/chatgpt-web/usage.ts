@@ -221,7 +221,9 @@ export function estimateChatGptWebUsage(
     appName,
     ...(experimentalBiggerContext ? { captureLunaCheckpoint: false } : {}),
     experimentalSkillAttachments,
-    preserveCompactionHistory: experimentalBiggerContext && minimalTransport,
+    // A finished Bigger Context compaction carried its whole history (staged when the direct
+    // transport was oversized). Count that history; transport trimming would reject it here.
+    preserveCompactionHistory: experimentalBiggerContext && (minimalTransport || Boolean(parsed._compactionRequest)),
     experimentalMultipartParts: experimentalBiggerContext
       ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments, appName, preparation, minimalTransport)
       : undefined,

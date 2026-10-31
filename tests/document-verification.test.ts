@@ -31,7 +31,8 @@ for (const authenticated of [true, false]) {
           body: '<!doctype html><form><div id="prompt-textarea" contenteditable="true" style="min-height:40px"></div></form>',
         });
       });
-      const worker = Object.create(ChatGptBrowserWorker.prototype) as {
+      // This fork's worker always carries its config (temporary-chat selection).
+      const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: {} }) as {
         prepareChatSurface(page: Page): Promise<Locator>;
       };
       if (authenticated) {
@@ -61,12 +62,12 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("cancelling pending document 
         body: "<!doctype html><title>Verification pending fixture</title>" });
     });
     const controller = new AbortController();
-    const worker = Object.create(ChatGptBrowserWorker.prototype) as {
-      prepareChatSurface(page: Page, capture: (checkpoint: string) => Promise<void>, saved: boolean, signal: AbortSignal): Promise<Locator>;
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: {} }) as {
+      prepareChatSurface(page: Page, capture: (checkpoint: string) => Promise<void>, signal: AbortSignal): Promise<Locator>;
     };
     await expect(worker.prepareChatSurface(page, async checkpoint => {
       if (checkpoint === "security-check-pending") setTimeout(() => controller.abort(), 50);
-    }, false, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    }, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(submissions).toBe(0);
     expect(page.isClosed()).toBeFalse();
   } finally {

@@ -133,7 +133,7 @@ test("waitForMultipartAcknowledgement accepts relaxed acknowledgements and marks
   }
 
   expect(capturedError).toBeInstanceOf(ChatGptWebAdapterError);
-  expect(capturedError.code).toBe("multipart_protocol_violation");
+  expect(capturedError.code).toBe("multipart_acknowledgement_mismatch");
   expect(capturedError.retryable).toBeTrue();
-  expect(capturedError.message).toContain("ChatGPT did not confirm the Bigger Context handoff");
+  expect(capturedError.message).toContain("ChatGPT did not confirm a Bigger Context part");
 });
